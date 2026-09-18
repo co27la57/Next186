@@ -1,5 +1,13 @@
 //////////////////////////////////////////////////////////////////////////////////
-// Next186 cache_controller.v - 原版恢复 + 4-way begin 代码冗余
+// Next186 cache_controller.v
+// 本文件已回退到原作者版本（neptuno-fpga/Next186_SoC，Nicolae Dumitrache）。
+// 仅保留两处必要改动，其余（cache_line_start / s_lowaddr5=lowaddr[5] / 6-bit lowaddr /
+// flush 解耦 / 单遍扫描等）全部撤销，恢复原作者已验证可工作的"整行完成"握手：
+//   - lowaddr 5-bit 自动回绕 0..31
+//   - s_lowaddr5 = lowaddr[4]（电平：16..31 高，回绕到 0 变低），STATE 在下降沿判整行完成
+// 保留改动：
+//   1) seg_map map[11] = 6  —— 文本 VRAM 窗 0x08068000，与 VGA(scraddr=0x6000)/PS 1:1 对齐
+//   2) 保留 ILA 探针（mark_debug：lowaddr / s_lowaddr5 / dbg_ctl_* / isvwr），原版无这些探针
 //////////////////////////////////////////////////////////////////////////////////
 
 `timescale 1ns / 1ps
@@ -15,17 +23,16 @@ module cache_controller(
 	 input clk,	
 	 input mreq,
 	 input [3:0]wmask,
-	 output reg ce = 1'b1,
+	 output reg ce = 1'b1,	// clock enable for CPU
 	 input [15:0]ddr_din,
 	 output reg[15:0]ddr_dout,
 	 input ddr_clk,
-	 input cache_write_data,
-	 input cache_read_data,
+	 input cache_write_data, // 1 when data must be written to cache, on posedge ddr_clk
+	 input cache_read_data, // 1 when data must be read from cache, on posedge ddr_clk
 	 output reg ddr_rd = 0,
 	 output reg ddr_wr = 0,
 	 output reg [`ADDR-`LINE-1:0]hiaddr,
-	 input flush,
-	 input cache_line_start   // ★ Task #8：ddr_186 在每次 cache 行事务(读填充/写回)确认时给的单周期脉冲，用于把 lowaddr 强制归零
+	 input flush
     );
 	
 	initial ce = 1'b1;
@@ -47,32 +54,25 @@ module cache_controller(
 	wire [(1<<`WAYS)-1:0]free;
 	
 	reg [(1<<`WAYS)-1:0]cache_dirty[0:(1<<`SETS)-1] = 
-		'{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+		'{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 	reg [`WAYS-1:0]cache_lru[0:(1<<`WAYS)-1][0:(1<<`SETS)-1] =
 		'{'{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 		  '{1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
 		  '{2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2},
 		  '{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3}};
-	
-	// ============================================================
-	// ★ cache_addr：way0 index0-15=0 / 16-31=511
-	//               way1/2/3 index0-15=way号 / 16-31=511
-	// ============================================================
 	reg [`ADDR-`SETS-`LINE-1:0]cache_addr[0:(1<<`WAYS)-1][0:(1<<`SETS)-1]=
 		'{'{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511},
-		  '{1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511},
-		  '{2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511},
-		  '{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511}};
+		  '{1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+		  '{2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+		  '{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2}};
 
 	reg [2:0]STATE = 0;
-	(* mark_debug = "true" *) reg [`LINE-1:0]lowaddr = 0;   // 6位：64B行=32半字，需计数到 32
+	(* mark_debug = "true" *) reg [`LINE-2:0]lowaddr = 0; //cache mem address
 	(* mark_debug = "true" *) reg s_lowaddr5 = 0;
-	// 跨时钟域同步：ddr_clk 的整行完成标志(lowaddr[LINE-1]) → clk 域，避免 1 拍脉冲被漏采
-	reg s_lowaddr5_meta = 0, s_lowaddr5_sync = 0;
 	wire [31:0]cache_QA;
 	wire [`WAYS-1:0]lru[(1<<`WAYS)-1:0];
-	
-	// ILA 探针寄存器
+
+	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
 	(* mark_debug = "true" *) reg        dbg_ctl_mreq_r;
 	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_wmask_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_mmreq_r;
@@ -80,9 +80,9 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_ce_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_isvmem_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;   // flush 扫描进行中(r_flush)
-	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;   // cache→DDR 写回脉冲(应产生 AXI awvalid/wvalid)
-	
+	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;
+	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;
+
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
 	wire is_video_wr  = is_video_mem & (|mwmask);
@@ -105,33 +105,26 @@ module cache_controller(
 	wire [`WAYS-1:0]csblk = lru[0] | lru[1] | lru[2] | lru[3];
 
 	always @(posedge ddr_clk) begin
-		// ★ Task #8 修复：每个 cache 行事务开始(cache_line_start 脉冲)强制 lowaddr 归零，
-		//   避免上一行残留的非 0 行内偏移(如停在第 16 半字)污染下一行，造成 0x20 半行错位。
-		if(cache_line_start) lowaddr <= {`LINE{1'b0}};
-		else if(cache_write_data || cache_read_data) begin
-			// 64B 整行 = 32 半字；计满(lowaddr[5]置位)后归零，保证每行从 0 开始、行行衔接正确
-			if(lowaddr[`LINE-1]) lowaddr <= {`LINE-1{1'b0}};
-			else                lowaddr <= lowaddr + 1'b1;
-		end
+		if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
 		ddr_dout <= lowaddr[0] ? cache_QA[15:0] : cache_QA[31:16];
 	end
 		
 	cache cache_mem
 	(
-		.clock_a(ddr_clk),
-		.enable_a(cache_write_data | cache_read_data),
+		.clock_a(ddr_clk), // input clka
+		.enable_a(cache_write_data | cache_read_data), // input ena
 	  	.byteena_a({lowaddr[0], lowaddr[0], ~lowaddr[0], ~lowaddr[0]}),
-		.wren_a(cache_write_data),
-		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], lowaddr[`LINE-2:1]}),
-		.data_a({ddr_din, ddr_din}),
-		.q_a(cache_QA),
-		.clock_b(clk),
-		.enable_b(mmreq && hit && st0),
+		.wren_a(cache_write_data), // input [0 : 0] wea
+		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], lowaddr[`LINE-2:1]}), // input [10 : 0] addra
+		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
+		.q_a(cache_QA), // output [31 : 0] douta
+		.clock_b(clk), // input clkb
+		.enable_b(mmreq && hit && st0), // input enb
 		.wren_b(|mwmask),
-		.byteena_b(mwmask),
-		.address_b({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], maddr[`LINE-1:2]}),
-		.data_b(mdin),
-		.q_b(dout)
+		.byteena_b(mwmask), // input [3 : 0] web
+		.address_b({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], maddr[`LINE-1:2]}), // input [10 : 0] addrb
+		.data_b(mdin), // input [31 : 0] dinb
+		.q_b(dout) // output [31 : 0] doutb
 	);
 
 	generate
@@ -145,14 +138,9 @@ module cache_controller(
 		end
 	endgenerate
 
-	// 跨时钟域：将 ddr_clk 域的整行完成标志(lowaddr[LINE-1]) 同步到 clk 域（2 级打拍，避免 1 拍脉冲漏采）
+		
 	always @(posedge clk) begin
-		s_lowaddr5_meta <= lowaddr[`LINE-1];
-		s_lowaddr5_sync <= s_lowaddr5_meta;
-	end
-
-	always @(posedge clk) begin
-		s_lowaddr5 <= s_lowaddr5_sync;   // 整 64B 行完成标志（原 lowaddr[LINE-2] 误在半行处置位，导致行只填一半）
+		s_lowaddr5 <= lowaddr[`LINE-2];
 		flushreq <= ~flushcount[`WAYS+`SETS] & (flushreq | flush);
 		if(ce) begin
 			raddr <= addr;
@@ -162,79 +150,46 @@ module cache_controller(
 		end
 		
 		case(STATE)
-		3'b000: begin
-			hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE]; 
-			if(mmreq && !hit) begin
-				if(!r_flush) cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
-				ddr_rd <= ~dirty & ~r_flush;
-				ddr_wr <= dirty;
-				STATE <= dirty ? 3'b011 : 3'b100;
-				ce <= 1'b0;
-			end else if(r_flush) begin
-				// ★ 修复(commit: cache-flush-wrbk)：flush 扫描与 CPU 访问解耦。
-				//   原实现把脏行写回挂在 mmreq&&!hit(缓存缺失) 分支下；清屏等"全命中"写入
-				//   不产生 miss，导致 flush 永远走 else 分支、r_flush 置起后状态机卡在 000，
-				//   脏行永远写不回 DDR（波形表现为 isvwr 密集脉冲时 awvalid/wvalid=0）。
-				//   现改为：只要 r_flush 有效，无论 CPU 是否访问，都扫描当前行并写回脏行。
-				flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
-				if(dirty) begin
-					ddr_rd <= 1'b0;
-					ddr_wr <= 1'b1;
-					STATE <= 3'b011;   // 写回当前脏行
+			3'b000: begin
+				hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE]; 
+				if(mmreq && !hit) begin	// cache miss
+					if(!r_flush) cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
+					ddr_rd <= ~dirty & ~r_flush;
+					ddr_wr <= dirty;
+					STATE <= dirty ? 3'b011 : 3'b100;
+					ce <= 1'b0;
 				end else begin
-					STATE <= 3'b100;   // 当前行干净，直接进入推进状态扫描下一行
+					flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
+					ce <= 1'b1;
 				end
-				ce <= 1'b0;            // 写回期间挂起 CPU（与正常 evict 一致，避免丢写）
-			end else begin
-				flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
-				ce <= 1'b1;
 			end
-		end
-			
-		3'b011: begin	// write cache to ddr
-			ddr_rd <= ~r_flush;
-			if(s_lowaddr5) begin
-				ddr_wr <= 1'b0;
-				// ★ 修复：flush 写完脏行后直接推进扫描(STATE 100)，不再进入 111/101 回填，
-				//   否则会把刚写回 DDR 的行又用 DDR 旧数据覆盖掉，且 STATE 111 无 DDR 活动时
-				//   lowaddr 不推进会卡死。
-				STATE <= r_flush ? 3'b100 : 3'b111;
+			3'b011: begin	// write cache to ddr
+				ddr_rd <= ~r_flush; //1'b1;
+				if(s_lowaddr5) begin
+					ddr_wr <= 1'b0;
+					STATE <= 3'b111;
+				end
 			end
-		end
-			
-		3'b111: begin // read cache from ddr
-			if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE]; // flush 期间不改 hiaddr（写回地址已在 STATE 000 锁定）
-			if(~s_lowaddr5) STATE <= 3'b100;
-		end
-			
-		3'b100: begin
-			if(r_flush) begin
-				// ★ 修复：单遍扫描 4-way×32-set（共 128 行）即终止。
-				//   原实现 flushcount 溢出到 256 才因 bit7 回绕归零，导致每个 (way,set)
-				//   被扫描两遍、脏行写回两次（2× DDR 带宽，且与晚到的 CPU 写入存在回写竞态）。
-				//   现扫描到最后一项（flushcount[6:0]==7'h7F）即清 r_flush 标志(bit7)并复位索引。
-				if(flushcount[6:0] == 7'h7F) begin
-					flushcount <= {1'b0, 7'h00};   // 清 r_flush(bit7) + 复位扫描索引，干净终止
-					STATE <= 3'b000;
-				end else begin
+			3'b111: begin // read cache from ddr
+				hiaddr <= maddr[`ADDR-1:`LINE];
+				if(~s_lowaddr5) STATE <= 3'b100;
+			end
+			3'b100: begin	
+				if(r_flush) begin
 					flushcount <= flushcount + 1'b1;
 					STATE <= 3'b000;
+				end else if(s_lowaddr5) begin
+					ddr_rd <= 1'b0;
+					STATE <= 3'b101;
 				end
-			end else if(s_lowaddr5) begin
-				ddr_rd <= 1'b0;
-				STATE <= 3'b101;
 			end
-		end
-			
 			3'b101: begin
 				if(~s_lowaddr5) STATE <= 3'b000;
 			end
 		endcase
 	end
 
-	// ============================================================
 	// ILA 探针采样
-	// ============================================================
 	always @(posedge clk) begin
 		dbg_ctl_mreq_r   <= mreq;
 		dbg_ctl_wmask_r  <= wmask;
@@ -262,11 +217,11 @@ module seg_map(
     );
 
 	reg [8:0]map[0:31] = '{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-									10, 6,
+									10, 6,	// 文本 VRAM 窗对齐到 0x08068000（map[11]=6），与 VGA scraddr/PS 1:1；原版为 11
 									18, 19, 20, 21,
-									22,
+									22,	// HMA
 									1, 2, 3, 4, 5, 6, 7, 8, 9, 
-									10, 11, 12, 13, 14, 15};
+									10, 11, 12, 13, 14, 15}; // VGA seg 1..6			
 	reg [15:0]vga_seg = 16'h0000;
 	assign memdata = map[memaddr];
 	assign vga_planar_seg = vga_seg[seg_addr];
@@ -276,7 +231,7 @@ module seg_map(
 			map[{1'b0, cpuaddr}] <= cpuwdata;
 			vga_seg[cpuaddr] <= cpuwdata == 9'ha;
 		end
-		cpurdata <= map[{1'b0, cpuaddr}];
+		cpurdata <= map[{1'b0, cpuaddr}]; // cpuaddr is constrained at 2T multicycle, but here it should be ready after 1T!!!
 	end
 
 endmodule

@@ -139,7 +139,6 @@ module system
 	reg s_ddr_rd = 1'b0;
 	reg s_ddr_wr = 1'b0;
 	reg crw = 0;	
-	reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
 	reg s_RS232_DCE_RXD;
 	reg s_RS232_HOST_RXD;
 	reg [18:0]rstcount = 0;
@@ -475,7 +474,6 @@ module system
 		 .hiaddr(cache_hi_addr),
 		 .cache_write_data(crw && sys_rd_data_valid), 
 		 .cache_read_data(crw && sys_wr_data_valid),
-		 .cache_line_start(cache_line_start),
 		 .flush(auto_flush == 3'b110),
 		 .din(DOUT)
 	);
@@ -691,12 +689,6 @@ module system
 	always @ (posedge clk_sdr) begin
         sys_cmd_ack_d1 <= sys_cmd_ack;
 
-		// ★ Task #8 修复：当 DDR 命令确认跳变为 cache 行读(2'b11 填充)/写(2'b01 写回)时，产生单周期脉冲。
-		//   该脉冲送入 cache_controller，在开始一行 cache 事务时把 lowaddr 强制归零，
-		//   避免残留行内偏移造成半行(0x20)错位。VGA 读(2'b10)与空闲不产生脉冲。
-		cache_line_start <= (sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00) &&
-		                    ((sys_cmd_ack == 2'b01) || (sys_cmd_ack == 2'b11));
-
 		s_prog_full <= fifo_wr_used_words > 350; 
 
 
@@ -806,7 +798,7 @@ module system
 		// ★ 修复(commit: cache-flush-wrbk)：每帧垂直消隐自动触发缓存回写。
 		//   原实现只有软件写 I/O 端口 0x0001(bit0) 才会置 auto_flush[2]，清屏等未写该端口的
 		//   场景里 flush 永不触发，脏的显存行永远留在本 cache、写不回 DDR → VGA 看不到更新。
-		//   现于每帧 vblnk 自动置位，配合 cache_controller 的 flush 解耦修复，保证脏行落到 DDR。
+		//   现于每帧 vblnk 自动置位（与 cache_controller 是否改动无关，独立保证脏行落到 DDR）。
 		auto_flush[2] <= auto_flush[2] | vblnk;   // 持有到本帧 flush 脉冲(3'b110)产生为止；shift 寄存器在 vblnk 下降沿输出一次 flush
 		
 	end

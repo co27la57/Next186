@@ -203,15 +203,24 @@ module cache_controller(
 			if(~s_lowaddr5) STATE <= 3'b100;
 		end
 			
-			3'b100: begin	
-				if(r_flush) begin
+		3'b100: begin
+			if(r_flush) begin
+				// ★ 修复：单遍扫描 4-way×32-set（共 128 行）即终止。
+				//   原实现 flushcount 溢出到 256 才因 bit7 回绕归零，导致每个 (way,set)
+				//   被扫描两遍、脏行写回两次（2× DDR 带宽，且与晚到的 CPU 写入存在回写竞态）。
+				//   现扫描到最后一项（flushcount[6:0]==7'h7F）即清 r_flush 标志(bit7)并复位索引。
+				if(flushcount[6:0] == 7'h7F) begin
+					flushcount <= {1'b0, 7'h00};   // 清 r_flush(bit7) + 复位扫描索引，干净终止
+					STATE <= 3'b000;
+				end else begin
 					flushcount <= flushcount + 1'b1;
 					STATE <= 3'b000;
-				end else if(s_lowaddr5) begin
-					ddr_rd <= 1'b0;
-					STATE <= 3'b101;
 				end
+			end else if(s_lowaddr5) begin
+				ddr_rd <= 1'b0;
+				STATE <= 3'b101;
 			end
+		end
 			
 			3'b101: begin
 				if(~s_lowaddr5) STATE <= 3'b000;

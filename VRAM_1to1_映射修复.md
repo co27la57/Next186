@@ -61,21 +61,27 @@ vga_ddr_row_col <= vgatext[0] ? 17'h14000 : 17'h8000;   // 原 17'he000
 
 ---
 
-## 3. 配套改动（需用户在其它位置完成，本次未动 RTL）
+## 3. 配套改动
 
-| 项 | 原值 | 新值 | 说明 |
+> 重要澄清：BIOS 是 **硬编码在 cache BlackBox 内的 `bios.mem`**（本次已纳入仓库，开机只从这里取 1KB BIOS，不依赖 SD 卡/外部 BIOS）。所以 `scraddr` 不是"外部改"，而是直接改 `bios.mem` 机器码。
+
+| 项 | 原值 | 新值 | 状态 |
 |---|---|---|---|
-| PS 测试地址 | 0x0805C000 | **0x08068000** | 下载 bit 前写 `AAAAAAAA` 并回读确认的地址 |
-| BIOS 文本 `scraddr` | 0x7000 | **0x3000** | 见下方说明，否则 VGA 基址会被每帧覆盖 |
+| CPU VRAM 文本基址（RTL） | 0x0805C000 | **0x08068000** | 已改（`ddr_186.v:707` 5'b00000 + `map[11]=6` + VGA 初值/复位 `0x14000`，见第 2 节） |
+| BIOS `scraddr`（机器码） | 0x0000 | **0x3000** | **已改**：`bios.mem` 偏移 0xE9 的 `mov al,0x00` → `mov al,0x30`（CRT 起始地址高字节，commit 见下） |
+| PS 测试地址（仅供调试） | 0x0805C000 | **0x08068000** | 你下载 bit 前写 `AAAAAAAA` 并回读确认的地址，需同步改 |
 
-**BIOS `scraddr` 关键提醒**：`ddr_186.v:735` 在每帧结束（`s_vga_endframe`）用 CRT 起始地址寄存器 `scraddr` 重算 `vga_ddr_row_col`：
+**为什么 scraddr 必须改**：`ddr_186.v:735` 在每帧结束（`s_vga_endframe`）用 `scraddr` 重算 VGA 的 DDR 基址 `vga_ddr_row_col`：
 ```verilog
 vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0]?4'b0111:4'b0100), scraddr[12:0]};
 ```
-当前 BIOS 写 `scraddr=0x7000` → 转换得 `0xE000` → 物理 0x0805C000。要落到新基址 0x08068000，需 `scraddr=0x3000`（转换得 `0x14000`）。
-**若 BIOS 不改**，每帧结束（line 735）会把 VGA 基址覆盖回 0x0805C000 附近，导致 VGA 与 CPU/PS 再次错位。请检查 BIOS 里设置文本模式 CRT 起始地址的位置。
+- 原 BIOS 写 `scraddr=0x0000` → 帧末 `vga_ddr_row_col` = `0x7000` → 物理 **0x0804E000**（与 CPU 文本窗 0x08068000 错位）。
+- 改 `scraddr=0x3000` → 帧末 `vga_ddr_row_col` = `0x14000` → 物理 **0x08068000**，与行比较复位值（line 736，也是 `0x14000`）及 CPU 文本窗**三者一致**，VGA 稳定读 CPU 写的文本。
+- 注：line 736 行比较复位已设为 `0x14000`，但帧末 line 735 的 scraddr 重算若不配套，会在帧边界把基址抖回 0x0804E000；改 scraddr=0x3000 后两处统一，无抖动。
 
-**图形模式（段 0x0A，`map[10]=18`）**：1:1 后仍落在 0x080E8000（超 VGA 上限），本次未动。如需图形也 1:1，需把 `map[10]` 降到 ≤6 并同步 BIOS/PS，但会引入与段 0x0A 的 region 复用，建议另议。
+**改动验证**：`bios.mem` 偏移 0xE9 由 `0x00`→`0x30`，低字节（偏移 0xF1）保持 `0x00` → `scraddr=0x3000`；反汇编确认 `0x0E8: B0 30 / 0x0F0: B0 00`，且 "Searching BIOS on SDCard"/"BIOS not found, waiting on RS232" 两串完好。
+
+**图形模式（段 0x0A，`map[10]=18`）**：1:1 后仍落在 0x080E8000（超 VGA 17 位 `vga_ddr_row_col` 可达上限 0x0807FFFE），本次未动。如需图形也 1:1，需把 `map[10]` 降到 ≤6 并同步 BIOS/PS，但会引入与段 0x0A 的 region 复用，建议另议。
 
 ---
 

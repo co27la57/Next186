@@ -146,3 +146,57 @@ end
 - 功能：CPU 写文本到 0x0B8000 → VGA 在 0x08068000 完整显示，无半行错位 / 隔行乱码。
 
 > 注：若 1:1 + 本修复后 `m_axi_rlast` 仍早于第 16 拍，才是真正的 Zynq PS **AXI HP 端口 max burst / interconnect `MAX_BURST_LENGTH`** 配置问题，再到 PS 端查（非 RTL）。
+
+---
+
+## 7. Linux（Ubuntu）拉取与覆盖 Vivado 工程（SSH 方式）
+
+> 前提：Ubuntu 机已配置好 **co27la57 自己的 SSH 密钥**（仓库所有者），无需再用 nikoniko6011 协作账号。
+> 首次使用前需让 SSH 信任 GitHub 主机（首次 clone 提示 `Are you sure you want to continue connecting` → 输入 `yes`）。
+
+### 7.1 首次 clone（落点由你 `cd` 到的目录决定）
+```bash
+cd ~/Next186_pull                       # 任意目录，clone 会生成 Next186/ 子目录
+git clone git@github.com:co27la57/Next186.git
+cd Next186
+git log --oneline -3                    # 应看到 ee3e674（含 1:1 + cache 行两套修复）
+```
+
+### 7.2 已 clone 过（用别的 remote）→ 改 SSH 并拉最新
+```bash
+cd /你已有的/Next186
+git remote set-url origin git@github.com:co27la57/Next186.git
+git pull origin main
+```
+
+### 7.3 之后每次拉取新提交
+```bash
+cd /你的/Next186
+git pull origin main
+```
+
+### 7.4 ⚠️ 不要整体替换 `sources_1`，只覆盖同名 `.v` / `bios.mem`
+Vivado 的 `sources_1` 里除 RTL 的 `.v` 外，通常还有约束 `.xdc`、Block Design `.bd`、IP `.xci` 等；仓库根目录**只有 `.v` + `bios.mem` + 两个 `.md`**，整体替换会删掉约束/IP。
+
+Vivado 工程目录：`/home/oats/workspace/Next186/Network/Network.srcs/sources_1`
+
+**安全做法**：克隆到临时目录 → 先 `ls` 核对文件名一致 → 只 `cp` 匹配的 `.v`（和 `bios.mem`）覆盖 → Vivado 里 Refresh All。
+
+```bash
+cd /home/oats/workspace/Next186/Network/Network.srcs
+git clone git@github.com:co27la57/Next186.git /tmp/Next186_pull
+
+# ① 先核对两边文件名是否一致（务必执行，避免覆盖错文件）
+ls /tmp/Next186_pull/*.v
+ls sources_1/*.v                 # 若 .v 在子目录(如 sources_1/imports/)，自行对应
+ls sources_1/bios.mem            # 确认工程里是否也有 bios.mem
+
+# ② 仅覆盖同名 .v（不动 .xdc / .bd / .xci）
+cp -v /tmp/Next186_pull/*.v sources_1/
+# ③ 若工程里也有 bios.mem（cache BlackBox 需要），同样覆盖
+cp -v /tmp/Next186_pull/bios.mem sources_1/
+```
+覆盖后：Vivado 右侧 **Sources → 右键 → Refresh All**（或直接重开工程），新代码生效；`.md` 说明文档不必拷进工程。
+
+> 提醒：若 `sources_1` 把 `.v` 放在子目录（如 `sources_1/imports/`），把上面 `cp` 的目标路径改成对应子目录。
+

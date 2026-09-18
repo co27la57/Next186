@@ -1,0 +1,121 @@
+# Next186 SoC：cache 行起始复位(cache_line_start) + flush 解耦 修复
+
+> 关联 commit：本说明随修复提交（替换旧 `cache状态机回退原版_死锁根因与ILA探针变动.md`）
+> 改动文件：`cache_controller.v`、`ddr_186.v`、本说明文档（仅此一份 markdown，符合"只带一份最新 markdown"约束）
+
+---
+
+## 零、一句话结论
+
+下板观测到的 **`isvwr` 不触发 + 0x08068000 写事务抓不到 + 0x20 半行偏移 + `dbg_IP` 线性遍历**——
+**真因是 `af6f44b` 回退把两项功能性修复一起删掉了**：
+
+1. **`cache_line_start` 每事务 lowaddr 复位**（导致复位 miss 的 DDR 行填充从错误行内偏移写 cache → CPU 跑垃圾 → 永不到达写显存指令）；
+2. **flush 与 CPU 访问解耦**（导致清屏等"全命中"写入的脏行永远写不回 DDR）。
+
+**本修复在保留 5-bit `lowaddr` 的前提下重新加回这两项**，且**明确不使用 4b797fd 的 6-bit + `lowaddr[5]` CDC 方案**（那才是死锁根因）。
+
+> 关键澄清：`cache_line_start` 本身不是死锁元凶。**4b797fd 的死锁来自 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]`（64B 行仅 32 半字，`lowaddr[5]` 永不到）→ `s_lowaddr5` 恒低 → STATE 011 卡死**。把 `cache_line_start` 配回 **5-bit `lowaddr` + `s_lowaddr5=lowaddr[4]`（电平）** 是安全且必要的。
+
+---
+
+## 一、诊断过程（三选一排除）
+
+用户要求判断是"tag 没覆盖取指地址"还是"BRAM 预填内容/地址对不上"。经追溯 + 对照原作者，结论：**两者都不是**。
+
+| 假设 | 核查结果 | 结论 |
+|---|---|---|
+| tag 未覆盖 CPU 取指地址 | `cache_addr` 四 way 的 index16-31 全 =511（`d2f6553`/`af6f44b` 一致）；复位取指 tag=511 → 四 way 全命中，`dbg_ctl_hit_r` 恒高正确 | ❌ 非根因 |
+| BRAM 预填内容/地址对不上 | `Next186_BlackBoxes.v` `ram[0..0FF]` 机器码与 `d2f6553`/`4b797fd` **字节一致**；对照原作者 `bootstrap.asm`（`BOOTOFFSET=0FC00h`→F000:FC00=tag511/index16）完全吻合；`ram[0xFC]=32'h00FC00EA`(JMP F000:FC00) 正确 | ❌ 非根因 |
+| 状态机逻辑在回退中丢失 | `git diff 4b797fd HEAD -- cache_controller.v`：回退删除了 `cache_line_start` 端口、`flush` 解耦 STATE 分支；仅保留 5-bit `lowaddr` + `s_lowaddr5=lowaddr[4]` | ✅ **真因** |
+
+**外部对照**：OpenCores 项目页确认"bootstrap preloaded in cache, at first flush transferred to RAM"；本地 `bootstrap.asm` 确认 BIOS 运行于 F000:FC00，硬编码机器码无误（改代码前已再三确认，本修复**不改 BlackBox**）。
+
+---
+
+## 二、修复内容（已实现）
+
+### 2.1 `cache_controller.v`
+
+1. **恢复输入端口** `input cache_line_start;`
+2. **ddr_clk 域 lowaddr 复位**（避免行内偏移残留）：
+   ```verilog
+   always @(posedge ddr_clk) begin
+       if(cache_line_start) lowaddr <= {(`LINE-2){1'b0}};   // 5-bit 归零
+       else if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
+       ddr_dout <= lowaddr[0] ? cache_QA[15:0] : cache_QA[31:16];
+   end
+   ```
+3. **STATE 000 恢复 flush 解耦分支**（清屏等全命中写入也能写回）：
+   ```verilog
+   end else if(r_flush) begin
+       flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
+       if(dirty) begin
+           ddr_rd <= 1'b0; ddr_wr <= 1'b1; STATE <= 3'b011;   // 写回当前脏行
+       end else begin
+           STATE <= 3'b100;                                   // 当前行干净，推进扫描
+       end
+       ce <= 1'b0;   // 写回期间挂起 CPU，与正常 evict 一致，避免丢写
+   end
+   ```
+4. **STATE 011**：flush 写完脏行后直接进 `3'b100`（不再进 111 回填，避免把刚写回 DDR 的行又用 DDR 旧数据覆盖）：
+   ```verilog
+   STATE <= r_flush ? 3'b100 : 3'b111;
+   ```
+5. **STATE 111**：flush 期间不改 `hiaddr`（写回地址已在 STATE 000 锁定）：
+   ```verilog
+   if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE];
+   ```
+6. **明确保留**：5-bit `lowaddr`（`reg [`LINE-2:0]`）、`s_lowaddr5 <= lowaddr[`LINE-2]`（=lowaddr[4]，电平）、原版 STATE 100 `flushcount <= flushcount + 1'b1` 单遍扫描（`flushcount[7:0]` 自然回绕到 0x00 终止）、`map[11]=6`、四 way index16-31=511、ILA 探针。
+
+### 2.2 `ddr_186.v`
+
+1. **恢复声明** `reg cache_line_start = 1'b0;`（原 line 142 附近）
+2. **恢复单周期脉冲生成**（clk_sdr 域，`sys_cmd_ack` 跳变为 cache 行读 2'b11 / 写 2'b01 时；VGA 读 2'b10 与空闲不产生）：
+   ```verilog
+   cache_line_start <= (sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00) &&
+                       ((sys_cmd_ack == 2'b01) || (sys_cmd_ack == 2'b11));
+   ```
+   `sys_cmd_ack` / `sys_cmd_ack_d1` 在原作者 DDR 控制器中本就存在（被 `crw`/`col_counter` 使用），仅缺 `cache_line_start` 生成逻辑，本次补回。
+3. **恢复例化连线** `.cache_line_start(cache_line_start),`（cache_ctl 实例）
+
+> `cache_line_start` 在 `clk_sdr` 域产生、在 `cache_controller` 的 `ddr_clk`（=clk_sdr）域消费，同频同域，**无需 CDC 同步**（这与 4b797fd 给 `lowaddr[5]` 做两级 CDC 是两回事）。
+
+---
+
+## 三、ILA 探针观测指引
+
+| 探针 | 修复前(af6f44b 回退) | 修复后 | 判活信号 |
+|---|---|---|---|
+| `cache_line_start` | 不存在 | `sys_cmd_ack` 跳变时单周期脉冲 | 每次 cache 行事务起始应看到 1 拍高 |
+| `s_lowaddr5` | `lowaddr[4]` 电平，正常翻转 | 同左，正常翻转 | 半行高/半行低，**不得恒低** |
+| `lowaddr` | 5-bit 0→31 循环 | 同左，且每 `cache_line_start` 归零 | 0→31 循环，行间从 0 起 |
+| `dbg_ctl_isvwr_r`/`isvwr` | 恒 0 | CPU 写文本窗时拉高 | **应重新触发** |
+| `ddr_wr`/`awaddr` | flush 期间静默 | 清屏等全命中写入时 `ddr_wr` 拉起、`awaddr=0x08068000` 出现写事务 | **关键判活** |
+
+---
+
+## 四、显存物理基址（与修复无关，保持不变）
+
+- 文本 VRAM：段 `0xB800` → `maddr[20:16]=11` → `map[11]=6` → 物理 **`0x08068000`**
+- VGA：`scraddr=0x6000` ⇒ 读物理 `0x08068000`；PS：直接写 `0x08068000`
+- **三者对齐同一物理窗 `0x08068000`** ✓（1:1 映射 `sdraddr={memmap_mux[8:0],cache_hi_addr[9:0],5'b00000}`）
+
+---
+
+## 五、验证计划（提交后由用户在 Ubuntu 机下板）
+
+1. `git pull` → 同名覆盖 `sources_1` 的 `cache_controller.v` + `ddr_186.v`（与 `Next186_BlackBoxes.v` 同版本）→ Vivado 综合/生成 bit → 下板。
+2. **行起始复位判活**：`cache_line_start` 在每次 cache 行事务起始出现 1 拍高；`lowaddr` 每行从 0 起、`s_lowaddr5` 正常翻转。
+3. **isvwr / AWADDR 判活**：触发清屏/写串后，`dbg_ctl_isvwr_r=1` 重新可抓；`awaddr=0x08068000` 出现 AXI 写事务（`ddr_wr` 拉起）。
+4. **0x20 偏移消除**：PS 写 `0x08068000=aaaaaaaa`，CPU 在 `0x08068000`（而非 `0x08068020`）读到。
+5. 若仍异常：检查 `cache_line_start` 脉冲是否真送到 cache_controller（跨文件连线）；确认未误引入 6-bit `lowaddr`。
+
+---
+
+## 六、已规避的坑（对照前几轮）
+
+- ❌ **绝不再用 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]` + CDC**（4b797fd 死锁根因：`lowaddr[5]` 永不到 → `s_lowaddr5` 恒低 → STATE 011 卡死）。
+- ❌ 不再整体回退删 `cache_line_start`/`flush 解耦`（af6f44b 开倒车，导致 isvwr 不触发）。
+- ✅ 保留：`map[11]=6`、`sdraddr` 5'b00000（1:1）、`auto_flush[2]|=vblnk`（每帧回写）、`BlackBox` 禁加 for 循环全量填充、四 way index16-31=511。
+- ✅ `cache_line_start` 配 5-bit `lowaddr` 是**安全且必要**的（区别于 4b797fd 的 6-bit 方案）。

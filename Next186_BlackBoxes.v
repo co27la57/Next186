@@ -205,12 +205,10 @@ module cache (
 
     integer i;
     initial begin
-        // 全部填 HLT
-        for (i = 0; i < 2048; i = i + 1) begin
-            ram[i] = 32'hF4F4F4F4;
-        end
-
         // ===== 原版 cache_bootload.txt 内容 (256 word) =====
+        // 注意：不要在此处加 "for (i=0;i<2048;i=i+1) ram[i]=32'hF4F4F4F4;" 全量填充循环！
+        // 该循环会让 Vivado 推断 BRAM INIT 失败，BIOS(ram[0..0FF])及后续 4-way 复制(479行)被覆盖为 F4F4F4F4 全部失效。
+        // 仅保留下面的显式 BIOS 赋值 + 479 行 4-way 复制即可。
         ram[11'h000] = 32'hC88CFCFA;
         ram[11'h001] = 32'hC08ED88E;
         ram[11'h002] = 32'h00BCD08E;

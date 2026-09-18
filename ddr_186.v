@@ -795,6 +795,12 @@ module system
 					
 		auto_flush[1:0] <= {auto_flush[0], vblnk};		
 		
+		// ★ 修复(commit: cache-flush-wrbk)：每帧垂直消隐自动触发缓存回写。
+		//   原实现只有软件写 I/O 端口 0x0001(bit0) 才会置 auto_flush[2]，清屏等未写该端口的
+		//   场景里 flush 永不触发，脏的显存行永远留在本 cache、写不回 DDR → VGA 看不到更新。
+		//   现于每帧 vblnk 自动置位，配合 cache_controller 的 flush 解耦修复，保证脏行落到 DDR。
+		auto_flush[2] <= auto_flush[2] | vblnk;   // 持有到本帧 flush 脉冲(3'b110)产生为止；shift 寄存器在 vblnk 下降沿输出一次 flush
+		
 	end
 	
 	always @ (posedge clk_25) begin

@@ -79,6 +79,8 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_ce_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_isvmem_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_r;
+	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;   // flush 扫描进行中(r_flush)
+	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;   // cache→DDR 写回脉冲(应产生 AXI awvalid/wvalid)
 	
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
@@ -156,32 +158,50 @@ module cache_controller(
 		end
 		
 		case(STATE)
-			3'b000: begin
-				hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE]; 
-				if(mmreq && !hit) begin
-					if(!r_flush) cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
-					ddr_rd <= ~dirty & ~r_flush;
-					ddr_wr <= dirty;
-					STATE <= dirty ? 3'b011 : 3'b100;
-					ce <= 1'b0;
+		3'b000: begin
+			hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE]; 
+			if(mmreq && !hit) begin
+				if(!r_flush) cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
+				ddr_rd <= ~dirty & ~r_flush;
+				ddr_wr <= dirty;
+				STATE <= dirty ? 3'b011 : 3'b100;
+				ce <= 1'b0;
+			end else if(r_flush) begin
+				// ★ 修复(commit: cache-flush-wrbk)：flush 扫描与 CPU 访问解耦。
+				//   原实现把脏行写回挂在 mmreq&&!hit(缓存缺失) 分支下；清屏等"全命中"写入
+				//   不产生 miss，导致 flush 永远走 else 分支、r_flush 置起后状态机卡在 000，
+				//   脏行永远写不回 DDR（波形表现为 isvwr 密集脉冲时 awvalid/wvalid=0）。
+				//   现改为：只要 r_flush 有效，无论 CPU 是否访问，都扫描当前行并写回脏行。
+				flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
+				if(dirty) begin
+					ddr_rd <= 1'b0;
+					ddr_wr <= 1'b1;
+					STATE <= 3'b011;   // 写回当前脏行
 				end else begin
-					flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
-					ce <= 1'b1;
+					STATE <= 3'b100;   // 当前行干净，直接进入推进状态扫描下一行
 				end
+				ce <= 1'b0;            // 写回期间挂起 CPU（与正常 evict 一致，避免丢写）
+			end else begin
+				flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
+				ce <= 1'b1;
 			end
+		end
 			
-			3'b011: begin	// write cache to ddr
-				ddr_rd <= ~r_flush;
-				if(s_lowaddr5) begin
-					ddr_wr <= 1'b0;
-					STATE <= 3'b111;
-				end
+		3'b011: begin	// write cache to ddr
+			ddr_rd <= ~r_flush;
+			if(s_lowaddr5) begin
+				ddr_wr <= 1'b0;
+				// ★ 修复：flush 写完脏行后直接推进扫描(STATE 100)，不再进入 111/101 回填，
+				//   否则会把刚写回 DDR 的行又用 DDR 旧数据覆盖掉，且 STATE 111 无 DDR 活动时
+				//   lowaddr 不推进会卡死。
+				STATE <= r_flush ? 3'b100 : 3'b111;
 			end
+		end
 			
-			3'b111: begin // read cache from ddr
-				hiaddr <= maddr[`ADDR-1:`LINE];
-				if(~s_lowaddr5) STATE <= 3'b100;
-			end
+		3'b111: begin // read cache from ddr
+			if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE]; // flush 期间不改 hiaddr（写回地址已在 STATE 000 锁定）
+			if(~s_lowaddr5) STATE <= 3'b100;
+		end
 			
 			3'b100: begin	
 				if(r_flush) begin
@@ -210,6 +230,8 @@ module cache_controller(
 		dbg_ctl_ce_r     <= ce;
 		dbg_ctl_isvmem_r <= is_video_mem;
 		dbg_ctl_isvwr_r  <= is_video_wr;
+		dbg_ctl_rflush_r  <= r_flush;
+		dbg_ctl_ddr_wr_r  <= ddr_wr;
 	end
 	
 endmodule
@@ -227,7 +249,7 @@ module seg_map(
     );
 
 	reg [8:0]map[0:31] = '{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-									10, 6,
+									10, 10,
 									18, 19, 20, 21,
 									22,
 									1, 2, 3, 4, 5, 6, 7, 8, 9, 

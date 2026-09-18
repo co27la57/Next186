@@ -267,7 +267,7 @@ module cache (
         ram[11'h037] = 32'h42EE0AB0;
         ram[11'h038] = 32'h4AEE20B0;
         ram[11'h039] = 32'h42EE0CB0;
-        ram[11'h03A] = 32'h4AEE30B0;   // scraddr 高字节 0x00->0x30 (CRT 起始地址高, 改自 bios 偏移0xE9的 mov al,0x00->mov al,0x30)
+        ram[11'h03A] = 32'h4AEE60B0;   // ★ VGA读地址对齐：scraddr 0x3000->0x6000(CRT 起始地址高 mov al,0x30->0x60)。配合 map[11]=10，ddr_186.v:735 重算 row_col=0x14000，VGA 读物理 0x080A8000 = CPU 文本窗(0x080A8000)，消除花屏/乱码
         ram[11'h03B] = 32'h42EE0DB0;
         ram[11'h03C] = 32'h68EE00B0;
         ram[11'h03D] = 32'h3307B800;

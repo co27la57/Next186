@@ -24,7 +24,8 @@ module cache_controller(
 	 output reg ddr_rd = 0,
 	 output reg ddr_wr = 0,
 	 output reg [`ADDR-`LINE-1:0]hiaddr,
-	 input flush
+	 input flush,
+	 input cache_line_start   // ★ Task #8：ddr_186 在每次 cache 行事务(读填充/写回)确认时给的单周期脉冲，用于把 lowaddr 强制归零
     );
 	
 	initial ce = 1'b1;
@@ -104,7 +105,10 @@ module cache_controller(
 	wire [`WAYS-1:0]csblk = lru[0] | lru[1] | lru[2] | lru[3];
 
 	always @(posedge ddr_clk) begin
-		if(cache_write_data || cache_read_data) begin
+		// ★ Task #8 修复：每个 cache 行事务开始(cache_line_start 脉冲)强制 lowaddr 归零，
+		//   避免上一行残留的非 0 行内偏移(如停在第 16 半字)污染下一行，造成 0x20 半行错位。
+		if(cache_line_start) lowaddr <= {`LINE{1'b0}};
+		else if(cache_write_data || cache_read_data) begin
 			// 64B 整行 = 32 半字；计满(lowaddr[5]置位)后归零，保证每行从 0 开始、行行衔接正确
 			if(lowaddr[`LINE-1]) lowaddr <= {`LINE-1{1'b0}};
 			else                lowaddr <= lowaddr + 1'b1;

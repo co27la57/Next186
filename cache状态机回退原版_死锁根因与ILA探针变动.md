@@ -61,9 +61,10 @@
 - `s_lowaddr5 <= lowaddr[`LINE-2];`（`LINE=6` ⇒ `lowaddr[4]`，**电平，无 CDC 同步**）
 - `lowaddr` 改回 `reg [`LINE-2:0]lowaddr`（5 位），`always` 里 `if(cache_write_data||cache_read_data) lowaddr <= lowaddr + 1'b1;`（自动回绕）
 - flush / STATE 机（000/011/111/100/101）全部还原原作者版本
-- **保留两处必要改动**：
+- **保留三处必要改动**：
   1. `seg_map` 中 `map[11] = 6`（文本 VRAM 窗对齐到 `0x08068000`，见第三节）
-  2. ILA 探针（`mark_debug`，均为 `reg`+`always`，符合非 top 模块约束）：`lowaddr`、`s_lowaddr5`、`dbg_ctl_*`（`mreq`/`wmask`/`mmreq`/`hit`/`ce`/`isvmem`）、`isvwr`
+  2. `cache_addr` 初始化：四个 way 的 index16-31 保持 `511`（bootstrap 标签，保证 CPU 能找到 begin 代码；原作者此处 way1/2/3 为 0/1/2，属项目既有改动，必须保留）
+  3. ILA 探针（`mark_debug`，均为 `reg`+`always`，符合非 top 模块约束）：`lowaddr`、`s_lowaddr5`、`dbg_ctl_*`（`mreq`/`wmask`/`mmreq`/`hit`/`ce`/`isvmem`）、`isvwr`
 
 ### 2.2 `ddr_186.v` —— 删除 `cache_line_start` 全部逻辑
 

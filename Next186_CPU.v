@@ -1834,16 +1834,16 @@ endfunction
 // 流水线状态
 //(* mark_debug = "true", keep = "true" *) wire [6:0]  dbg_STAGE     = STAGE;
 //(* mark_debug = "true", keep = "true" *) wire        dbg_IFETCH    = IFETCH;
-(* mark_debug = "true", keep = "true" *) wire        dbg_HALT      = HALT;
+(* mark_debug = "true", keep = "true" *) reg        dbg_HALT;
 //
 //// 当前执行的指令
 //(* mark_debug = "true", keep = "true" *) wire [7:0]  dbg_FETCH0    = FETCH[0];
 //(* mark_debug = "true", keep = "true" *) wire [5:0]  dbg_ICODE1    = ICODE1;
 //
 //// 指令指针
-(* mark_debug = "true", keep = "true" *) wire [15:0] dbg_CS        = CS;
-(* mark_debug = "true", keep = "true" *) wire [15:0] dbg_IP        = IP;
-(* mark_debug = "true", keep = "true" *) wire [20:0] dbg_IADDR     = IADDR;
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_CS;
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_IP;
+(* mark_debug = "true", keep = "true" *) reg [20:0] dbg_IADDR;
 //
 //// 复位/中断状态
 //(* mark_debug = "true", keep = "true" *) wire        dbg_SRST      = SRST;
@@ -1852,8 +1852,18 @@ endfunction
 //(* mark_debug = "true", keep = "true" *) wire        dbg_IRQ       = IRQ;
 //
 //// 内存/端口请求
-(* mark_debug = "true", keep = "true" *) wire        dbg_MREQ      = MREQ;
-(* mark_debug = "true", keep = "true" *) wire        dbg_IORQ      = IORQ;
+(* mark_debug = "true", keep = "true" *) reg        dbg_MREQ;
+(* mark_debug = "true", keep = "true" *) reg        dbg_IORQ;
+
+    // ★ CPU 内部诊断探针：reg+always 采样（非 top 模块禁止用 wire，否则被布线优化掉）
+    always @(posedge CLK) begin
+        dbg_HALT  <= HALT;
+        dbg_CS    <= CS;
+        dbg_IP    <= IP;
+        dbg_IADDR <= IADDR;
+        dbg_MREQ  <= MREQ;
+        dbg_IORQ  <= IORQ;
+    end
 //(* mark_debug = "true", keep = "true" *) wire        dbg_WR        = WR;
 
 endmodule

@@ -351,6 +351,9 @@ module top_zynq7010 (
     (* mark_debug = "true" *) wire        dbg_axi_awready      = m_axi_awready;
     (* mark_debug = "true" *) wire        dbg_axi_bvalid       = m_axi_bvalid;
     (* mark_debug = "true" *) wire        dbg_axi_bready       = m_axi_bready;
+    (* mark_debug = "true" *) wire [31:0] dbg_axi_araddr_full = m_axi_araddr;  // 读地址：验证 1:1 映射 / 0xA0 偏移 / ARADDR 步进 0x40
+    (* mark_debug = "true" *) wire        dbg_axi_rlast       = m_axi_rlast;   // 读末拍：验证 cache 整行填充(第16拍拉高)
+
 
     // ==========================================
     // 输出脉冲与 LED

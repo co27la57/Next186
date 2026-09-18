@@ -88,7 +88,8 @@ vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0]?4'b0111:4'b0100), scrad
 ## 4. 验证（Linux Vivado 机）
 
 - ILA 触发条件：`isvwr==1`（`dbg_ctl_isvwr_r`，cache_controller.v:79）。
-- 抓取网：`dbg_sdraddr`[23:0]、`dbg_cache_hiaddr`[14:0]（ddr_186.v:840-841）、`m_axi_araddr`（top 端需补 `(* mark_debug="true" *) wire [31:0] dbg_axi_araddr_full = m_axi_araddr;`）。
+- 抓取网：`dbg_sdraddr`[23:0]、`dbg_cache_hiaddr`[14:0]（`ddr_186.v:840-841`，已转 `reg`+`always`）、`dbg_axi_araddr_full`[31:0]（`top_zynq7010.v:354`，已加，对应 `m_axi_araddr`）、`dbg_axi_rlast`（`top_zynq7010.v:355`，验证整行填充第 16 拍）。
+- ILA 探针约束：非 top 模块（`ddr_186.v` / `cache_controller.v` / `Next186_CPU.v`）的探针一律 `reg` 声明 + `always` 赋值，**禁止 `wire`**（否则被 Vivado 布线优化掉，ILA 里看不到）；top 模块可用 `wire`。本次已把 `ddr_186.v`/`Next186_CPU.v` 里 12 个 `wire` 探针全部改为 `reg`+`always`。当前 SoC 内有效探针共 **~39 个**（远低于 300），无时序违例风险。
 - **预期**：改前 ARADDR 步进 0x20；改后步进 **0x40**，且逻辑行 N → 物理 `0x08068000 + 64·N`，**0xA0 偏移消失**。
 - 功能：PS 写 `0x08068000=AAAAAAAA`，CPU 清屏（isvwr 触发）后该处应为 `0000`；CPU 写文本到 0x0B8000，VGA 应在 0x08068000 显示，ILA 看 ARADDR 与 PS 写入一致。
 

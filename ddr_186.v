@@ -837,12 +837,22 @@ module system
     assign ram_addr  = sdraddr;
     assign ram_wdata = cntrl0_user_input_data; 
     assign sys_DOUT  = ram_rdata;             
-    (* mark_debug = "true" *) wire [14:0] dbg_cache_hiaddr  = cache_hi_addr;
-    (* mark_debug = "true" *) wire        dbg_cache_ddr_wr  = ddr_wr;
-    (* mark_debug = "true" *) wire [23:0] dbg_sdraddr       = sdraddr;
-    (* mark_debug = "true" *) wire [15:0] dbg_fifo_dout     = fifo_dout;
-    (* mark_debug = "true" *) wire        dbg_cpu_halt      = HALT;  // 若无法访问，改到 ddr_186 里
-    (* mark_debug = "true" *) wire [15:0] dbg_ram_wdata_lo = cntrl0_user_input_data;
+    (* mark_debug = "true" *) reg [14:0] dbg_cache_hiaddr;
+    (* mark_debug = "true" *) reg        dbg_cache_ddr_wr;
+    (* mark_debug = "true" *) reg [23:0] dbg_sdraddr;
+    (* mark_debug = "true" *) reg [15:0] dbg_fifo_dout;
+    (* mark_debug = "true" *) reg        dbg_cpu_halt;  // 若无法访问，改到 ddr_186 里
+    (* mark_debug = "true" *) reg [15:0] dbg_ram_wdata_lo;
+
+    // 非 top 模块必须用 reg+always 采样，否则会被 Vivado 布线优化掉
+    always @(posedge clk_sdr) begin
+        dbg_cache_hiaddr  <= cache_hi_addr;
+        dbg_cache_ddr_wr  <= ddr_wr;
+        dbg_sdraddr       <= sdraddr;
+        dbg_fifo_dout     <= fifo_dout;
+        dbg_cpu_halt      <= HALT;
+        dbg_ram_wdata_lo  <= cntrl0_user_input_data;
+    end
 
 
 

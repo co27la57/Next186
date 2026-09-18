@@ -133,7 +133,7 @@ module system
 	wire cpu32_halt;
 	
 	reg [1:0]cntrl0_user_command_register = 0;
-	reg [16:0]vga_ddr_row_col = 17'h0E000; 
+	reg [16:0]vga_ddr_row_col = 17'h14000; 
 	reg s_prog_full;
 	(* mark_debug = "true" *) reg s_prog_empty;
 	reg s_ddr_rd = 1'b0;
@@ -704,7 +704,7 @@ module system
 		s_vga_endframe <= vga_end_frame;
 		sdraddr <= s_prog_empty || !(s_ddr_wr || s_ddr_rd) ? 
 		    {6'b000001, vga_ddr_row_col + vga_lnbytecount} : 
-		    {memmap_mux[8:0], cache_hi_addr[9:0], 4'b0000};
+		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 		
 		
@@ -733,7 +733,7 @@ module system
 			s_vga_endscanline <= 1'b0;
 
 			if(s_vga_endframe) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? 4'b0111 : 4'b0100), scraddr[12:0]};
-			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? 17'he000 : 17'h8000; 
+			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? 17'h14000 : 17'h8000; 
 				 else if(s_vga_endline) vga_ddr_row_col <= vga_ddr_row_col + (vgatext[0] ? 40 : {vga_offset, 1'b0});
 			
 			if(s_vga_endline) vga_repln_count <= 0;

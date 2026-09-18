@@ -63,12 +63,12 @@ vga_ddr_row_col <= vgatext[0] ? 17'h14000 : 17'h8000;   // 原 17'he000
 
 ## 3. 配套改动
 
-> 重要澄清：BIOS 是 **硬编码在 cache BlackBox 内的 `bios.mem`**（本次已纳入仓库，开机只从这里取 1KB BIOS，不依赖 SD 卡/外部 BIOS）。所以 `scraddr` 不是"外部改"，而是直接改 `bios.mem` 机器码。
+> 重要澄清：BIOS 是 **硬编码在 `Next186_BlackBoxes.v` cache 模块的 `initial begin` 块内**（显式 `ram[11'h0XX] = ...` 逐字赋值，全仓库无任何 `$readmemh(bios.mem)` 或 RTL 引用 `bios.mem`）。开机只从这块硬编码 RAM 取 1KB BIOS，不依赖 SD 卡/外部 BIOS。所以 `scraddr` 的补丁**直接改 `Next186_BlackBoxes.v` 的机器码**，**不是**改 `bios.mem`（`bios.mem` 在启动路径上未被引用，改它无效）。详见 `BIOS_scraddr_修复记录.md`。
 
 | 项 | 原值 | 新值 | 状态 |
 |---|---|---|---|
 | CPU VRAM 文本基址（RTL） | 0x0805C000 | **0x08068000** | 已改（`ddr_186.v:707` 5'b00000 + `map[11]=6` + VGA 初值/复位 `0x14000`，见第 2 节） |
-| BIOS `scraddr`（机器码） | 0x0000 | **0x3000** | **已改**：`bios.mem` 偏移 0xE9 的 `mov al,0x00` → `mov al,0x30`（CRT 起始地址高字节，commit 见下） |
+| BIOS `scraddr`（机器码） | 0x0000 | **0x3000** | **已改**：`Next186_BlackBoxes.v` `initial begin` 的 `ram[11'h03A]`（`4AEE00B0`→`4AEE30B0`，对应 BIOS 偏移 0xE9 的 `mov al,0x00`→`mov al,0x30`，CRT 起始地址高字节）；`bios.mem` 未改（非启动源） |
 | PS 测试地址（仅供调试） | 0x0805C000 | **0x08068000** | 你下载 bit 前写 `AAAAAAAA` 并回读确认的地址，需同步改 |
 
 **为什么 scraddr 必须改**：`ddr_186.v:735` 在每帧结束（`s_vga_endframe`）用 `scraddr` 重算 VGA 的 DDR 基址 `vga_ddr_row_col`：
@@ -79,7 +79,7 @@ vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0]?4'b0111:4'b0100), scrad
 - 改 `scraddr=0x3000` → 帧末 `vga_ddr_row_col` = `0x14000` → 物理 **0x08068000**，与行比较复位值（line 736，也是 `0x14000`）及 CPU 文本窗**三者一致**，VGA 稳定读 CPU 写的文本。
 - 注：line 736 行比较复位已设为 `0x14000`，但帧末 line 735 的 scraddr 重算若不配套，会在帧边界把基址抖回 0x0804E000；改 scraddr=0x3000 后两处统一，无抖动。
 
-**改动验证**：`bios.mem` 偏移 0xE9 由 `0x00`→`0x30`，低字节（偏移 0xF1）保持 `0x00` → `scraddr=0x3000`；反汇编确认 `0x0E8: B0 30 / 0x0F0: B0 00`，且 "Searching BIOS on SDCard"/"BIOS not found, waiting on RS232" 两串完好。
+**改动验证**：`Next186_BlackBoxes.v` `ram[11'h03A]`（`4AEE00B0`→`4AEE30B0`）对应 BIOS 偏移 0xE9 由 `0x00`→`0x30`，低字节（偏移 0xF1）保持 `0x00` → `scraddr=0x3000`；反汇编确认 `0x0E8: B0 30 / 0x0F0: B0 00`，且 "Searching BIOS on SDCard"/"BIOS not found, waiting on RS232" 两串完好。
 
 **图形模式（段 0x0A，`map[10]=18`）**：1:1 后仍落在 0x080E8000（超 VGA 17 位 `vga_ddr_row_col` 可达上限 0x0807FFFE），本次未动。如需图形也 1:1，需把 `map[10]` 降到 ≤6 并同步 BIOS/PS，但会引入与段 0x0A 的 region 复用，建议另议。
 
@@ -199,8 +199,9 @@ ls sources_1/bios.mem            # 确认工程里是否也有 bios.mem
 
 # ② 仅覆盖同名 .v（不动 .xdc / .bd / .xci）
 cp -v /tmp/Next186_pull/*.v sources_1/
-# ③ 若工程里也有 bios.mem（cache BlackBox 需要），同样覆盖
-cp -v /tmp/Next186_pull/bios.mem sources_1/
+# ③ 若工程里也有 bios.mem：它并非启动源（BIOS 已硬编码进 BlackBox），可不覆盖；
+#    但为避免与你工程里其它用途冲突，建议也同步覆盖以保持一致
+# cp -v /tmp/Next186_pull/bios.mem sources_1/   # 可选，非必需
 ```
 覆盖后：Vivado 右侧 **Sources → 右键 → Refresh All**（或直接重开工程），新代码生效；`.md` 说明文档不必拷进工程。
 

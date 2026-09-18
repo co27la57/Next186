@@ -213,7 +213,7 @@ module cache (
         ram[11'h001] = 32'hC08ED88E;
         ram[11'h002] = 32'h00BCD08E;
         ram[11'h003] = 32'hE7C033FC;
-        ram[11'h004] = 32'hE70BB080;
+        ram[11'h004] = 32'hE706B080; // 文本窗对齐修复：mov al,0xb -> mov al,0x6，使 out 0x8b 写 map[11]=6 -> CPU 文本物理 0x08068000(与 VGA scraddr=0x6000 读窗&PS写址一致)。原 0x0B -> map[11]=11 -> 0x080B8000 越出 VGA 可读上限 0x0807FFFE。
         ram[11'h005] = 32'hE70FB08B;
         ram[11'h006] = 32'hE634B08F;
         ram[11'h007] = 32'hE6C03243;
@@ -267,7 +267,7 @@ module cache (
         ram[11'h037] = 32'h42EE0AB0;
         ram[11'h038] = 32'h4AEE20B0;
         ram[11'h039] = 32'h42EE0CB0;
-        ram[11'h03A] = 32'h4AEE60B0;   // ★ VGA读地址对齐：scraddr 0x3000->0x6000(CRT 起始地址高 mov al,0x30->0x60)。配合 map[11]=10，ddr_186.v:735 重算 row_col=0x14000，VGA 读物理 0x080A8000 = CPU 文本窗(0x080A8000)，消除花屏/乱码
+        ram[11'h03A] = 32'h4AEE60B0;   // ★ VGA读地址对齐：scraddr 0x3000->0x6000(CRT 起始地址高 mov al,0x30->0x60)。ddr_186.v:735 重算 row_col=0x14000，VGA 读物理 0x08068000。配合 map[11]=6(BIOS out 0x8b 写 6，见 ram[11'h004])，CPU 文本窗 = 0x08068000，三者(CPU/VGA/PS)对齐，消除花屏/乱码
         ram[11'h03B] = 32'h42EE0DB0;
         ram[11'h03C] = 32'h68EE00B0;
         ram[11'h03D] = 32'h3307B800;

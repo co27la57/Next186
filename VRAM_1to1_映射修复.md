@@ -88,9 +88,61 @@ vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0]?4'b0111:4'b0100), scrad
 
 ---
 
-## 5. 本次未处理（留待 1:1 验证通过后再修）
+## 5. 后续处理状态
 
-- `cache_controller.v` `lowaddr` 不按行复位（:67,103）—— 一旦 burst 被打断会旋转进错误字。
-- `flush` 推进逻辑（:148-157）—— 原作者原始设计，CPU 空闲时仍推进。
-- RLAST 提前（之前观测第 11 拍而非第 16 拍）—— 需查清 interconnect/DDR 配置。
+- `cache_controller.v` `lowaddr` 不复位 / RLAST 提前 —— **已在 commit `cache_line_fix` 修复（见第 6 节）**，二者同源：整行完成位误设在半行处，导致 `ddr_rd` 提前拉低、CPU 行读被腰斩。
+- `flush` 推进逻辑（:148-157）—— 原作者原始设计，CPU 空闲时仍推进，**暂未动**。
 - 4-way `tag=511`（:60-64）是 bootstrap 冗余，**非 bug，未改动**。
+
+---
+
+## 6. cache 行填充修复（lowaddr 复位 / RLAST 提前 —— 同一根因）
+
+### 6.1 根因（比"不复位"更根本）
+
+- `lowaddr` 原声明为 `[LINE-2:0]` = 5 位（最大 31），但 64B 行 = 32 半字（每 AXI 32 位拍在 `R_PUSH_0/1` 两拍各交付 1 个 16 位半字，`top_zynq7010.v:359` 的 `ram_rd_valid` 两拍都拉高 → 16 拍 = 32 半字）。**5 位计数器根本无法计到 32**。
+- 完成信号 `s_lowaddr5 <= lowaddr[LINE-2]` = `lowaddr[4]`（值 16）在**半行（16 半字 = 32 字节）处就置位**。
+- 后果：每行只填到 cache_mem 字 0–7（32 字节），`ddr_rd` 在第 8 拍被拉低 → `ddr_186.v` 仲裁把 `ram_cmd` 切回 VGA（优先级 VGA > CPU）→ CPU 行读被腰斩；下一行 `lowaddr` 卡在 16（bit4 恒高）被直接判"已填满" → 后续行全错。
+- **之前观测的"RLAST 提前（第 11 拍）"本质是 cache 提前 deassert `ddr_rd` 把事务切断**，不是 AXI 链路 / DDR 配置问题（链路 16 拍回环已 100% 通过）。
+
+### 6.2 修改（`cache_controller.v`，已 commit）
+
+```verilog
+// ① lowaddr 扩到 6 位，能计满 32 半字（整 64B 行）
+reg [`LINE-1:0]lowaddr = 0;   // 原 reg [`LINE-2:0]lowaddr = 0;
+
+// ② 递增逻辑：整行计满(lowaddr[LINE-1] 置位)后归零，保证每行从 0 开始、行行衔接
+always @(posedge ddr_clk) begin
+    if(cache_write_data || cache_read_data) begin
+        if(lowaddr[`LINE-1]) lowaddr <= {`LINE-1{1'b0}};   // 满 64B 行后归零
+        else                lowaddr <= lowaddr + 1'b1;
+    end
+    ddr_dout <= lowaddr[0] ? cache_QA[15:0] : cache_QA[31:16];
+end
+
+// ③ 完成标志改到整行：lowaddr[LINE-1]（原 lowaddr[LINE-2] 误在半行处）
+//    s_lowaddr5 <= lowaddr[LINE-1];
+
+// ④ 跨时钟域同步：ddr_clk 的整行完成标志 → clk 域 2 级打拍，避免 1 拍脉冲漏采
+reg s_lowaddr5_meta = 0, s_lowaddr5_sync = 0;
+always @(posedge clk) begin
+    s_lowaddr5_meta <= lowaddr[`LINE-1];
+    s_lowaddr5_sync <= s_lowaddr5_meta;
+end
+always @(posedge clk) begin
+    s_lowaddr5 <= s_lowaddr5_sync;   // 状态机仍按"先高后低"脉冲工作
+end
+```
+
+要点：
+- 读侧 `address_b` 用 `maddr[5:2]`（索引 16 字）、写侧 `address_a` 用 `lowaddr[4:1]`（16 字）—— 证明 cache 行就是 64B（16 字），完成位必须到 32 半字，原 `lowaddr[4]` 只填半行是确凿 bug。
+- 改后 16 拍读满 64B，`ddr_rd` 保持到整行结束 → AXI FSM 读满 16 拍、`m_axi_rlast` 在第 16 拍正常拉高；"RLAST 提前"随之消失。
+- 加了 `lowaddr` / `s_lowaddr5` 的 `mark_debug`，方便 ILA 复测整行填充。
+
+### 6.3 验证（Linux Vivado 机，叠加在 1:1 验证上）
+
+- ILA 增抓：`u_cache_ctl/lowaddr`[6]、`u_cache_ctl/s_lowaddr5`[1]（或 `dbg_ctl_*` 已带）。
+- 触发 `isvwr==1`，观察一次 CPU 行读：`lowaddr` 应从 0 递增到 31 后归零（不再停在 16），`s_lowaddr5` 在整行末尾出现一个干净的高→低；`m_axi_rlast` 在第 16 拍拉高（非第 11 拍）。
+- 功能：CPU 写文本到 0x0B8000 → VGA 在 0x08068000 完整显示，无半行错位 / 隔行乱码。
+
+> 注：若 1:1 + 本修复后 `m_axi_rlast` 仍早于第 16 拍，才是真正的 Zynq PS **AXI HP 端口 max burst / interconnect `MAX_BURST_LENGTH`** 配置问题，再到 PS 端查（非 RTL）。

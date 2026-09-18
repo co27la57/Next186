@@ -64,8 +64,10 @@ module cache_controller(
 		  '{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511}};
 
 	reg [2:0]STATE = 0;
-	reg [`LINE-2:0]lowaddr = 0;
-	reg s_lowaddr5 = 0;
+	(* mark_debug = "true" *) reg [`LINE-1:0]lowaddr = 0;   // 6位：64B行=32半字，需计数到 32
+	(* mark_debug = "true" *) reg s_lowaddr5 = 0;
+	// 跨时钟域同步：ddr_clk 的整行完成标志(lowaddr[LINE-1]) → clk 域，避免 1 拍脉冲被漏采
+	reg s_lowaddr5_meta = 0, s_lowaddr5_sync = 0;
 	wire [31:0]cache_QA;
 	wire [`WAYS-1:0]lru[(1<<`WAYS)-1:0];
 	
@@ -100,7 +102,11 @@ module cache_controller(
 	wire [`WAYS-1:0]csblk = lru[0] | lru[1] | lru[2] | lru[3];
 
 	always @(posedge ddr_clk) begin
-		if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
+		if(cache_write_data || cache_read_data) begin
+			// 64B 整行 = 32 半字；计满(lowaddr[5]置位)后归零，保证每行从 0 开始、行行衔接正确
+			if(lowaddr[`LINE-1]) lowaddr <= {`LINE-1{1'b0}};
+			else                lowaddr <= lowaddr + 1'b1;
+		end
 		ddr_dout <= lowaddr[0] ? cache_QA[15:0] : cache_QA[31:16];
 	end
 		
@@ -133,8 +139,14 @@ module cache_controller(
 		end
 	endgenerate
 
+	// 跨时钟域：将 ddr_clk 域的整行完成标志(lowaddr[LINE-1]) 同步到 clk 域（2 级打拍，避免 1 拍脉冲漏采）
 	always @(posedge clk) begin
-		s_lowaddr5 <= lowaddr[`LINE-2];
+		s_lowaddr5_meta <= lowaddr[`LINE-1];
+		s_lowaddr5_sync <= s_lowaddr5_meta;
+	end
+
+	always @(posedge clk) begin
+		s_lowaddr5 <= s_lowaddr5_sync;   // 整 64B 行完成标志（原 lowaddr[LINE-2] 误在半行处置位，导致行只填一半）
 		flushreq <= ~flushcount[`WAYS+`SETS] & (flushreq | flush);
 		if(ce) begin
 			raddr <= addr;

@@ -7,9 +7,14 @@
 
 ---
 
-## 0. 一句话结论
+> ⚠️ **勘误（2026-09-18，commit 47cc561）**：本文档“scraddr=0x3000 → `0x08068000` 三者一致”的结论**不成立**。
+> - 正确 VGA 物理基址公式 = `0x08080000 + 2·vga_ddr_row_col`（前缀 `6'b000001` 提供 `0x08080000` 基，非 0x08040000）。
+> - 故 scraddr=0x3000 实际得 row_col=`0x11000` → 物理 `0x080A2000`，与当时 CPU 文本窗 `0x08068000` 仍错位 `0x3A000`——这正是花屏/乱码根因。
+> - 最终对齐：commit 47cc561 把 `map[11]` 改 `10`（CPU 文本窗→`0x080A8000`）并把 BIOS `scraddr` 进一步改 `0x6000`（`ram[11'h03A]` `32'h4AEE60B0`，mov al,0x30→0x60）→ row_col=`0x14000` → 物理 `0x080A8000`，与 CPU 文本窗严格相等。文本基址已变 **`0x080A8000`**。详见 **`VGA_读地址对齐修复.md`**。
 
-把**硬编码在 `Next186_BlackBoxes.v` cache 模块 `initial begin` 内的 1KB BIOS** 中，VGA 初始化段写 CRT 起始地址寄存器（Start Address High，0x0C）的立即数由 `0x00` 改为 `0x30`（即 scraddr `0x0000 → 0x3000`），使 VGA 文本帧缓冲物理基址 = `0x08068000`，与 CPU 经 cache 的文本窗口（`map[11]=6`）及 DDR 文本基址初值（`0x14000`）**三者一致**。
+## 0. 一句话结论（原始改动，已被 47cc561 进一步修正）
+
+把**硬编码在 `Next186_BlackBoxes.v` cache 模块 `initial begin` 内的 1KB BIOS** 中，VGA 初始化段写 CRT 起始地址寄存器（Start Address High，0x0C）的立即数由 `0x00` 改为 `0x30`（即 scraddr `0x0000 → 0x3000`），意图让 VGA 文本帧缓冲物理基址 = `0x08068000`，与 CPU 经 cache 的文本窗口（`map[11]=6`）及 DDR 文本基址初值（`0x14000`）一致。⚠️ 但该意图因 VGA 基址公式算错而未真正实现（见上方勘误），最终由 commit 47cc561 用 `map[11]=10` + `scraddr=0x6000` 完成对齐。
 
 > 注：**没有改 `bios.mem`**。经核查，真正的启动 BIOS 源是 BlackBox 的硬编码 RAM，全仓库无任何 RTL 引用 `bios.mem`。
 

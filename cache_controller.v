@@ -155,27 +155,28 @@ module cache_controller(
 		.q_b(dout) // output [31 : 0] doutb
 	);
 
-	generate
-		for(i=0; i<(1<<`WAYS); i=i+1) begin: gen2
-			always @(posedge clk) begin
-				if(st0 && mmreq) begin
-					if(hit) begin
-						// LRU 更新
-						cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : cache_lru[i][index] - (cache_lru[i][index] > csblk);
-						// ★ Task #8 修复：写命中时置 dirty。之前把 dirty 置位放在与 LRU 更新
-						//   并行的独立 if 里，波形已证实条件(st0&hit&fit[i]&|mwmask)成立、fit[blk]=1，
-						//   但 cache_dirty[index][i] 仍不变 1，推断 Vivado 对两个独立 if 写到同一数组位
-						//   的综合/优先级处理异常，导致 dirty 写未生效。改为在 hit 分支内同步置位。
-						if(|mwmask)
-							cache_dirty[index][i] <= 1'b1;
-					end else if(free[i]) begin
-						// miss 分配 victim way：清 dirty
-						cache_dirty[index][i] <= 1'b0;
-					end
+	// ★ Task #8 修复：把 LRU/dirty 更新移出 generate-for，改成普通 always 块。
+	//   波形证实：generate-for 生成的 always 块里，cache_lru/cache_dirty 的寄存器写
+	//   在硬件上全部失效（条件 st0&mmreq&hit&fit[i]&|mwmask 全成立、lru_wr_r 恒 0），
+	//   而普通 always 块（STATE 块写 cache_addr）有效。dirty 改整字写，绕开单 bit 写综合异常。
+	integer w;
+	always @(posedge clk) begin
+		if(st0 && mmreq) begin
+			if(hit) begin
+				// LRU 更新（逐 way，非阻塞，RHS 全取旧值，与原 generate 逐位等价）
+				for(w=0; w<(1<<`WAYS); w=w+1) begin
+					cache_lru[w][index] <= fit[w] ? {`WAYS{1'b1}}
+						: (cache_lru[w][index] - (cache_lru[w][index] > csblk));
 				end
+				// 写命中：整字把命中 way 的 dirty 置 1
+				if(|mwmask)
+					cache_dirty[index] <= cache_dirty[index] | fit;
+			end else begin
+				// miss：整字清 free/victim way 的 dirty
+				cache_dirty[index] <= cache_dirty[index] & ~free;
 			end
 		end
-	endgenerate
+	end
 
 		
 	always @(posedge clk) begin

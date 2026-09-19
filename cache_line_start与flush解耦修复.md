@@ -354,6 +354,53 @@ endgenerate
 
 ---
 
+## 十二、定案：gen2 generate 块的寄存器写在硬件上全部失效 → 移出 generate（2026-09-19 下）
+
+### 12.1 决定性证据（lru_wr_r 不更新）
+
+用户下板波形（`isvwr=1` 触发）：
+- `dirty_cond2_r`（`st0 & mmreq & hit & |mwmask & |fit`）**有脉冲**、`mwmask_v_r`/`mmreq_r` 有脉冲、`hit_r` 恒 1、`fit_r=0001`(way0 命中)、`blk_r=0`、`index_r=00`、`tag_r=0x170`(=VRAM 0xB8000)。
+- **`lru_wr_r`（`cache_lru[blk=0][index=0]`）恒 0 不更新**。
+
+gen2 hit 分支第一条就是 LRU 写 `cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : ...`，它**不依赖 `|mwmask`**、每次命中（含取指读命中）都写，way0 命中必写 `2'b11=3`。条件全成立却恒 0 → **cache_lru 写从未落地**。dirty 与 LRU 同在 gen2 块 → dirty 写同样全部失效。这解释了 `e0095f9`(独立 if)、`64e0520`(并入 hit 分支) 两次改写法都无效。
+
+旁证：`tag_r=0x170` 且 `hit=1` → VRAM 行 tag 已存入 `cache_addr[0][0]` → **普通 always 块（STATE 块）里的数组写有效**；失效的只有 generate-for 生成的 always 块里的数组写。
+
+附带效应：LRU 从不更新 → `free[0]=~|0` 恒 1 → 每次 miss 都换出 way0 → 系统仍能启动（掩盖问题）。
+
+### 12.2 修复：LRU/dirty 更新移出 generate，改普通 always 块 + 整字写
+
+```verilog
+integer w;
+always @(posedge clk) begin
+    if(st0 && mmreq) begin
+        if(hit) begin
+            for(w=0; w<(1<<`WAYS); w=w+1) begin
+                cache_lru[w][index] <= fit[w] ? {`WAYS{1'b1}}
+                    : (cache_lru[w][index] - (cache_lru[w][index] > csblk));
+            end
+            if(|mwmask)
+                cache_dirty[index] <= cache_dirty[index] | fit;   // 命中 way 置 dirty（整字）
+        end else begin
+            cache_dirty[index] <= cache_dirty[index] & ~free;     // 清 victim/free way dirty（整字）
+        end
+    end
+end
+```
+
+- 与原 gen2 逐位功能等价：LRU 逐 way 更新（非阻塞，RHS 全取旧值）；dirty 命中整字置位、miss 整字清 free way。
+- 关键差别：**不再用 generate-for**；dirty 用**整字读-改-写**（`| fit` / `& ~free`），彻底绕开 generate 内数组写 + 单 bit 写两个嫌疑点。
+- `genvar i` 仍保留（gen1 的 `fit/free/lru` 组合赋值仍用）。
+
+### 12.3 验证判活
+
+1. **辅助**：`lru_wr_r`（`cache_lru[0][0]`）在首次命中后应变 `2'b11=3`（验证移出 generate 后写生效）。
+2. **主判**：`isvwr=1` 触发时 `dirty_r` 变 1。
+3. 每帧 flush 扫描到 VRAM 行时，`awaddr=0x08068000` 出现 AXI 写事务。
+4. 文本 VRAM 最终同步到 DDR，VGA 可见。
+
+---
+
 ## 八、已规避的坑（对照前几轮）
 
 - ❌ **绝不再用 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]` + CDC**（4b797fd 死锁根因：`lowaddr[5]` 永不到 → `s_lowaddr5` 恒低 → STATE 011 卡死）。

@@ -507,3 +507,35 @@ wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 
 1. **修复生效**：flushcount 到 0x80 时 `dirtywire_r=1` → ddr_wr 拉高 → STATE 011 → s_lowaddr5 方波 → 用 system ILA 抓 `awaddr=0x08068000` → VGA 更新。
 2. **定罪综合异常**：`dirtywire_r` 仍为 0 而 `dirty_r=0001` → free/判脏路径综合异常坐实 → 下一步把 cache_dirty 改 way-first（`reg [0:31] cache_dirty[0:3]`）或改寄存器化判脏。
 3. `dbg_sys_flush_r` 应恰好 1 拍高、`dbg_sys_auto_flush_r` 脉冲期读数 6(110)、`dbg_sys_vblnk_r` 在消隐期为一长段高电平。
+
+---
+
+## 十五、十次修复：blk way 错配定案 —— 0x60 偏移与显存 dirty 丢失的共同根因（2026-09-19 20:04）
+
+### 15.1 判别波形结论（假设 B 坐实）
+
+isvwr 触发波形：CPU 写显存时 `tag_r=0x170`、`index=00`、`fit=0001`（way0 命中）、`hiaddr=2e00={0x170,0}`，`dirty_r` 对应位置 1 —— **显存行写命中标脏成功**；但窗口末尾 dirty 被清 0。结合上一轮 flush 波形（way0/idx0 写回的是 tag=0x000 低内存行），证明：**显存行与低内存行同 index=0 互踩，显存行 dirty 在被逐出/清出后丢失，flush 永远扫不到脏的显存行**。
+
+### 15.2 三层根因（本次全部修复）
+
+**① blk way 错配（主犯，0x20→0x40→0x60 偏移的真正根源）**
+`blk = flushcount[6:5] | fit编码`：miss 时 fit=0000，blk = flushcount[6:5] 残留值（flush 结束后恒 00=way0），而 victim 实际是 fblk（LRU 生效后轮换到 way1/2/3）。后果：**填充数据写进 way0、tag 记在 fblk；写回把 way0 的数据写到 victim 的地址**——数据/地址 way 错配。原作者代码因 LRU 永不更新（victim 恒 way0）掩盖了此 bug；六次修复 LRU 生效后立刻爆发，偏移随 way 轮换从 0x20 恶化到 0x60。
+
+**② free 多 hot 误清 dirty（显存 dirty 丢失）**
+LRU 退化（miss 不更新 LRU）→ 多个 way LRU 同时归 0 → free 多 hot → miss-clear `&~free` 一次清掉多个 way 的 dirty，但写回只写 fblk 一个 way → 其余 free way 脏数据被静默清除，显存行 dirty 就这样丢掉。
+
+**③ flush 写回后 dirty 不清零** → 每帧重复写回同一批行。
+
+### 15.3 修复内容
+
+1. **blk 重定义**：`blk = r_flush ? flushcount[6:5] : (st0 ? fit_enc : vblk)`。新增 `vblk` 寄存器，miss 拍锁存 `vblk <= fblk`——填充/逐出写回的端口 A 永远用 victim way，tag 与数据同 way。
+2. **miss 更新 LRU**：victim(fblk) 设为 MRU(3)，其余 >victim 旧值递减——LRU 保持严格排列，free 恒单 hot，杜绝 ②。
+3. **miss-clear 只清 fblk way**：`cache_dirty[index] & ~(4'b0001 << fblk)`，不再 `&~free`。
+4. **flush 写回后清 dirty**：STATE 011 的 s_lowaddr5_fall 分支（r_flush=1 时）清扫描行对应 way 的 dirty。
+5. **LRU/dirty 块加 `~r_flush` 门控**：防止 flush 扫描期间残留 CPU 请求（mmreq=rmreq）误入 miss 分支污染 LRU/误清扫描行。
+
+### 15.4 下板判据
+
+1. **主判**：flush 扫描出现 `sdraddr=0x034000`（= 显存行，物理 0x08068000）→ system ILA 抓 `awaddr=0x08068000` → VGA 文本更新。
+2. **副判**：`awaddr` 序列中不再出现与 hiaddr 不匹配的错位写回；0x08068040/0x60 的"偏移残留"不再变化。
+3. 若显存行写回出现但 VGA 仍偏移 → 才需要回头查 VGA 读地址（vga_ddr_row_col/scraddr）——即 0x20/0x60 与写回 bug 彻底分离的验证点。

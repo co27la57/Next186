@@ -152,7 +152,17 @@ module cache_controller(
 	wire st0 = STATE == 3'b000;
 	wire dirty = |(free & cache_dirty[index]);	
 
-	wire [`WAYS-1:0]blk = flushcount[`WAYS+`SETS-1:`SETS] | {|fit[3:2], fit[3] | fit[1]};
+	// ★★ Task #8 十次修复（2026-09-19 20:04 波形定案）：blk 的 way 选择纠正。
+	//   原表达式 blk = flushcount[6:5] | fit编码：miss 逐出写回/填充时 fit=0000，
+	//   blk = flushcount[6:5] 残留值（flush 结束后恒 00=way0），而 victim 实际是 fblk
+	//   （可能 way1/2/3）→ 填充数据写进 way0、tag 记在 fblk；写回把 way0 数据写到
+	//   victim 地址 —— 数据/地址 way 错配，即 0x20→0x40→0x60 偏移的真正根源。
+	//   原作者代码因 LRU 永不更新（victim 恒 way0）掩盖了此 bug；六次修复 LRU 生效后爆发。
+	//   修复：hit（端口 B）用 fit 编码；miss 填充/逐出写回（STATE 011/111）用锁存的 vblk=fblk；
+	//         flush 写回用 flushcount[6:5]（r_flush 时）。
+	wire [`WAYS-1:0]fit_enc = {|fit[3:2], fit[3] | fit[1]};
+	reg  [`WAYS-1:0]vblk = 0;   // miss 锁存的 victim way（填充/逐出写回共用）
+	wire [`WAYS-1:0]blk = r_flush ? flushcount[`WAYS+`SETS-1:`SETS] : (st0 ? fit_enc : vblk);
 	wire [`WAYS-1:0]fblk = {|free[3:2], free[3] | free[1]};
 	wire [`WAYS-1:0]csblk = lru[0] | lru[1] | lru[2] | lru[3];
 
@@ -189,7 +199,9 @@ module cache_controller(
 	//   而普通 always 块（STATE 块写 cache_addr）有效。dirty 改整字写，绕开单 bit 写综合异常。
 	integer w;
 	always @(posedge clk) begin
-		if(st0 && mmreq) begin
+		// ★ 十次修复：加 ~r_flush 门控——flush 扫描期间（fit 恒 0、hit 恒 0）若残留 CPU 请求
+		//   （mmreq=rmreq=1）会误入 miss 分支，用扫描 way 污染 LRU / 误清扫描行 dirty。
+		if(st0 && mmreq && !r_flush) begin
 			if(hit) begin
 				// LRU 更新（逐 way，非阻塞，RHS 全取旧值，与原 generate 逐位等价）
 				for(w=0; w<(1<<`WAYS); w=w+1) begin
@@ -200,8 +212,15 @@ module cache_controller(
 				if(|mwmask)
 					cache_dirty[index] <= cache_dirty[index] | fit;
 			end else begin
-				// miss：整字清 free/victim way 的 dirty
-				cache_dirty[index] <= cache_dirty[index] & ~free;
+				// ★ 十次修复：miss 时 victim(fblk) 将被填充 → 设为 MRU，防止 LRU 退化
+				//   （原代码 miss 不更新 LRU → victim 恒同一个 way → 多 way LRU 归 0 → free 多 hot）。
+				for(w=0; w<(1<<`WAYS); w=w+1)
+					cache_lru[w][index] <= (w == fblk) ? {`WAYS{1'b1}}
+						: (cache_lru[w][index] - (cache_lru[w][index] > cache_lru[fblk][index]));
+				// ★ 十次修复：只清被替换 way(fblk) 的 dirty。
+				//   原 &~free 在 free 多 hot（LRU 退化）时会静默清掉其他脏 way 的 dirty
+				//   而不写回 → 显存行 dirty 就是这样丢的（用户波形：isvwr 置 1 后被清 0）。
+				cache_dirty[index] <= cache_dirty[index] & ~(4'b0001 << fblk);
 			end
 		end
 	end
@@ -222,7 +241,10 @@ module cache_controller(
 		3'b000: begin
 			hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE]; 
 			if(mmreq && !hit) begin	// cache miss
-				if(!r_flush) cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
+				if(!r_flush) begin
+					cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
+					vblk <= fblk;   // ★ 十次修复：锁存 victim way，供 STATE 011 写回/111 填充的端口 A 使用
+				end
 				ddr_rd <= ~dirty & ~r_flush;
 				ddr_wr <= dirty;
 				// ★ 整行修复：脏行先写回(011)，再直接进读填充(111)；干净行直接读填充(111)。
@@ -256,6 +278,10 @@ module cache_controller(
 			//   状态机若提前进入 111 会更新 hiaddr，导致后半行写错地址（0x20/0x40 偏移）。
 			if(s_lowaddr5_fall) begin
 				ddr_wr <= 1'b0;
+				// ★ 十次修复：flush 写回完成后清除该行 dirty（原代码不清 → 每帧重复写回同一批行）。
+				//   miss 逐出路径的 dirty 已在 miss 拍由 LRU 块清除，此处只处理 flush 路径。
+				if(r_flush) cache_dirty[flushcount[`SETS-1:0]] <=
+					cache_dirty[flushcount[`SETS-1:0]] & ~(4'b0001 << flushcount[`WAYS+`SETS-1:`SETS]);
 				// ★ flush 写完脏行后直接推进扫描(STATE 100)，不再进入 111 回填：
 				//   否则会把刚写回 DDR 的行又用 DDR 旧数据覆盖掉，且与晚到的 CPU 写入存在回写竞态。
 				STATE <= r_flush ? 3'b100 : 3'b111;

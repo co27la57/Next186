@@ -621,3 +621,39 @@ LRU 退化（miss 不更新 LRU）→ 多个 way LRU 同时归 0 → free 多 ho
 
 触发 `dbg_ctl_ddr_wr_r` 上升沿，写回序列应出现 `sdraddr=0x034000` → system ILA 抓 `awaddr=0x08068000` → VGA 文本更新；0AFE00/028020 残留若仍在属正常 bootstrap/planar 行逐出，但 VRAM 行必须单独出现一次写回。若显存写回出现而 VGA 仍偏移，转查 VGA 读地址（vga_ddr_row_col/scraddr）。
 
+## 第十九节：十五次修复——LRU 轮转根治「显存行永不写回」（2026-09-19 23:53）
+
+### 19.1 定案波形
+
+十四次新增的诊断探针 **`dbg_ctl_vram_wr_r` 永不触发** → 坐实 **VRAM 行从未成为写回 victim**（而非"写回地址错"）。即 0x034000 不出现的原因是**写回事务根本没发生**，不是地址被覆盖。
+
+（同时纠正第十三节的误算：VRAM 行 = `index0` / `tag=0x170` / **`hiaddr=0x2E00`** / 物理 `0x08068000` / `sdraddr=0x034000`。此前误记为 0x2D0。）
+
+### 19.2 根因：LRU 更新两个缺陷叠加 → victim 锁死
+
+`cache_controller.v` LRU/dirty 块的命中分支原为：
+`cache_lru[w][index] <= fit[w] ? 3 : (cache_lru[w][index] - (cache_lru[w][index] > csblk));`
+
+1. **多 way 同置 MRU**：bootstrap 期 4 个 way 的 `cache_addr` 同 `tag=511` → `fit` 多 hot（1111）→ 命中分支把**多个 way 同时置 MRU=3**，LRU 出现并列；
+2. **并列永不打破**：递减条件用 `>`（仅严格大于才下移）。并列值相等 → 不递减；且当 victim 已是 MRU(=3) 时无人 `>3` → **并列永久保持**。
+
+后果：`vblk_lru`（最小比较器）永远锁死在同一两个 way（并列时 tie-break 固定取小下标），**其余 way 永不成为 victim** → 落在这些 way 上的显存行（index0, tag=0x170）脏数据**永不写回**（`dirty` 一直挂着，永不产生 AXI 写事务）。
+
+### 19.3 修复（commit e998936）
+
+1. **MRU 只置单 way**：命中分支改 `(w == fit_enc) ? 3 : ...`，不再多 way 同置 3（多 hot 时各行 tag 相同、数据等价，取 `fit_enc` 确定的那个，正确性不受影响）；
+2. **递减改 `>=` 并 clamp**：`(cache_lru[w][index] >= cache_lru[fit_enc][index]) && (cache_lru[w][index] != 0)` 才减 1——相等也下移以打破并列，`!=0` 防止 2bit 的 `0-1` 回绕成 3（否则 LRU 反而被抬高成 MRU）；
+3. miss 分支同样改 `>=` + clamp。
+
+手推验证：退化态 `way0=3,way1=2,way2=2,way3=2` 经 3 次 miss 后收敛为 `0,1,2,3` 严格排列，**4 way 严格轮转**，显存行必被逐出写回。
+
+### 19.4 探针精简（同批）
+
+- `cache_controller.v` 移除 6 个被覆盖/一次性探针：`dbg_ctl_free_r`（free 自十二次修复起退出主逻辑）、`dbg_ctl_mwmask_v_r`、`dbg_ctl_fit_wr_r`、`dbg_ctl_dirty_cond2_r`、`dbg_ctl_dirty_wr_r`、`dbg_ctl_dirty_wr_d1_r`；删除因本修复成为死代码的 `csblk`。
+- `ddr_186.v` 移除 4 个：`dbg_cpu_halt`（与 `Next186_CPU.v` 的 `dbg_HALT` 重复）、`dbg_fifo_dout`、`dbg_ram_wdata_lo`、`dbg_fifo_words_r`。
+- 生效探针：cache_controller 30→22，ddr_186 12→8（总量远低于 300 上限）。
+
+### 19.5 下板判据
+
+`dbg_ctl_vram_wr_r` **应能触发** → `sdraddr=0x034000` → `awaddr=0x08068000` → VGA 文本更新。同时可用 `dbg_ctl_lru_wr_r` 观察 4 个 way 的 LRU 是否真的轮转（不再长期并列）。
+

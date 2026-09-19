@@ -101,8 +101,11 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_mwmask_v_r;  // 当拍 |mwmask 是否有效（与 isvwr 锁存值对比，验证 wmask 是否滞后 mreq）
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
 	(* mark_debug = "true" *) reg        dbg_ctl_fit_wr_r;    // fit[blk]：选中 way 是否真的命中(tag 匹配) —— 验证 blk/fit 错位 bug
-	(* mark_debug = "true" *) reg        dbg_ctl_dirty_cond_r;// 整体置 dirty 条件：st0 & hit & |mwmask & |fit（任一子条件为 0 即不成立）
-	(* mark_debug = "true" *) reg        dbg_ctl_dirty_wr_r;  // cache_dirty[index][blk]：实际写 way 的 dirty 当前值（1 拍延迟，写后次拍可见）
+	// ★ 替换 dirty_cond_r：含 mmreq 的精确 gen2 写条件，直接对比"条件成立但写未生效"
+	(* mark_debug = "true" *) reg        dbg_ctl_dirty_cond2_r;// st0 & mmreq & hit & |mwmask & |fit（gen2 实际置 dirty 条件，含 mmreq）
+	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_lru_wr_r;    // cache_lru[blk][index]：写命中 way 的 LRU 当前值——若随写更新则 if(hit) 分支确在执行
+	(* mark_debug = "true" *) reg        dbg_ctl_dirty_wr_r;  // cache_dirty[index][blk]：实际写 way 的 dirty 当前值（1 拍延迟）
+	(* mark_debug = "true" *) reg        dbg_ctl_dirty_wr_d1_r;// dirty_wr_r 的 1 拍延迟——捕捉写后的 dirty 值（即使 index 变化也能看到）
 
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
@@ -266,8 +269,10 @@ module cache_controller(
 		dbg_ctl_mwmask_v_r  <= |mwmask;
 		dbg_ctl_blk_r       <= blk;
 		dbg_ctl_fit_wr_r    <= fit[blk];
-		dbg_ctl_dirty_cond_r <= st0 && hit && |mwmask && |fit;
+		dbg_ctl_dirty_cond2_r <= st0 && mmreq && hit && |mwmask && |fit;
+		dbg_ctl_lru_wr_r    <= cache_lru[blk][index];
 		dbg_ctl_dirty_wr_r   <= cache_dirty[index][blk];
+		dbg_ctl_dirty_wr_d1_r <= dbg_ctl_dirty_wr_r;
 	end
 	
 endmodule

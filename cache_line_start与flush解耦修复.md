@@ -295,6 +295,63 @@ endgenerate
 - 每帧 flush 扫描到 VRAM 行时，该行 dirty 已置 1 → `awaddr=0x08068000` 出现 AXI 写事务。
 - 文本 VRAM 最终同步到 DDR，VGA 可见。
 
+### 10.4 下板结果：dirty_r 仍 0（2026-09-19 中，gen2 重构无效）
+
+用户下板复测：`dirty_r` **仍不变 1**，其它波形不变。说明第十节的 gen2 重构（把 dirty 置位并入 `if(hit)` 分支）**没有改变行为**——"两个独立 if 综合歧义"的假设**不成立**。dirty 置位不管用独立 `if` 还是并入 hit 分支，都写不进 `cache_dirty`。
+
+---
+
+## 十一、条件已完全证实满足，锁定 `cache_dirty` 数组写本身被吞（2026-09-19 中）
+
+### 11.1 已排除项（综合前几轮波形）
+
+| 子条件 | 证据 | 结论 |
+|---|---|---|
+| `st0`(STATE=000) | `STATE_r=0` | ✅ 满足 |
+| `hit`(= \|fit) | `dirty_cond_r=1`、`hit_r=1` | ✅ 满足 |
+| `\|mwmask` | `mwmask_v_r` 脉冲、`isvwr=1` | ✅ 满足 |
+| `fit[i]`(写命中 way) | `fit_wr_r`=fit[blk]=1 | ✅ 满足 |
+| `mmreq` | `mmreq_r` 与 `mwmask_v_r` 严格同步 | ✅ 满足 |
+| `blk`/`fit` 错位(假设B) | `fit_wr_r` 恒 1 | ❌ 排除 |
+
+即 `st0 && mmreq && hit && fit[i] && |mwmask` 这一置位条件**全部成立**，但 `cache_dirty[index][i] <= 1'b1` 仍未生效 → **问题在 `cache_dirty` 数组的 runtime 写本身被 Vivado 吞掉**，不在条件判断。
+
+### 11.2 两条待区分的根因（用新探针一次性判明）
+
+**(P) `mmreq`（ce 门控后）在写命中那拍实际为 0**
+- 我的重构把 `mmreq` 加回了 dirty 置位条件（`if(st0 && mmreq) if(hit)`）。而 `dirty_cond_r` 之前**不含 mmreq**，所以"条件满足"里其实没验证 gated `mmreq`。
+- 若 `mmreq`(=`ce ? mreq : rmreq`) 在 CPU 写命中那拍为 0（例如 ce 短暂拉低、或 mreq 与写数据拍错位），则 dirty 置位和 cache_mem port B 的数据写（`enable_b=mmreq&&hit&&st0`）都会跳过 → dirty 不置 + VRAM 数据不进 cache。
+- **判活**：`dbg_ctl_dirty_cond2_r`（`st0 & mmreq & hit & |mwmask & |fit`）。若它**不随 `mwmask_v_r`/`mmreq_r` 同步脉冲**，说明 gated `mmreq` 在写拍确实缺失。
+
+**(Q) `cache_dirty[index][i]` 这个数组的 runtime 写被综合吞掉**
+- `cache_dirty` 是**index-first** 维度的 4-bit 数组（`reg [3:0] cache_dirty[0:31]`），而 `cache_lru`/`cache_addr` 是 **way-first**（`[0:3][0:31]`）。`cache_addr` 的写（miss 装载 tag）已被证实有效（VRAM 行能载入、hit=1），`cache_lru` 同理。`cache_dirty` 的 index-first + 单 bit 写 `cache_dirty[index][i] <= 1'b1` 可能被 Vivado 推断为 RAM 后单 bit WE 生成异常，导致写丢失。
+- **判活**：`dbg_ctl_lru_wr_r`（`cache_lru[blk][index]`）。若它在写命中时**随写更新**（例如 0→3 或递减），说明 `if(hit)` 分支确实在跑、LRU 写有效，而 `dirty_r` 仍 0 → 只有 `cache_dirty` 写被吞 → 坐实 (Q)。
+- 另有 `dbg_ctl_dirty_wr_d1_r`（`dirty_wr_r` 的 1 拍延迟）：即使写后 `index` 立即变化，也能捕捉到"上一拍写进去的 1"。
+
+### 11.3 本轮探针增删（cache_controller.v）
+
+- **删除** `dbg_ctl_dirty_cond_r`（不含 mmreq，已被 cond2 取代）。
+- **新增 / 替换**（非 top 模块，`reg`+`always`）：
+  | 探针 | 含义 | 用途 |
+  |---|---|---|
+  | `dbg_ctl_dirty_cond2_r` | `st0 & mmreq & hit & |mwmask & |fit` | 判 (P)：gated mmreq 是否在写拍缺失 |
+  | `dbg_ctl_lru_wr_r [1:0]` | `cache_lru[blk][index]` | 判 (Q)：`if(hit)` 分支是否执行、LRU 写是否生效 |
+  | `dbg_ctl_dirty_wr_d1_r` | `dirty_wr_r` 的 1 拍延迟 | 捕捉写后 dirty（即使 index 变化） |
+- 探针总数仍 < 300（本轮 net +2，约 24 根）。
+
+### 11.4 抓波判读表（isvwr=1 触发，叠加看）
+
+| 现象 | 结论 | 修复方向 |
+|---|---|---|
+| `dirty_cond2_r` 不脉冲（但 `mwmask_v_r`/`mmreq_r` 脉冲） | (P) gated `mmreq` 写拍缺失 | dirty/数据写改用写有效信号门控，不依赖 gated `mmreq` |
+| `dirty_cond2_r` 脉冲 + `lru_wr_r` 不更新 | `if(hit)` 分支未执行（另有隐情） | 查 st0/hit 的当拍组合 |
+| `dirty_cond2_r` 脉冲 + `lru_wr_r` 更新 + `dirty_r`/`dirty_wr_d1_r` 仍 0 | (Q) `cache_dirty` 写被吞 | 把 `cache_dirty` 改 way-first（`[0:3][0:31]`，与 cache_lru/cache_addr 一致），或改整字写 `cache_dirty[index] <= cache_dirty[index] | mask` |
+
+### 11.5 待波形确认后再定修复
+
+- 大概率是 (Q)：`cache_dirty` 的 index-first + 单 bit 写导致综合写丢失。若波形坐实，修复 = 把 `cache_dirty` 声明改为 way-first `reg [(1<<WAYS)-1:0] cache_dirty[0:(1<<WAYS)-1][0:(1<<SETS)-1]`，所有访问相应改为 `cache_dirty[i][index]`（读 `wire dirty`、探针、gen2 写）。
+- 若波形指向 (P)，修复 = dirty 置位/数据写不再依赖 gated `mmreq`。
+
 ---
 
 ## 八、已规避的坑（对照前几轮）

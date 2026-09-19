@@ -808,7 +808,20 @@ module system
 		//   场景里 flush 永不触发，脏的显存行永远留在本 cache、写不回 DDR → VGA 看不到更新。
 		//   现于每帧 vblnk 自动置位（与 cache_controller 是否改动无关，独立保证脏行落到 DDR）。
 		auto_flush[2] <= auto_flush[2] | vblnk;   // 持有到本帧 flush 脉冲(3'b110)产生为止；shift 寄存器在 vblnk 下降沿输出一次 flush
-		
+
+	end
+
+	// ★ Task #8 flush 链路诊断探针（2026-09-19）：clk_cpu 域采样、无门控，以此为准。
+	//   （板端此前手加的 dbg_auto_flush_r/dbg_flush_r/dbg_vblnk_r 采样时钟不明，波形出现
+	//   flush 脉冲 2 拍、脉冲期间 auto_flush=4 而非 6、vblnk 无脉冲等自相矛盾读数——
+	//   按 RTL，flush=(auto_flush==3'b110) 每个 vblnk 下降沿只能持续 1 个 clk_cpu 周期。）
+	(* mark_debug = "true" *) reg [2:0] dbg_sys_auto_flush_r;
+	(* mark_debug = "true" *) reg       dbg_sys_vblnk_r;
+	(* mark_debug = "true" *) reg       dbg_sys_flush_r;
+	always @(posedge clk_cpu) begin
+		dbg_sys_auto_flush_r <= auto_flush;
+		dbg_sys_vblnk_r      <= vblnk;
+		dbg_sys_flush_r      <= (auto_flush == 3'b110);
 	end
 	
 	always @ (posedge clk_25) begin

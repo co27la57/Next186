@@ -104,6 +104,10 @@ module cache_controller(
 	(* mark_debug = "true" *) reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
 	(* mark_debug = "true" *) reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
 	(* mark_debug = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
+	// ---- Task #8 八次诊断探针：flush 扫描判脏链路（2026-09-19）----
+	(* mark_debug = "true" *) reg        dbg_ctl_flushreq_r;   // flush 脉冲锁存
+	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_free_r;       // free（含 flush 扫描 way 选择）
+	(* mark_debug = "true" *) reg        dbg_ctl_dirtywire_r;  // dirty 组合线本体（flush 分支实际判据）
 
 	// ---- Task #8 诊断探针（深挖 dirty 置 1 条件，2026-09-19）----
 	(* mark_debug = "true" *) reg        dbg_ctl_mwmask_v_r;  // 当拍 |mwmask 是否有效（与 isvwr 锁存值对比，验证 wmask 是否滞后 mreq）
@@ -123,10 +127,26 @@ module cache_controller(
 	generate
 		for(i=0; i<(1<<`WAYS); i=i+1) begin: gen1
 			assign fit[i] = ~r_flush && (cache_addr[i][index] == maddr[`ADDR-1:`LINE+`SETS]);
-			assign free[i] = r_flush ? (flushcount[`WAYS+`SETS-1:`SETS] == i) : ~|cache_lru[i][index];
 			assign lru[i] = {`WAYS{fit[i]}} & cache_lru[i][index];
 		end
 	endgenerate
+
+	// ★ Task #8 八次修复（2026-09-19 波形定案）：free 判脏路径移出 generate，改显式赋值。
+	//   波形矛盾：flush 脉冲后 2 拍探针仍显示 cache_dirty[0]=0001（way0 脏、tag=000 命中），
+	//   但扫描到 0x80(way0/idx0) 时判 clean 直进 STATE 100，ddr_wr 全程为 0。而 2 拍内代码上
+	//   不存在任何清 dirty 的路径（LRU 块被 st0&&mmreq 门控，扫描期间 mmreq=0）→ 嫌疑集中到
+	//   generate 内 free 的 r_flush 二选一 mux 被综合错（与 gen2 寄存器写失效同类病）。
+	//   旁证：cache_dirty 初始化 idx16-31=1111，若活到扫描，0x90-0x97 必触发写回，实测到
+	//   0x97 仍无 ddr_wr → boot 期逐出已把这些位清掉（每次伴随一次垃圾写回，即之前
+	//   "写事务只在 0x0815FC00 bootstrap 区出现"的来源）→ 逐出+写回机器是通的，坏的只是
+	//   flush 扫描判脏这一条组合路径。
+	wire [(1<<`WAYS)-1:0]free_lru;
+	assign free_lru[0] = ~|cache_lru[0][index];
+	assign free_lru[1] = ~|cache_lru[1][index];
+	assign free_lru[2] = ~|cache_lru[2][index];
+	assign free_lru[3] = ~|cache_lru[3][index];
+	wire [(1<<`WAYS)-1:0]scan_free = 4'b0001 << flushcount[`WAYS+`SETS-1:`SETS];
+	assign free = r_flush ? scan_free : free_lru;
 		
 	wire hit = |fit;
 	wire st0 = STATE == 3'b000;
@@ -222,10 +242,12 @@ module cache_controller(
 					STATE <= 3'b100;   // 当前行干净，直接推进扫描下一行
 				end
 				ce <= 1'b0;            // 写回期间挂起 CPU，与正常 evict 一致，避免丢写
-			end else begin
-				flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
-				ce <= 1'b1;
-			end
+		end else begin
+			// ★ flush 启动时把扫描指针归位 0x80(way0/idx0)：每轮固定全扫 128 行，
+			//   捕获窗口可预测，且刚标脏的显存行最早被访问到。
+			if(flushreq) flushcount <= {1'b1, {(`WAYS+`SETS){1'b0}}};
+			ce <= 1'b1;
+		end
 		end
 		3'b011: begin	// write cache to ddr
 			ddr_rd <= ~r_flush; //1'b1;
@@ -283,6 +305,10 @@ module cache_controller(
 		dbg_ctl_dirty_wr_r   <= cache_dirty[index][blk];
 		dbg_ctl_dirty_wr_d1_r <= dbg_ctl_dirty_wr_r;
 		dbg_ctl_s_lowaddr5_fall_r <= s_lowaddr5_fall;
+		// ---- Task #8 八次诊断探针采样 ----
+		dbg_ctl_flushreq_r  <= flushreq;
+		dbg_ctl_free_r      <= free;
+		dbg_ctl_dirtywire_r <= dirty;
 	end
 	
 endmodule

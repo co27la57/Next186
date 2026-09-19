@@ -473,3 +473,37 @@ wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 
 - ❌ 不再整体回退删 `cache_line_start`/`flush 解耦`（af6f44b 开倒车，导致 isvwr 不触发）。
 - ✅ 保留：`map[11]=6`、`sdraddr` 5'b00000（1:1）、`auto_flush[2]|=vblnk`（每帧回写）、`BlackBox` 禁加 for 循环全量填充、四 way index16-31=511。
 - ✅ `cache_line_start` 配 5-bit `lowaddr` 是**安全且必要**的（区别于 4b797fd 的 6-bit 方案）。
+
+---
+
+## 十四、八次修复：flush 触发链排除 + 扫描判脏路径定罪（2026-09-19 18:23 波形）
+
+### 14.1 两组波形的判读结论
+
+**图 A（isvwr 触发）**：触发条件不对——isvwr 在行有效期（active video）内每次 CPU 写显存都触发，而 flush 每帧只在 vblnk 下降沿来一次，一张 isvwr 窗口里永远看不到 flush。图 A 里 `auto_flush=4`(100) 反而是**正常**读数：sticky 位 [2]=1（上一帧 vblnk 已锁存过）、移位 [1:0]=00（当前 vblnk 低）——顺带证明 auto_flush[2] 锁存 vblnk 正常。图 A 的真正价值：dirty_cond2/dirty_wr/fit/lru_wr 全部正常，写命中标脏路径无问题。
+
+**图 B（dbg_flush_r 触发）**：flush 链路全程跑通——
+1. flush 脉冲出现 → `flushcount` 从 0x00 置位到 0x80（bit7=r_flush 置 1）；
+2. 扫描连续推进 0x80→0x81→…→0x97（way0, idx0→23），速率 ≈2 clk_cpu 周期/行（0↔4 循环），与 25MHz 时钟和窗口尺寸吻合；
+3. **但 `ddr_wr`/`lowaddr`/`s_lowaddr5` 全程为 0**——扫描对每一行（包括 idx0/way0）都判"clean"，直接 STATE 100 推进，从未进入 STATE 011 写回。
+
+### 14.2 逻辑矛盾与定罪
+
+- 图 B 在 flush 脉冲时刻（扫描前 2 拍）探针显示 `index=00`、`tag=000`、`fit=0001`、`hit=1`、**`dirty_r=0001`**（cache_dirty[0] way0=1，CPU 低内存/显存写入所标）。
+- 扫描到 flushcount=0x80（way0/idx0）时 free 应=0001，`dirty=|(0001&0001)=1`，flush 分支必须进 STATE 011 并拉高 ddr_wr——实测却走了 STATE 100。
+- **2 拍之内代码上不存在任何清 dirty 的路径**（LRU/dirty 块被 `st0&&mmreq` 门控，扫描期间 mmreq=0）→ cache_dirty[0] 不可能变 0 → 嫌疑唯一收敛到 **generate 内 `free` 的 `r_flush` 二选一 mux 被综合错**（与 gen2 寄存器写失效同类病：generate 结构里的数组/复杂表达式在硬件上失效）。
+- **旁证**：cache_dirty 初始化 idx16-31=1111（脏、tag=511）。若这些位活到扫描，flushcount=0x90~0x97（way0/idx16-23）必触发写回，实测推到 0x97 仍无 ddr_wr → 这些位是 boot 期间被正常逐出清掉的，**每次伴随一次垃圾写回**——这正是此前"AXI 写事务只出现在 0x0815FC00 bootstrap 区"的真正来源。**推论：boot 期逐出+写回+AXI burst+STATE 011 整条机器是通的**（否则 boot 会在 STATE 011 等 s_lowaddr5_fall 卡死），坏的只有 flush 扫描判脏这一条组合路径。
+- **0x40 偏移现状**：post-boot ddr_wr 从未拉高 → DDR 里没有任何新写入 → 在 0x08068040 看到的 aaaaaaaa 是历史残留数据，不是当前偏移。先让写回发生，再验证落点。
+
+### 14.3 本轮修复内容（commit：八次修复）
+
+1. **候选修复**：`free` 移出 generate 改显式赋值——`free_lru[0..3]` 显式展开 + `scan_free = 4'b0001 << flushcount[6:5]`，`free = r_flush ? scan_free : free_lru`。功能等价、结构不同，绕开 generate 内 per-bit mux 的综合异常嫌疑。
+2. **扫描起点归位**：flush 启动时 `flushcount <= 0x80`（原代码只置 bit7、低 7 位保持上轮残值），每轮固定从 way0/idx0 全扫 128 行，捕获窗口可预测。
+3. **探针整理**：删除 top_zynq7010.v 全部 AXI mark_debug 探针（改用 system ILA 自动探针）；ddr_186.v 新增规范 clk_cpu 域探针 `dbg_sys_auto_flush_r/dbg_sys_vblnk_r/dbg_sys_flush_r`（板端手加版本采样时钟不明，出现"flush 脉冲 2 拍、脉冲期 auto_flush=4、vblnk 无脉冲"等自相矛盾读数——按 RTL flush 每帧只能持续 1 个 clk_cpu 周期，用仓库版替换）。
+4. **定罪探针**：cache_controller.v 新增 `dbg_ctl_flushreq_r`、`dbg_ctl_free_r`、`dbg_ctl_dirtywire_r`（flush 分支实际判据的 dirty 组合线本体）。
+
+### 14.4 下板判据（触发：dbg_sys_flush_r 上升沿，窗口 ≥ 10µs 覆盖整轮扫描）
+
+1. **修复生效**：flushcount 到 0x80 时 `dirtywire_r=1` → ddr_wr 拉高 → STATE 011 → s_lowaddr5 方波 → 用 system ILA 抓 `awaddr=0x08068000` → VGA 更新。
+2. **定罪综合异常**：`dirtywire_r` 仍为 0 而 `dirty_r=0001` → free/判脏路径综合异常坐实 → 下一步把 cache_dirty 改 way-first（`reg [0:31] cache_dirty[0:3]`）或改寄存器化判脏。
+3. `dbg_sys_flush_r` 应恰好 1 拍高、`dbg_sys_auto_flush_r` 脉冲期读数 6(110)、`dbg_sys_vblnk_r` 在消隐期为一长段高电平。

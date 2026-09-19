@@ -336,23 +336,8 @@ module top_zynq7010 (
     assign m_axi_arvalid = main_arvalid;
     assign m_axi_rready  = main_rready;
 
-    // ==========================================
-    // ILA 探针
-    // ==========================================
-    (* mark_debug = "true" *) wire [3:0]  dbg_axi_state        = state;
-    (* mark_debug = "true" *) wire [1:0]  dbg_axi_bresp        = m_axi_bresp;
-    (* mark_debug = "true" *) wire [31:0] dbg_axi_awaddr_full  = m_axi_awaddr;
-    (* mark_debug = "true" *) wire [7:0]  dbg_axi_awlen        = m_axi_awlen;
-    (* mark_debug = "true" *) wire [3:0]  dbg_axi_wstrb        = m_axi_wstrb;
-    (* mark_debug = "true" *) wire [31:0] dbg_axi_wdata_full   = m_axi_wdata;
-    (* mark_debug = "true" *) wire        dbg_axi_wvalid       = m_axi_wvalid;
-    (* mark_debug = "true" *) wire        dbg_axi_wready       = m_axi_wready;
-    (* mark_debug = "true" *) wire        dbg_axi_awvalid      = m_axi_awvalid;
-    (* mark_debug = "true" *) wire        dbg_axi_awready      = m_axi_awready;
-    (* mark_debug = "true" *) wire        dbg_axi_bvalid       = m_axi_bvalid;
-    (* mark_debug = "true" *) wire        dbg_axi_bready       = m_axi_bready;
-    (* mark_debug = "true" *) wire [31:0] dbg_axi_araddr_full = m_axi_araddr;  // 读地址：验证 1:1 映射 / 0xA0 偏移 / ARADDR 步进 0x40
-    (* mark_debug = "true" *) wire        dbg_axi_rlast       = m_axi_rlast;   // 读末拍：验证 cache 整行填充(第16拍拉高)
+    // AXI 探针已全部移除（2026-09-19）：改用 system ILA 自动探针，不再手动 mark_debug。
+    // 历史探针名（dbg_axi_awaddr_full/dbg_axi_araddr_full/dbg_axi_rlast 等）如需回溯见 git ae9570a。
 
 
     // ==========================================

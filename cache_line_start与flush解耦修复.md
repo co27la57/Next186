@@ -113,7 +113,43 @@
 
 ---
 
-## 六、已规避的坑（对照前几轮）
+## 七、下板新现象与二次修复（2026-09-19 早）
+
+### 7.1 用户下板观察
+
+- `isvwr_r` 拉高且开始脉冲时，`ddr_wr` **恒低**，AXI 无写事务，`awaddr=0x08068000` 抓不到。
+- `lowaddr[4:0]` 卡在 `0x1f`（31），`s_lowaddr5=1` 不翻转。
+- `araddr=0x08068000` 能抓到读事务，且读到 `aaaaaaaa`。
+
+### 7.2 分析：STATE 100 缺 else 分支导致卡死
+
+`lowaddr=31` 表示 DDR  burst 已把一行（32 半字）传完，但 counter 缺一个回绕周期（下一拍 increment 归零）→ `s_lowaddr5` 恒高。STATE 111 在 `~s_lowaddr5` 才退出，因 CDC/clk-ddr_clk 相位，STATE 111 退出到 STATE 100 时 `s_lowaddr5` 可能已被采样为低。此时 STATE 100 原代码：
+```verilog
+if(r_flush) ... else if(s_lowaddr5) ... else // 无分支！
+```
+`r_flush=0` 且 `s_lowaddr5=0` 时**无去向**，状态机卡死在 STATE 100，`ddr_wr` 拉不起来。
+
+### 7.3 二次修复
+
+1. **STATE 100 补 else 分支**：只要 `r_flush=0` 且 `s_lowaddr5=0`，就清 `ddr_rd` 并返回 STATE 000，防止卡死。
+   ```verilog
+   end else begin
+       ddr_rd <= 1'b0;
+       STATE <= 3'b000;
+   end
+   ```
+2. **新增 ILA 探针**：
+   - `cache_line_start`（`ddr_186.v`，`mark_debug` 加到 reg 声明）
+   - `dbg_ctl_STATE_r` / `dbg_ctl_flushcount_r`（`cache_controller.v`，便于下次直接看状态机卡在哪）。
+
+### 7.4 仍需确认
+
+- `lowaddr` 卡住是 burst 天然停在 31（缺回绕拍），还是 STATE 111 没等到回绕就退出并卡在 100。加了 STATE 探针后可分辨。
+- 若 STATE 100 else 分支生效但 `awaddr=0x08068000` 仍不出现，需要再看 `cache_line_start` 脉冲位置是否在某行中间误触发（需下次下板波形）。
+
+---
+
+## 八、已规避的坑（对照前几轮）
 
 - ❌ **绝不再用 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]` + CDC**（4b797fd 死锁根因：`lowaddr[5]` 永不到 → `s_lowaddr5` 恒低 → STATE 011 卡死）。
 - ❌ 不再整体回退删 `cache_line_start`/`flush 解耦`（af6f44b 开倒车，导致 isvwr 不触发）。

@@ -91,6 +91,8 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;
+	(* mark_debug = "true" *) reg [2:0]  dbg_ctl_STATE_r;
+	(* mark_debug = "true" *) reg [`WAYS+`SETS:0] dbg_ctl_flushcount_r;
 
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
@@ -210,6 +212,11 @@ module cache_controller(
 				end else if(s_lowaddr5) begin
 					ddr_rd <= 1'b0;
 					STATE <= 3'b101;
+				end else begin
+					// ★ 防止 STATE 111 退出时 s_lowaddr5 已被采样为低（CDC/相位导致错过高电平），
+					//   否则 STATE 100 在 r_flush=0/s_lowaddr5=0 时无分支，会卡死。
+					ddr_rd <= 1'b0;
+					STATE <= 3'b000;
 				end
 			end
 			3'b101: begin
@@ -229,6 +236,8 @@ module cache_controller(
 		dbg_ctl_isvwr_r  <= is_video_wr;
 		dbg_ctl_rflush_r  <= r_flush;
 		dbg_ctl_ddr_wr_r  <= ddr_wr;
+		dbg_ctl_STATE_r   <= STATE;
+		dbg_ctl_flushcount_r <= flushcount;
 	end
 	
 endmodule

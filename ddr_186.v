@@ -139,7 +139,7 @@ module system
 	reg s_ddr_rd = 1'b0;
 	reg s_ddr_wr = 1'b0;
 	reg crw = 0;	
-	reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
+	(* mark_debug = "true" *) reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
 	reg s_RS232_DCE_RXD;
 	reg s_RS232_HOST_RXD;
 	reg [18:0]rstcount = 0;

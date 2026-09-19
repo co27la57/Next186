@@ -152,11 +152,13 @@ module cache_controller(
 	assign free_lru[2] = ~|cache_lru[2][index];
 	assign free_lru[3] = ~|cache_lru[3][index];
 	wire [(1<<`WAYS)-1:0]scan_free = 4'b0001 << flushcount[`WAYS+`SETS-1:`SETS];
+	// ★ 十二次修复起 free 仅作 ILA 探针观测保留，主逻辑（victim 选择/dirty 判定）不再依赖它：
+	//   free_lru 在 LRU 退化时会出现多 hot 甚至 4'b0000，旧判脏公式 |(free & cache_dirty)
+	//   在 free=0 时恒 0，导致脏 victim 被判 clean、数据被静默覆盖（见下方 fblk/dirty 注释）。
 	assign free = r_flush ? scan_free : free_lru;
-		
+
 	wire hit = |fit;
 	wire st0 = STATE == 3'b000;
-	wire dirty = |(free & cache_dirty[index]);	
 
 	// ★★ Task #8 十次修复（2026-09-19 20:04 波形定案）：blk 的 way 选择纠正。
 	//   原表达式 blk = flushcount[6:5] | fit编码：miss 逐出写回/填充时 fit=0000，
@@ -169,7 +171,28 @@ module cache_controller(
 	wire [`WAYS-1:0]fit_enc = {|fit[3:2], fit[3] | fit[1]};
 	reg  [`WAYS-1:0]vblk = 0;   // miss 锁存的 victim way（填充/逐出写回共用）
 	wire [`WAYS-1:0]blk = r_flush ? flushcount[`WAYS+`SETS-1:`SETS] : (st0 ? fit_enc : vblk);
-	wire [`WAYS-1:0]fblk = {|free[3:2], free[3] | free[1]};
+	// ★★ Task #8 十二次修复（2026-09-19 21:47 波形定案）：victim 选择与 dirty 判定重构。
+	//   波形证据：① 触发 dbg_sys_flush_r，扫描全程 hiaddr 只有 0000（低内存）与 3ff0/3ff1
+	//   （bootstrap），显存行 0x2E00（tag=0x170）从未出现、dirtywire 恒 0；
+	//   ② 单独触发 hiaddr=2E00 窗口内 free_r 出现 4'b0000（无任何 free way）。
+	//   根因链：bootstrap 区 4 个 way 的 tag 初值均为 511 → CPU 执行 bootstrap 时 fit 多 hot
+	//   （1111）→ hit 分支把 4 个 way 的 LRU 全置 3 → LRU 排列 {0,1,2,3} 被破坏，且
+	//   ">ref 才减" 的更新在全 3 态永远减不动 → free_lru=0000 → 旧 dirty=|(free&cache_dirty)
+	//   恒 0 → 脏 victim 被判 clean，miss-clear 清 dirty + 直接覆盖填充 → 显存行脏数据
+	//   静默丢失、永不写回（awaddr=0x08068000 抓不到的总根因）。低内存/bootstrap 行因
+	//   tag 恰等于初值而永远 hit，dirty 存活——这正是它们能被 flush 写回的原因。
+	//   修复：① victim 不再依赖 "LRU==0"，改比较器选 LRU 最小 way（LRU 退化仍可轮转，
+	//   且 victim→MRU 的相对更新会逐渐自愈排列）；② dirty 判定改为 victim way 自己的
+	//   dirty 位——脏必写回，无论 LRU 处于什么状态都杜绝静默丢脏数据。
+	wire [1:0]vmin01 = (cache_lru[0][index] <= cache_lru[1][index]) ? 2'd0 : 2'd1;
+	wire [1:0]vmin23 = (cache_lru[2][index] <= cache_lru[3][index]) ? 2'd2 : 2'd3;
+	wire [1:0]vblk_lru = (cache_lru[vmin01][index] <= cache_lru[vmin23][index]) ? vmin01 : vmin23;
+	wire [`WAYS-1:0]fblk = r_flush ? flushcount[`WAYS+`SETS-1:`SETS] : vblk_lru;
+
+	// dirty = victim(fblk) way 自己的 dirty 位（不再经 free 向量 AND）。
+	// flush 扫描时 fblk=flushcount[6:5]、index=flushcount[4:0]，即扫描行自己的 dirty，语义不变。
+	wire [(1<<`WAYS)-1:0]dirty_word = cache_dirty[index];
+	wire dirty = dirty_word[fblk];
 	wire [`WAYS-1:0]csblk = lru[0] | lru[1] | lru[2] | lru[3];
 
 	always @(posedge ddr_clk) begin

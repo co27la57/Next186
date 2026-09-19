@@ -566,3 +566,29 @@ LRU 退化（miss 不更新 LRU）→ 多个 way LRU 同时归 0 → free 多 ho
 ### 16.4 教训（新增勿犯项）
 
 **同一存储数组（cache_dirty/cache_lru/cache_addr/…）严禁在两个 always 块中写**——Vivado 会以 Unsupported RAM template 报错终止综合（多驱动数组不会像单 net 那样报 multi-driven，而是 RAM 推断失败）。十次修复的功能逻辑不变，只是把清 dirty 的写集中到统一的 LRU/dirty 块。
+
+## 第十七节：十二次修复——LRU 退化 + free=0 判脏恒 0：显存行脏数据静默丢失的总根因（2026-09-19 21:47）
+
+### 17.1 决定性波形
+
+1. 触发 `dbg_sys_flush_r`：flush 扫描全程 hiaddr 只有 `0x0000-0x000F`（低内存）与 `0x3FF0-0x3FFF`（bootstrap），显存行 `0x2E00`（tag=0x170）**从未出现**，dirtywire 恒 0 → 写回丢失发生在 flush 之前。
+2. 单独触发 `hiaddr=0x2E00`：CPU 写显存标脏正常（dirtywire 先 0 后 1 维持，末状态 1），lru_wr_r 命中后变 3（LRU 更新生效）——但窗口内 **free_r 出现 `4'b0000`（无任何 free way）**，lru_wr_r 长时间为 0。
+
+### 17.2 根因链（定案）
+
+1. bootstrap 区 4 个 way 的 tag 初值均为 511 → CPU 执行 bootstrap 时 **fit 多 hot（1111）** → hit 分支把 4 个 way 的 LRU 全置 3 → LRU 排列 {0,1,2,3} 被破坏；
+2. `">ref 才减"` 的 LRU 更新在全 3 态永远减不动 → **free_lru=0000 恒成立**；
+3. 旧判脏公式 `dirty = |(free & cache_dirty[index])` 在 **free=0 时恒 0** → **脏 victim 被判 clean** → 不走 STATE 011 写回，miss-clear 清 dirty + 填充直接覆盖 → **显存行脏数据静默丢失，awaddr=0x08068000 永不出现**。
+
+历史之谜闭环：低内存行（way0 初值 tag=0）与 bootstrap（tag=511）因 tag 恰等于 cache_addr 初值而永远 hit，dirty 存活，所以它们能被 flush 写回；显存行 tag=0x170≠初值，每次被挤必丢。原作者设计"能用"恰因 LRU 恒退化到单 hot way0（free 单 hot，判脏有效）；六次修复激活 LRU 后 bootstrap 多 hot fit 打破排列，引爆此 bug。
+
+### 17.3 修复（cache_controller.v）
+
+1. **victim 选择**：不再依赖 "LRU==0"（free 向量编码），改三级比较器选 **LRU 最小 way**（`vmin01`/`vmin23`/`vblk_lru`）。LRU 退化仍可轮转，victim→MRU 的相对更新会逐渐自愈排列。`fblk = r_flush ? flushcount[6:5] : vblk_lru`（flush 扫描语义不变）。
+2. **dirty 判定**：`dirty = dirty_word[fblk]`（victim way 自己的 dirty 位），不再经 free 向量 AND。无论 LRU 处于什么状态，**victim 脏必写回**，杜绝静默丢脏数据。
+3. `free`/`free_lru`/`scan_free` 保留仅为 ILA 探针观测，主逻辑不再依赖。
+
+### 17.4 下板判据
+
+1. flush 扫描序列（触发 dbg_sys_flush_r）**首次出现 hiaddr=0x2E00**（显存行）→ sdraddr=0x034000 → system ILA 抓 `awaddr=0x08068000` → VGA 文本更新。
+2. CPU 清屏写显存后被挤/flush 时不再丢 dirty：isvwr 标脏后 dirty 保持，直到写回或 flush 清除。

@@ -114,6 +114,13 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_flushreq_r;   // flush 脉冲锁存
 	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_free_r;       // free（含 flush 扫描 way 选择）
 	(* mark_debug = "true" *) reg        dbg_ctl_dirtywire_r;  // dirty 组合线本体（flush 分支实际判据）
+	// ★ 十四次诊断探针：VRAM 行写回事件捕获。
+	//   VRAM 行 = index0 / tag=0x170 / hiaddr=0x2E00 / 物理 0x08068000 / sdraddr=0x034000。
+	//   用户 message 3 看到的 sdraddr=034000-0344a8 串极可能是 VGA 持续读文本帧缓冲（ddr_rd），
+	//   与 VRAM 写回（ddr_wr，同地址）难以用裸 sdraddr 区分。此探针在"STATE=011 且 ddr_wr=1 且
+	//   写回地址=0x2E00(VRAM)"时置 1，可一锤定音：能触发=VRAM 写回确实发生（之前为 VGA 读误判），
+	//   永不触发=VRAM 行从未成为 victim，需回头查 victim 选择 / LRU 退化。
+	(* mark_debug = "true" *) reg        dbg_ctl_vram_wr_r;
 
 	// ---- Task #8 诊断探针（深挖 dirty 置 1 条件，2026-09-19）----
 	(* mark_debug = "true" *) reg        dbg_ctl_mwmask_v_r;  // 当拍 |mwmask 是否有效（与 isvwr 锁存值对比，验证 wmask 是否滞后 mreq）
@@ -387,6 +394,7 @@ module cache_controller(
 		dbg_ctl_flushreq_r  <= flushreq;
 		dbg_ctl_free_r      <= free;
 		dbg_ctl_dirtywire_r <= dirty;
+		dbg_ctl_vram_wr_r   <= (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00); // VRAM 行写回事件（hiaddr=0x2E00, 物理 0x08068000）
 	end
 	
 endmodule

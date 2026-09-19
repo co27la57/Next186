@@ -657,3 +657,44 @@ LRU 退化（miss 不更新 LRU）→ 多个 way LRU 同时归 0 → free 多 ho
 
 `dbg_ctl_vram_wr_r` **应能触发** → `sdraddr=0x034000` → `awaddr=0x08068000` → VGA 文本更新。同时可用 `dbg_ctl_lru_wr_r` 观察 4 个 way 的 LRU 是否真的轮转（不再长期并列）。
 
+## 第二十节：十七次修复——STATE 000 miss 分支补 `!r_flush` 门控：VRAM 行永不 resident 的根因（2026-09-20 01:46）
+
+### 20.1 定案判据（十六次续粘滞标志）
+
+`dbg_vram_wr_miss_sticky = 1`，而 `dbg_vram_wr_hit_sticky / dbg_flush_vram_seen_sticky / dbg_flush_vram_dirty_sticky` **全为 0**。
+
+⇒ 判为 **A**：**VRAM 访问全是 miss，且 VRAM 行连"干净的"都从未进过 cache**（flush 全扫 128 行，一次都没见过 tag `0x170/0x171`）。
+
+### 20.2 根因：flush 窗口里的 CPU 访问被"静默丢弃"
+
+`fit[i] = ~r_flush && (cache_addr[i][index] == maddr[20:11])` —— **flush 期间 `hit` 被强制为 0**。
+
+而 STATE 000 的 miss 分支**没有 `!r_flush` 门控**：
+
+```verilog
+if(mmreq && !hit) begin          // ← 漏了 !r_flush
+    if(!r_flush) begin
+        cache_addr[fblk][index] <= maddr[20:11];   // flush 期间被挡掉 → tag 不装
+    end
+    ddr_rd <= ~dirty & ~r_flush;                    // flush 期间恒 0 → 填充也不发
+```
+
+于是 **flush 窗口里任何 CPU 请求**（stall 时 `mmreq` 取锁存的 `rmreq`）都会走进 miss 分支，但分支内 **tag 装不上、填充发不出** ⇒ 该次访问被**静默丢弃**：行永不 resident，CPU 重试仍 miss，`dirty` 永远置不上，VRAM 自然永不写回。
+
+这也解释了写回序列里反复出现的 `0afe00 / 028028` —— 那都是被逐出的**非 VRAM 行**。
+
+> 十次修复只给 **LRU/dirty 块**加了 `~r_flush` 门控（防扫描期污染 LRU/误清 dirty），**STATE 的 miss 分支漏了**，此处补齐。
+
+### 20.3 修复（commit 103ca78）
+
+`if(mmreq && !hit)` → **`if(mmreq && !r_flush && !hit)`**。
+
+flush 期间 CPU 请求让位给 flush 扫描分支，**不再被丢弃**（CPU 仍锁存该请求；flush 结束 `r_flush=0` 后被正常服务：tag 正常安装、填充正常发出 → 重试必命中 → `dirty` 能置 1 → 可写回）。
+
+另加确认标志 `dbg_miss_in_flush_sticky`（`st0 && mmreq && r_flush`），用于验证"flush 窗口里确实有待处理 CPU 请求"这一前提。
+
+### 20.4 下板判据
+
+`dbg_vram_wr_hit_sticky` 应变 1（VRAM 写开始命中）→ 随后 `dbg_ctl_vram_wr_sticky_r` 变 1 → `sdraddr=0x034000` → `awaddr=0x08068000` → **VGA 文本更新**。
+辅助：`dbg_miss_in_flush_sticky=1` 可确认前述丢弃路径此前确实活跃。
+

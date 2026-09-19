@@ -128,6 +128,14 @@ module cache_controller(
 	//         两者都=1 → VRAM 写回已发生，转查 VGA 读地址。
 	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_sticky_r = 1'b0;   // CPU 曾写 VRAM（粘滞，显式上电清零防误判）
 	(* mark_debug = "true" *) reg        dbg_ctl_vram_wr_sticky_r = 1'b0; // VRAM 行曾写回 DDR（粘滞，显式上电清零防误判）
+	// ★ 十六次续：判别"isvwr=1 但 vram_wr=0"的三种真因（纯观测粘滞标志）
+	//   A: VRAM 写全是 miss（永不 hit）→ 填充不置 dirty，VRAM 永不脏
+	//   B: VRAM 曾 hit（dirty 已置 1），但 flush 扫描时 VRAM 行已不在 cache / 已不脏
+	//   C: flush 扫到 VRAM 行且判为脏，却没产生带 VRAM tag 的写回 → 写回地址/way 错配
+	(* mark_debug = "true" *) reg        dbg_vram_wr_hit_sticky = 1'b0;      // VRAM 写命中（命中即 dirty 被置 1）
+	(* mark_debug = "true" *) reg        dbg_vram_wr_miss_sticky = 1'b0;     // VRAM 写缺失（走填充，dirty 不置 1）
+	(* mark_debug = "true" *) reg        dbg_flush_vram_seen_sticky = 1'b0;  // flush 扫描时遇到过 VRAM 行（tag 0x170/0x171，不论脏否）
+	(* mark_debug = "true" *) reg        dbg_flush_vram_dirty_sticky = 1'b0; // flush 扫描时遇到过 VRAM 行且判为脏
 
 	// ---- Task #8 诊断探针（保留：way 选择与 LRU 轮转观测）----
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
@@ -415,6 +423,13 @@ module cache_controller(
 		if((STATE == 3'b011) && ddr_wr &&
 		   (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171))
 			dbg_ctl_vram_wr_sticky_r <= 1'b1;
+		// ★ 十六次续：三种真因判别（VRAM tag = 0x170 / 0x171）
+		if(mmreq && is_video_wr && hit)  dbg_vram_wr_hit_sticky  <= 1'b1;
+		if(mmreq && is_video_wr && !hit) dbg_vram_wr_miss_sticky <= 1'b1;
+		if(st0 && r_flush && (cache_addr[fblk][index] == 10'h170 || cache_addr[fblk][index] == 10'h171)) begin
+			dbg_flush_vram_seen_sticky <= 1'b1;
+			if(dirty) dbg_flush_vram_dirty_sticky <= 1'b1;
+		end
 	end
 	
 endmodule

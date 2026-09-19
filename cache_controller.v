@@ -85,6 +85,12 @@ module cache_controller(
 	(* mark_debug = "true" *) reg s_lowaddr5 = 0;
 	(* mark_debug = "true" *) reg s_lowaddr5_d1 = 0;
 	wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0，标志整行 64B burst 完成
+	// ★ 十一次修复：flush 写回完成事件（STATE 011 且 r_flush 且整行 burst 结束，ddr_wr 此拍仍为 1）。
+	//   十次修复曾把"flush 写回后清 dirty"直接写在 STATE 块里，导致 cache_dirty 同时被
+	//   LRU/dirty 块和 STATE 块两个 always 写端口驱动，Vivado 无法推断 RAM ->
+	//   Synth 8-2914 Unsupported RAM template [v:70] + 8-5743，综合直接失败。
+	//   现将清 dirty 挪入 LRU/dirty 块（下方），cache_dirty 恢复单写端口。
+	wire flush_wb_done = (STATE == 3'b011) && r_flush && ddr_wr && s_lowaddr5_fall;
 	wire [31:0]cache_QA;
 	wire [`WAYS-1:0]lru[(1<<`WAYS)-1:0];
 
@@ -199,9 +205,14 @@ module cache_controller(
 	//   而普通 always 块（STATE 块写 cache_addr）有效。dirty 改整字写，绕开单 bit 写综合异常。
 	integer w;
 	always @(posedge clk) begin
+		// ★ 十一次修复：flush 写回完成时清该行该 way 的 dirty（从 STATE 块挪入，保证 cache_dirty 单写端口）。
+		//   flush_wb_done 蕴含 r_flush=1，与下方 else if 的 !r_flush 互斥，优先级无冲突。
+		if(flush_wb_done) begin
+			cache_dirty[flushcount[`SETS-1:0]] <=
+				cache_dirty[flushcount[`SETS-1:0]] & ~(4'b0001 << flushcount[`WAYS+`SETS-1:`SETS]);
 		// ★ 十次修复：加 ~r_flush 门控——flush 扫描期间（fit 恒 0、hit 恒 0）若残留 CPU 请求
 		//   （mmreq=rmreq=1）会误入 miss 分支，用扫描 way 污染 LRU / 误清扫描行 dirty。
-		if(st0 && mmreq && !r_flush) begin
+		end else if(st0 && mmreq && !r_flush) begin
 			if(hit) begin
 				// LRU 更新（逐 way，非阻塞，RHS 全取旧值，与原 generate 逐位等价）
 				for(w=0; w<(1<<`WAYS); w=w+1) begin
@@ -278,10 +289,8 @@ module cache_controller(
 			//   状态机若提前进入 111 会更新 hiaddr，导致后半行写错地址（0x20/0x40 偏移）。
 			if(s_lowaddr5_fall) begin
 				ddr_wr <= 1'b0;
-				// ★ 十次修复：flush 写回完成后清除该行 dirty（原代码不清 → 每帧重复写回同一批行）。
-				//   miss 逐出路径的 dirty 已在 miss 拍由 LRU 块清除，此处只处理 flush 路径。
-				if(r_flush) cache_dirty[flushcount[`SETS-1:0]] <=
-					cache_dirty[flushcount[`SETS-1:0]] & ~(4'b0001 << flushcount[`WAYS+`SETS-1:`SETS]);
+				// ★ 十一次修复：flush 写回后清 dirty 的写已挪入 LRU/dirty 块（flush_wb_done 事件），
+				//   避免 cache_dirty 双 always 写端口 → Unsupported RAM template 综合失败。
 				// ★ flush 写完脏行后直接推进扫描(STATE 100)，不再进入 111 回填：
 				//   否则会把刚写回 DDR 的行又用 DDR 旧数据覆盖掉，且与晚到的 CPU 写入存在回写竞态。
 				STATE <= r_flush ? 3'b100 : 3'b111;

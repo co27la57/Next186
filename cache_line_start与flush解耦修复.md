@@ -539,3 +539,30 @@ LRU 退化（miss 不更新 LRU）→ 多个 way LRU 同时归 0 → free 多 ho
 1. **主判**：flush 扫描出现 `sdraddr=0x034000`（= 显存行，物理 0x08068000）→ system ILA 抓 `awaddr=0x08068000` → VGA 文本更新。
 2. **副判**：`awaddr` 序列中不再出现与 hiaddr 不匹配的错位写回；0x08068040/0x60 的"偏移残留"不再变化。
 3. 若显存行写回出现但 VGA 仍偏移 → 才需要回头查 VGA 读地址（vga_ddr_row_col/scraddr）——即 0x20/0x60 与写回 bug 彻底分离的验证点。
+
+## 第十六节：十一次修复——cache_dirty 双写端口导致 Vivado 综合失败（2026-09-19 20:34）
+
+### 16.1 现象
+
+十次修复 push 后 Ubuntu 机 `git pull` 综合报错：
+
+- `ERROR: [Synth 8-2914] Unsupported RAM template [cache_controller.v:70]`（指向 `cache_dirty` 声明行）
+- `Synth 8-5743 Unable to infer RAMs due to unsupported pattern`
+- `[Common 17-83] Releasing design: Synthesis failed`
+
+8e85843（八次修复）同一段声明综合通过，差异只有十次修复的改动。
+
+### 16.2 根因
+
+十次修复在 **STATE always 块**（STATE 011 的 `s_lowaddr5_fall` 分支）新增了 `cache_dirty[flushcount[..]] <= ...`（flush 写回后清 dirty），而 **LRU/dirty always 块**本来就在写 `cache_dirty`（写命中置 1 / miss 清 victim）。同一存储数组被两个 always 块驱动 = 两个写端口，且两处写条件/写地址完全独立，Vivado 无法推断成 RAM 模板 → 直接报 Unsupported RAM template 并终止综合。
+
+### 16.3 修复
+
+1. 新增事件线 `wire flush_wb_done = (STATE==3'b011) && r_flush && ddr_wr && s_lowaddr5_fall;`（ddr_wr 在该拍仍为 1）。
+2. flush 写回清 dirty 挪入 LRU/dirty 块最前面：`if(flush_wb_done) cache_dirty[扫描行] &= ~(1<<扫描way); else if(st0 && mmreq && !r_flush) ...`。
+   - `flush_wb_done` 蕴含 `r_flush=1`，与 else if 的 `!r_flush` 互斥，无优先级冲突。
+3. STATE 011 中删去对 `cache_dirty` 的写，仅保留 `ddr_wr <= 0` 与状态切换。
+
+### 16.4 教训（新增勿犯项）
+
+**同一存储数组（cache_dirty/cache_lru/cache_addr/…）严禁在两个 always 块中写**——Vivado 会以 Unsupported RAM template 报错终止综合（多驱动数组不会像单 net 那样报 multi-driven，而是 RAM 推断失败）。十次修复的功能逻辑不变，只是把清 dirty 的写集中到统一的 LRU/dirty 块。

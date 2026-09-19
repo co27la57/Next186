@@ -592,3 +592,32 @@ LRU 退化（miss 不更新 LRU）→ 多个 way LRU 同时归 0 → free 多 ho
 
 1. flush 扫描序列（触发 dbg_sys_flush_r）**首次出现 hiaddr=0x2E00**（显存行）→ sdraddr=0x034000 → system ILA 抓 `awaddr=0x08068000` → VGA 文本更新。
 2. CPU 清屏写显存后被挤/flush 时不再丢 dirty：isvwr 标脏后 dirty 保持，直到写回或 flush 清除。
+
+## 第十八节：十三次修复——STATE 000→011 写回地址锁存，根治 thrashing 下显存行写回地址被覆盖（2026-09-19 22:10）
+
+### 18.1 决定性波形（用户第 7-8 条）
+
+- 触发 `dbg_ctl_ddr_wr_r` 上升沿后找不到 `0x034000`；触发 `dbg_ctl_dirty_r[0]=0` 抓到 `ddr_wr` 同步拉高，但 `sys_flush_r=0`、`auto_flush=4`（= miss 逐出写回，非 flush）。
+- 该时刻 `sdraddr = 0afe00-028020-0afe20-028020-0afe40-028020…`（全是 bootstrap/VGA planar 地址，**无** VRAM `0x034000`）。
+- **坐实"显存行写回地址错"**：VRAM 脏行（index0, tag=0x2D0，物理 0x08068000）的 dirty 被 miss-clear 清掉，但发出写回的 hiaddr 已被覆盖为别的行地址，故 VRAM 脏数据静默丢弃、awaddr=0x08068000 永不出现。
+
+### 18.2 根因（定案）
+
+`cache_controller.v` STATE 000 顶部原本每周期执行：
+`hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE];`
+- `fblk`（=vblk_lru，victim）与 `index` 在 **thrashing 连续 miss** 下随 LRU 更新不断变化；
+- `hiaddr` 经 `cache_hi_addr` 跨时钟域（cache clk → clk_sdr/clk_cpu）驱动 `sdraddr`/`awaddr`，采样窗口极易抓到被改写后的**瞬态值**；
+- 结果：VRAM 脏行的 dirty 在 miss-clear 拍被清，但同拍锁存的写回地址已是别的行（0AFE00/028020），VRAM 写回事务地址错配 → 静默丢失。
+
+（补充：VRAM 物理 0x08068000 → maddr[15:6]=0x200 → index=maddr[10:6]=0、tag=maddr[20:11]=0x2D0，故 `dirty_r[0]` 正是 VRAM 行 index。）
+
+### 18.3 修复（cache_controller.v，commit 86fc7af）
+
+1. 新增冻结寄存器 `wb_hiaddr[`ADDR-`LINE-1:0]`、`wb_way[`WAYS-1:0]`；
+2. **删除 STATE 000 顶部每周期重算 hiaddr**，改为在各分支显式赋值，并在"决定逐出"拍（miss 分支 / flush 分支 dirty）锁定 `wb_hiaddr <= {cache_addr[fblk][index], index}`、`wb_way <= fblk`（无论是否 r_flush 都=本拍 fblk，与 wb_hiaddr 同源）；
+3. STATE 011 全程 `hiaddr <= wb_hiaddr` 冻结写回地址，地址 way 与数据 way（vblk/wb_way）同源，杜绝 fblk/LRU 漂移导致的地址/脏位/数据错位。
+
+### 18.4 下板判据
+
+触发 `dbg_ctl_ddr_wr_r` 上升沿，写回序列应出现 `sdraddr=0x034000` → system ILA 抓 `awaddr=0x08068000` → VGA 文本更新；0AFE00/028020 残留若仍在属正常 bootstrap/planar 行逐出，但 VRAM 行必须单独出现一次写回。若显存写回出现而 VGA 仍偏移，转查 VGA 读地址（vga_ddr_row_col/scraddr）。
+

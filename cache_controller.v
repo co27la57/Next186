@@ -87,7 +87,6 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_mmreq_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_hit_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_ce_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_isvmem_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;
@@ -97,6 +96,13 @@ module cache_controller(
 	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_fit_r;        // 当前访问的 way 命中向量
 	(* mark_debug = "true" *) reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
 	(* mark_debug = "true" *) reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
+
+	// ---- Task #8 诊断探针（深挖 dirty 置 1 条件，2026-09-19）----
+	(* mark_debug = "true" *) reg        dbg_ctl_mwmask_v_r;  // 当拍 |mwmask 是否有效（与 isvwr 锁存值对比，验证 wmask 是否滞后 mreq）
+	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
+	(* mark_debug = "true" *) reg        dbg_ctl_fit_wr_r;    // fit[blk]：选中 way 是否真的命中(tag 匹配) —— 验证 blk/fit 错位 bug
+	(* mark_debug = "true" *) reg        dbg_ctl_dirty_cond_r;// 整体置 dirty 条件：st0 & hit & |mwmask & |fit（任一子条件为 0 即不成立）
+	(* mark_debug = "true" *) reg        dbg_ctl_dirty_wr_r;  // cache_dirty[index][blk]：实际写 way 的 dirty 当前值（1 拍延迟，写后次拍可见）
 
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
@@ -243,7 +249,6 @@ module cache_controller(
 		dbg_ctl_mmreq_r  <= mmreq;
 		dbg_ctl_hit_r    <= hit;
 		dbg_ctl_ce_r     <= ce;
-		dbg_ctl_isvmem_r <= is_video_mem;
 		dbg_ctl_isvwr_r  <= is_video_wr;
 		dbg_ctl_rflush_r  <= r_flush;
 		dbg_ctl_ddr_wr_r  <= ddr_wr;
@@ -253,6 +258,12 @@ module cache_controller(
 		dbg_ctl_fit_r      <= fit;
 		dbg_ctl_index_r    <= index;
 		dbg_ctl_tag_r      <= maddr[`ADDR-1:`LINE+`SETS];
+		// ---- Task #8 诊断探针采样 ----
+		dbg_ctl_mwmask_v_r  <= |mwmask;
+		dbg_ctl_blk_r       <= blk;
+		dbg_ctl_fit_wr_r    <= fit[blk];
+		dbg_ctl_dirty_cond_r <= st0 && hit && |mwmask && |fit;
+		dbg_ctl_dirty_wr_r   <= cache_dirty[index][blk];
 	end
 	
 endmodule

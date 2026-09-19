@@ -192,6 +192,62 @@ endgenerate
 - 每帧 flush 扫描到该 index/way 时，`awaddr=0x08068000` 出现 AXI 写事务。
 - 文本 VRAM 更新最终同步到 DDR，VGA 可见。
 
+### 8.5 e0095f9 下板结果：dirty_r 仍为 0（2026-09-19 中，待下一波波形）
+
+用户下板验证：`e0095f9` 改完后波形与之前一样，`dirty_r` **全程不变 1**。说明去掉 `mmreq` 门控后仍不满足 `st0 && hit && fit[i] && |mwmask`——
+即除 `mmreq` 外的某个子条件（`st0`/`hit`/`fit[i]`/`|mwmask`）在采样沿仍不符，或写命中落到的 way 与 `fit` 向量错位。
+
+由于重新综合代价高，本轮**不急着改功能逻辑**，先加精确定位探针（见第九节），由下一波波形锁定具体子条件。
+
+---
+
+## 九、dirty 置 1 条件深挖 + 诊断探针（2026-09-19 中）
+
+### 9.1 静态代码排查的两条主线假设
+
+**(A) `|mwmask` 相对 `mmreq` 滞后 1 拍（最可疑）**
+- `is_video_wr = is_video_mem & |mwmask`，`isvwr_r` 锁存为 1 已证明当拍 `|mwmask=1`，但 `gen2` 的 dirty 置位用的是**同一 clk 沿**的组合 `|mwmask`。
+- 若 CPU 写脉冲 `mreq`/`mmreq` 与其 `wmask` 在流水线里错开 1 拍（写脉冲先到、`wmask` 后到），则写命中的那拍 `mmreq=1, hit=1, fit=1` 但 `|mwmask=0` → dirty 不置位；下一拍 `wmask` 有效但 `mmreq` 已落下 → 仍不满足。
+- 连带后果：cache_mem port B 的 `wren_b=|mwmask` 同样在该拍为 0 → **VRAM 数据根本写不进 cache**，VGA 永远读 DDR 旧值。这与"STATE_r 恒 0（命中，行已在 cache）、但 VRAM 不更新"完全吻合。
+- **判活探针**：`dbg_ctl_mwmask_v_r`（`|mwmask` 当拍值）与已有 `mreq_r`/`mmreq_r` 叠加，看 `|mwmask` 是否滞后 `mmreq`。
+
+**(B) `blk`（实际写 way）与 `fit`（命中 way）错位（4-way 编码 bug）**
+- `blk = flushcount[6:5] | {|fit[3:2], fit[3]|fit[1]}` 把 4-bit `fit` 编成 2-bit way，但单热 `fit` 解码错误：
+  - `fit=0001`（way0）→ `blk={0, 0|0}=01`=**way1** ❌（应为 0）
+  - `fit=0010`（way1）→ `blk={0, 0|1}=00`=**way0** ❌（应为 1）
+  - `fit=0100`（way2）→ `blk=10`=way2 ✓
+  - `fit=1000`（way3）→ `blk=11`=way3 ✓
+- 清屏首次访问 VRAM 触发 miss，分配新行：`fblk = flushcount[6:5] | {...}`，非 flush 时 `flushcount[6:5]=0` → **新行落到 way0**。于是 `fit[0]=1` 但 `blk=1`：数据经 port B 写进 **way1**（tag 不匹配），而 `gen2` 把 dirty 置在 **way0**（fit[0]=1）。
+  - 结果：dirty 置位的是"匹配 way"，但真实数据在"blk way"，且 blk way 的 dirty 永远=0 → flush 跳过真实数据 → `awaddr=0x08068000` 不出现。
+  - 注意：此 bug 下 `dirty_r`（整 4-bit 向量）理论上应显示 bit0=1（gen2 置了 way0）。用户观测到 `dirty_r` 全 0，说明**还有 (A) 类滞后或其它因素掩盖**——故需下一波波形区分。
+- **判活探针**：`dbg_ctl_blk_r`（实际写 way）、`dbg_ctl_fit_wr_r`=`fit[blk]`（选中 way 是否真命中）、`dbg_ctl_dirty_wr_r`=`cache_dirty[index][blk]`（真实写 way 的 dirty 当前值）。
+
+**(C) 整体条件探针**
+- `dbg_ctl_dirty_cond_r <= st0 && hit && |mwmask && |fit`：整体"应置 dirty"信号。若 `isvwr=1` 期间它**从不为 1** → 子条件 (A) 或 `fit` 有问题；若它**为 1 但 `dirty_r` 仍 0** → `cache_dirty[index][i]` 数组写入本身未生效（需查 index 同步 / 多 always 覆盖）。
+
+### 9.2 本轮新增 / 清理的 ILA 探针（cache_controller.v）
+
+- **删除** `dbg_ctl_isvmem_r` 声明与采样（不再使用），保持探针总数 < 300。
+- **新增 5 根**（非 top 模块，按约束用 `reg`+`always`）：
+  | 探针 | 含义 | 作用 |
+  |---|---|---|
+  | `dbg_ctl_mwmask_v_r` | 当拍 `|mwmask` | 与 `mreq_r` 叠加看是否滞后 1 拍（假设 A） |
+  | `dbg_ctl_blk_r [1:0]` | 实际写入选中 way（port B 用 `blk`） | 验证 (B) 错位 |
+  | `dbg_ctl_fit_wr_r` | `fit[blk]` | 选中 way 是否真命中 |
+  | `dbg_ctl_dirty_cond_r` | `st0 & hit & |mwmask & |fit` | 整体条件是否成立（假设 C） |
+  | `dbg_ctl_dirty_wr_r` | `cache_dirty[index][blk]` | 真实写 way 的 dirty 当前值 |
+
+- **下一波波形抓法**：以 `isvwr=1` 触发，叠加看 `mreq_r`/`mmreq_r`/`mwmask_v_r` 时序关系、`blk_r`/`fit_wr_r`/`dirty_cond_r`/`dirty_wr_r`/`dirty_r`。重点回答：
+  1. `|mwmask`（`mwmask_v_r`）是否滞后 `mmreq` 一拍？（→ 假设 A）
+  2. `isvwr=1` 期间 `dirty_cond_r` 是否曾为 1？为 1 但 `dirty_r` 仍 0 → 数组写未生效；为 0 → 查 `blk`/`fit` 错位或 `|mwmask` 滞后。
+  3. `fit_wr_r`（`fit[blk]`）在写命中时是否为 1？为 0 → 确认 (B) blk/fit 错位 bug。
+
+### 9.3 待确认后再定修复方向
+
+- 若 (A) 成立（wmask 滞后）：修复点应是让 dirty 置位/数据写入基于**对齐后的写有效**信号（例如用 `cache_write_data`/port B `wren_b` 活动沿，或在 BIU 侧对齐 `wmask` 与 `mreq`），而非依赖组合 `|mwmask`。
+- 若 (B) 成立：修复 `blk` 编码，使其正确选中 `fit` 的单热 way（如用优先级译码 `blk = way_of_first_fit(fit)`），保证数据写 way 与 dirty 置位 way 一致。
+- 两者可能同时成立，需波形确认后一并修复。
+
 ---
 
 ## 八、已规避的坑（对照前几轮）

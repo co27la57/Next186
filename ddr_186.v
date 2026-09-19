@@ -867,24 +867,14 @@ module system
     (* mark_debug = "true" *) reg [14:0] dbg_cache_hiaddr;
     (* mark_debug = "true" *) reg        dbg_cache_ddr_wr;
     (* mark_debug = "true" *) reg [23:0] dbg_sdraddr;
-    (* mark_debug = "true" *) reg [15:0] dbg_fifo_dout;
-    (* mark_debug = "true" *) reg        dbg_cpu_halt;  // 若无法访问，改到 ddr_186 里
-    (* mark_debug = "true" *) reg [15:0] dbg_ram_wdata_lo;
+    // ★ 十五次修复探针精简（2026-09-19）：移除 dbg_fifo_dout / dbg_cpu_halt / dbg_ram_wdata_lo /
+    //   dbg_fifo_words_r。dbg_cpu_halt 与 Next186_CPU.v 的 dbg_HALT 完全重复；fifo / 写数据通路
+    //   探针属早期 bring-up 遗留，当前 cache / 显存写回调试不再需要，删除以释放 ILA 位宽与布线。
 
     // 非 top 模块必须用 reg+always 采样，否则会被 Vivado 布线优化掉
     always @(posedge clk_sdr) begin
         dbg_cache_hiaddr  <= cache_hi_addr;
         dbg_cache_ddr_wr  <= ddr_wr;
         dbg_sdraddr       <= sdraddr;
-        dbg_fifo_dout     <= fifo_dout;
-        dbg_cpu_halt      <= HALT;
-        dbg_ram_wdata_lo  <= cntrl0_user_input_data;
     end
-
-
-
-(* mark_debug = "true" *) reg [8:0] dbg_fifo_words_r;
-always @(posedge clk_sdr) begin
-    dbg_fifo_words_r <= fifo_wr_used_words;
-end
 endmodule

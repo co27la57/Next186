@@ -112,7 +112,6 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
 	// ---- Task #8 八次诊断探针：flush 扫描判脏链路（2026-09-19）----
 	(* mark_debug = "true" *) reg        dbg_ctl_flushreq_r;   // flush 脉冲锁存
-	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_free_r;       // free（含 flush 扫描 way 选择）
 	(* mark_debug = "true" *) reg        dbg_ctl_dirtywire_r;  // dirty 组合线本体（flush 分支实际判据）
 	// ★ 十四次诊断探针：VRAM 行写回事件捕获。
 	//   VRAM 行 = index0 / tag=0x170 / hiaddr=0x2E00 / 物理 0x08068000 / sdraddr=0x034000。
@@ -122,15 +121,13 @@ module cache_controller(
 	//   永不触发=VRAM 行从未成为 victim，需回头查 victim 选择 / LRU 退化。
 	(* mark_debug = "true" *) reg        dbg_ctl_vram_wr_r;
 
-	// ---- Task #8 诊断探针（深挖 dirty 置 1 条件，2026-09-19）----
-	(* mark_debug = "true" *) reg        dbg_ctl_mwmask_v_r;  // 当拍 |mwmask 是否有效（与 isvwr 锁存值对比，验证 wmask 是否滞后 mreq）
+	// ---- Task #8 诊断探针（保留：way 选择与 LRU 轮转观测）----
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
-	(* mark_debug = "true" *) reg        dbg_ctl_fit_wr_r;    // fit[blk]：选中 way 是否真的命中(tag 匹配) —— 验证 blk/fit 错位 bug
-	// ★ 替换 dirty_cond_r：含 mmreq 的精确 gen2 写条件，直接对比"条件成立但写未生效"
-	(* mark_debug = "true" *) reg        dbg_ctl_dirty_cond2_r;// st0 & mmreq & hit & |mwmask & |fit（gen2 实际置 dirty 条件，含 mmreq）
-	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_lru_wr_r;    // cache_lru[blk][index]：写命中 way 的 LRU 当前值——若随写更新则 if(hit) 分支确在执行
-	(* mark_debug = "true" *) reg        dbg_ctl_dirty_wr_r;  // cache_dirty[index][blk]：实际写 way 的 dirty 当前值（1 拍延迟）
-	(* mark_debug = "true" *) reg        dbg_ctl_dirty_wr_d1_r;// dirty_wr_r 的 1 拍延迟——捕捉写后的 dirty 值（即使 index 变化也能看到）
+	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_lru_wr_r;    // cache_lru[blk][index]：命中 way 的 LRU 当前值（十五次 LRU 轮转修复的验证依据）
+	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /
+	//   dbg_ctl_dirty_wr_r / dbg_ctl_dirty_wr_d1_r —— 它们分别被 dbg_ctl_wmask_r / dbg_ctl_fit_r /
+	//   dbg_ctl_dirty_r 完全覆盖，或属十次"blk way 错配"专题的一次性探针（该 bug 已定案修复）。
+	//   同时移除 dbg_ctl_free_r（free 自十二次修复起已退出主逻辑，仅作观测，判脏改由 dirty_word[fblk]）。
 
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
@@ -210,7 +207,8 @@ module cache_controller(
 	// flush 扫描时 fblk=flushcount[6:5]、index=flushcount[4:0]，即扫描行自己的 dirty，语义不变。
 	wire [(1<<`WAYS)-1:0]dirty_word = cache_dirty[index];
 	wire dirty = dirty_word[fblk];
-	wire [`WAYS-1:0]csblk = lru[0] | lru[1] | lru[2] | lru[3];
+	// ★ 十五次修复：csblk 已在 LRU 更新改用 fit_enc + `>=` 递减后成为死代码，删除。
+	//   （原 csblk = lru[0]|lru[1]|lru[2]|lru[3] 是多 hot fit 时取命中 way 的 LRU 供 `>` 比较用。）
 
 	always @(posedge ddr_clk) begin
 		// ★ Task #8 修复：每个 cache 行事务(cache_line_start 单周期脉冲)起始强置 lowaddr=0，
@@ -254,20 +252,32 @@ module cache_controller(
 		//   （mmreq=rmreq=1）会误入 miss 分支，用扫描 way 污染 LRU / 误清扫描行 dirty。
 		end else if(st0 && mmreq && !r_flush) begin
 			if(hit) begin
-				// LRU 更新（逐 way，非阻塞，RHS 全取旧值，与原 generate 逐位等价）
+				// ★★ Task #8 十五次修复（2026-09-19）：LRU 轮转根治 —— 显存行永不写回的总根因。
+				//   原实现两个缺陷叠加导致 victim 锁死：
+				//     ① `fit[w] ? 3 : ...`：bootstrap 期 4 way 同 tag=511 → fit 多 hot(1111) →
+				//        多个 way 被同时置 MRU=3（LRU 并列）；
+				//     ② 递减条件用 `>`（仅严格大于才下移）：并列值永不递减，且 victim 若已是
+				//        MRU(=3) 时无人可递减 → 并列永久保持。
+				//   后果：victim(最小比较器 vblk_lru)永远锁死在同一两个 way，其余 way 永不成为
+				//   victim → 落在这些 way 上的显存行(index0,tag=0x170)脏数据永不写回，
+				//   dbg_ctl_vram_wr_r 永不触发、awaddr=0x08068000 不出现。
+				//   修复：① MRU 只置 fit_enc（单 way；多 hot 时取确定 way，不再多 way 同置 3，
+				//        多 hot 各行 tag 相同、数据等价，取哪个都不影响正确性）；
+				//        ② 递减条件 `>` 改 `>=`（相等也下移，打破并列），并 clamp（!=0 才减）
+				//        防止 2bit 的 0-1 回绕成 3。→ 4 way 严格轮转，显存行必被逐出写回。
 				for(w=0; w<(1<<`WAYS); w=w+1) begin
-					cache_lru[w][index] <= fit[w] ? {`WAYS{1'b1}}
-						: (cache_lru[w][index] - (cache_lru[w][index] > csblk));
+					cache_lru[w][index] <= (w == fit_enc) ? {`WAYS{1'b1}}
+						: (cache_lru[w][index] - ((cache_lru[w][index] >= cache_lru[fit_enc][index]) && (cache_lru[w][index] != {`WAYS{1'b0}})));
 				end
 				// 写命中：整字把命中 way 的 dirty 置 1
 				if(|mwmask)
 					cache_dirty[index] <= cache_dirty[index] | fit;
 			end else begin
-				// ★ 十次修复：miss 时 victim(fblk) 将被填充 → 设为 MRU，防止 LRU 退化
-				//   （原代码 miss 不更新 LRU → victim 恒同一个 way → 多 way LRU 归 0 → free 多 hot）。
+				// ★ 十次修复：miss 时 victim(fblk) 将被填充 → 设为 MRU。
+				// ★ 十五次修复：同样改 `>=` 递减 + clamp，保证 victim 在 4 way 间轮转。
 				for(w=0; w<(1<<`WAYS); w=w+1)
 					cache_lru[w][index] <= (w == fblk) ? {`WAYS{1'b1}}
-						: (cache_lru[w][index] - (cache_lru[w][index] > cache_lru[fblk][index]));
+						: (cache_lru[w][index] - ((cache_lru[w][index] >= cache_lru[fblk][index]) && (cache_lru[w][index] != {`WAYS{1'b0}})));
 				// ★ 十次修复：只清被替换 way(fblk) 的 dirty。
 				//   原 &~free 在 free 多 hot（LRU 退化）时会静默清掉其他脏 way 的 dirty
 				//   而不写回 → 显存行 dirty 就是这样丢的（用户波形：isvwr 置 1 后被清 0）。
@@ -382,17 +392,11 @@ module cache_controller(
 		dbg_ctl_index_r    <= index;
 		dbg_ctl_tag_r      <= maddr[`ADDR-1:`LINE+`SETS];
 		// ---- Task #8 诊断探针采样 ----
-		dbg_ctl_mwmask_v_r  <= |mwmask;
 		dbg_ctl_blk_r       <= blk;
-		dbg_ctl_fit_wr_r    <= fit[blk];
-		dbg_ctl_dirty_cond2_r <= st0 && mmreq && hit && |mwmask && |fit;
 		dbg_ctl_lru_wr_r    <= cache_lru[blk][index];
-		dbg_ctl_dirty_wr_r   <= cache_dirty[index][blk];
-		dbg_ctl_dirty_wr_d1_r <= dbg_ctl_dirty_wr_r;
 		dbg_ctl_s_lowaddr5_fall_r <= s_lowaddr5_fall;
 		// ---- Task #8 八次诊断探针采样 ----
 		dbg_ctl_flushreq_r  <= flushreq;
-		dbg_ctl_free_r      <= free;
 		dbg_ctl_dirtywire_r <= dirty;
 		dbg_ctl_vram_wr_r   <= (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00); // VRAM 行写回事件（hiaddr=0x2E00, 物理 0x08068000）
 	end

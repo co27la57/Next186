@@ -155,17 +155,21 @@ module cache_controller(
 	generate
 		for(i=0; i<(1<<`WAYS); i=i+1) begin: gen2
 			always @(posedge clk) begin
-				if(st0 && mmreq)
+				if(st0 && mmreq) begin
 					if(hit) begin
-						cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : cache_lru[i][index] - (cache_lru[i][index] > csblk); 
-					end else if(free[i]) cache_dirty[index][i] <= 1'b0;
-				// ★ Task #8 继续修复：BIU 2T 工作时 `RAM_MREQ` 与 `RAM_WMASK` 可能存在对齐/采样
-				//   偏差，导致写命中那拍 `st0 && mmreq && hit && fit[i] && |mwmask` 漏采样，
-				//   dirty bit 始终为 0，flush 跳过该行，`awaddr=0x08068000` 永不出现。
-				//   这里加一条独立路径：只要 STATE=0、命中、且 wmask 非 0，就把 dirty 置 1。
-				//   对读命中（|mwmask=0）无影响；对 miss/flush（hit=0 或 fit=0）无影响。
-				if(st0 && hit && fit[i] && |mwmask)
-					cache_dirty[index][i] <= 1'b1;
+						// LRU 更新
+						cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : cache_lru[i][index] - (cache_lru[i][index] > csblk);
+						// ★ Task #8 修复：写命中时置 dirty。之前把 dirty 置位放在与 LRU 更新
+						//   并行的独立 if 里，波形已证实条件(st0&hit&fit[i]&|mwmask)成立、fit[blk]=1，
+						//   但 cache_dirty[index][i] 仍不变 1，推断 Vivado 对两个独立 if 写到同一数组位
+						//   的综合/优先级处理异常，导致 dirty 写未生效。改为在 hit 分支内同步置位。
+						if(|mwmask)
+							cache_dirty[index][i] <= 1'b1;
+					end else if(free[i]) begin
+						// miss 分配 victim way：清 dirty
+						cache_dirty[index][i] <= 1'b0;
+					end
+				end
 			end
 		end
 	endgenerate

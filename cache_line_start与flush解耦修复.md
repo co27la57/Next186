@@ -250,6 +250,53 @@ endgenerate
 
 ---
 
+## 十、dirty 条件成立但 `cache_dirty` 写未生效：gen2 结构歧义修复（2026-09-19 中）
+
+### 10.1 新波形结论：A/B 均不成立，问题在 dirty 数组写入本身
+
+用户抓 `isvwr=1` 触发后反馈：
+- `mwmask_v_r` 与 `mmreq_r` **严格同步** → 假设 A（`|mwmask` 滞后 `mmreq`）**不成立**。
+- `fit_wr_r`（`fit[blk]`）写命中时 **恒为 1** → 假设 B（`blk`/`fit` 错位）**不成立**。
+- `dirty_cond_r`（`st0 & hit & |mwmask & |fit`）在 `isvwr=1` 期间与 `mwmask_v_r`/`mmreq_r` **三者严格同步** → `st0`、`hit`、`|mwmask`、`|fit` 全部成立。
+- 但 `dirty_r[3:0]` 和 `dirty_wr_r` 仍**全程为 0**。
+
+这意味着 `st0 && hit && fit[i] && |mwmask` 条件**确实成立**，但 `cache_dirty[index][i] <= 1'b1` 没有生效——两个独立 `if` 写到同一数组位，Vivado 的综合/优先级处理可能把第二次写优化掉或产生异常 write-enable 结构，导致 dirty 位永远写不进去。
+
+### 10.2 修复：把 dirty 置位并入 `if(st0 && mmreq) if(hit)` 分支
+
+将 dirty 置位从与 LRU 更新并行的独立 `if` 中，移到**同一个 hit 分支内**，用 `|mwmask` 区分读/写命中：
+
+```verilog
+generate
+    for(i=0; i<(1<<`WAYS); i=i+1) begin: gen2
+        always @(posedge clk) begin
+            if(st0 && mmreq) begin
+                if(hit) begin
+                    cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : cache_lru[i][index] - (cache_lru[i][index] > csblk);
+                    if(|mwmask)
+                        cache_dirty[index][i] <= 1'b1;
+                end else if(free[i]) begin
+                    cache_dirty[index][i] <= 1'b0;
+                end
+            end
+        end
+    end
+endgenerate
+```
+
+- 写命中（`|mwmask=1`）：LRU 更新 + dirty 置 1 在同一分支内完成，写使能无歧义。
+- 读命中（`|mwmask=0`）：仅 LRU 更新，dirty 不变。
+- miss 分配 victim way：`free[i]` 分支清 dirty，行为与原代码一致。
+- flush 期间：`fit=0`（`r_flush=1` 时 `fit` 被强制为 0）→ 走 `else if(free[i])` 清 dirty，也与原代码一致；但 flush 期间 STATE 通常不在 000 久留，且没有 `|mwmask`，不会误置 dirty。
+
+### 10.3 验证判活
+
+- `isvwr=1` 触发时，`dirty_r`/`dirty_wr_r` 应在写周期后变 1。
+- 每帧 flush 扫描到 VRAM 行时，该行 dirty 已置 1 → `awaddr=0x08068000` 出现 AXI 写事务。
+- 文本 VRAM 最终同步到 DDR，VGA 可见。
+
+---
+
 ## 八、已规避的坑（对照前几轮）
 
 - ❌ **绝不再用 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]` + CDC**（4b797fd 死锁根因：`lowaddr[5]` 永不到 → `s_lowaddr5` 恒低 → STATE 011 卡死）。

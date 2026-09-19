@@ -93,6 +93,10 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;
 	(* mark_debug = "true" *) reg [2:0]  dbg_ctl_STATE_r;
 	(* mark_debug = "true" *) reg [`WAYS+`SETS:0] dbg_ctl_flushcount_r;
+	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_dirty_r;      // cache_dirty[index] 当前 index 的 4 way
+	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_fit_r;        // 当前访问的 way 命中向量
+	(* mark_debug = "true" *) reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
+	(* mark_debug = "true" *) reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
 
 	// 视频地址判断（仅用于 ILA 探针，不参与主逻辑）
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
@@ -238,6 +242,10 @@ module cache_controller(
 		dbg_ctl_ddr_wr_r  <= ddr_wr;
 		dbg_ctl_STATE_r   <= STATE;
 		dbg_ctl_flushcount_r <= flushcount;
+		dbg_ctl_dirty_r    <= cache_dirty[index];
+		dbg_ctl_fit_r      <= fit;
+		dbg_ctl_index_r    <= index;
+		dbg_ctl_tag_r      <= maddr[`ADDR-1:`LINE+`SETS];
 	end
 	
 endmodule

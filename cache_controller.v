@@ -171,6 +171,16 @@ module cache_controller(
 	wire [`WAYS-1:0]fit_enc = {|fit[3:2], fit[3] | fit[1]};
 	reg  [`WAYS-1:0]vblk = 0;   // miss 锁存的 victim way（填充/逐出写回共用）
 	wire [`WAYS-1:0]blk = r_flush ? flushcount[`WAYS+`SETS-1:`SETS] : (st0 ? fit_enc : vblk);
+	// ★★ Task #8 十三次修复（2026-09-19）：写回地址/way 冻结寄存器。
+	//   根因：STATE 000 顶部 `hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[...]`
+	//   每个 STATE-000 周期都重算 hiaddr，而 fblk(=vblk_lru) 与 index 在 thrashing 连续 miss
+	//   下随 LRU 更新不断变化；hiaddr 经 cache_hi_addr 跨时钟域驱动 sdraddr/awaddr，采样窗口
+	//   极易抓到被改写后的瞬态值 —— 表现为 VRAM 脏行(index0,tag=0x2D0)的 dirty 被清掉、
+	//   但写回地址被覆盖成别的行(0AFE00/028020)，awaddr=0x08068000 永不出现（"显存行写回地址错"）。
+	//   修复：仅在"决定逐出"那一拍把 victim 旧地址与 way 锁进 wb_hiaddr/wb_way，STATE 011 全程
+	//   冻结使用，地址 way 与数据 way(vblk/wb_way) 同源，杜绝 fblk/LRU 漂移导致的地址/脏位错配。
+	reg [`ADDR-`LINE-1:0]wb_hiaddr;  // 写回地址锁存（STATE 000→011 全程冻结）
+	reg [`WAYS-1:0]wb_way;           // 写回 victim way 锁存（地址/数据路径共用）
 	// ★★ Task #8 十二次修复（2026-09-19 21:47 波形定案）：victim 选择与 dirty 判定重构。
 	//   波形证据：① 触发 dbg_sys_flush_r，扫描全程 hiaddr 只有 0000（低内存）与 3ff0/3ff1
 	//   （bootstrap），显存行 0x2E00（tag=0x170）从未出现、dirtywire 恒 0；
@@ -273,12 +283,16 @@ module cache_controller(
 		
 		case(STATE)
 		3'b000: begin
-			hiaddr <= dirty ? {cache_addr[fblk][index], index} : maddr[`ADDR-1:`LINE]; 
+			// ★ 十三次修复：不再在 STATE 000 顶部每周期重算 hiaddr（会覆盖写回地址）。
+			//   改为在各分支显式赋值，并在"决定逐出"拍锁定 wb_hiaddr/wb_way。
 			if(mmreq && !hit) begin	// cache miss
 				if(!r_flush) begin
 					cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
 					vblk <= fblk;   // ★ 十次修复：锁存 victim way，供 STATE 011 写回/111 填充的端口 A 使用
 				end
+				wb_way <= fblk; // ★ 十三次修复：地址/数据路径共用同一冻结 way（无论是否 r_flush 都=本拍 fblk，与 wb_hiaddr 同源）
+				wb_hiaddr <= {cache_addr[fblk][index], index}; // ★ 十三次修复：锁定 victim 旧地址
+				hiaddr <= {cache_addr[fblk][index], index};    // 非阻塞，取旧 cache_addr（victim 写回地址）
 				ddr_rd <= ~dirty & ~r_flush;
 				ddr_wr <= dirty;
 				// ★ 整行修复：脏行先写回(011)，再直接进读填充(111)；干净行直接读填充(111)。
@@ -291,6 +305,9 @@ module cache_controller(
 				//   现改为：只要 r_flush 有效，无论 CPU 是否访问，都扫描当前行并写回脏行。
 				flushcount[`WAYS+`SETS] <= flushcount[`WAYS+`SETS] | flushreq;
 				if(dirty) begin
+					wb_hiaddr <= {cache_addr[fblk][index], index}; // ★ 十三次修复：锁定扫描行地址
+					wb_way <= fblk;                                // ★ 十三次修复：扫描 way
+					hiaddr <= {cache_addr[fblk][index], index};
 					ddr_rd <= 1'b0;
 					ddr_wr <= 1'b1;
 					STATE <= 3'b011;   // 写回当前脏行
@@ -299,6 +316,8 @@ module cache_controller(
 				end
 				ce <= 1'b0;            // 写回期间挂起 CPU，与正常 evict 一致，避免丢写
 		end else begin
+			// ★ 十三次修复：空闲/命中分支 hiaddr 携带当前访问 tag（不产生事务，仅作占位）。
+			hiaddr <= maddr[`ADDR-1:`LINE];
 			// ★ flush 启动时把扫描指针归位 0x80(way0/idx0)：每轮固定全扫 128 行，
 			//   捕获窗口可预测，且刚标脏的显存行最早被访问到。
 			if(flushreq) flushcount <= {1'b1, {(`WAYS+`SETS){1'b0}}};
@@ -306,6 +325,7 @@ module cache_controller(
 		end
 		end
 		3'b011: begin	// write cache to ddr
+			hiaddr <= wb_hiaddr;  // ★ 十三次修复：冻结写回地址，杜绝 thrashing 下被后续重算覆盖
 			ddr_rd <= ~r_flush; //1'b1;
 			// ★ 整行修复：必须等 lowaddr 从 31 回绕到 0（s_lowaddr5_fall）才退出。
 			//   原代码在 s_lowaddr5 高电平（lowaddr=16）就退出，此时 AXI burst 还在传后半行，

@@ -136,6 +136,8 @@ module cache_controller(
 	(* mark_debug = "true" *) reg        dbg_vram_wr_miss_sticky = 1'b0;     // VRAM 写缺失（走填充，dirty 不置 1）
 	(* mark_debug = "true" *) reg        dbg_flush_vram_seen_sticky = 1'b0;  // flush 扫描时遇到过 VRAM 行（tag 0x170/0x171，不论脏否）
 	(* mark_debug = "true" *) reg        dbg_flush_vram_dirty_sticky = 1'b0; // flush 扫描时遇到过 VRAM 行且判为脏
+	// ★ 十七次：确认"flush 窗口里是否真有待处理 CPU 请求"（修复前会被静默丢弃的那个前提）
+	(* mark_debug = "true" *) reg        dbg_miss_in_flush_sticky = 1'b0;
 
 	// ---- Task #8 诊断探针（保留：way 选择与 LRU 轮转观测）----
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
@@ -318,7 +320,20 @@ module cache_controller(
 		3'b000: begin
 			// ★ 十三次修复：不再在 STATE 000 顶部每周期重算 hiaddr（会覆盖写回地址）。
 			//   改为在各分支显式赋值，并在"决定逐出"拍锁定 wb_hiaddr/wb_way。
-			if(mmreq && !hit) begin	// cache miss
+			// ★★ Task #8 十七次修复（2026-09-20）：miss 分支补 !r_flush 门控 —— VRAM 行永不 resident 的根因。
+			//   实测判据（十六次续粘滞标志）：vram_wr_miss=1 / vram_wr_hit=0 /
+			//   flush_vram_seen=0 / flush_vram_dirty=0 ⇒ VRAM 访问**全是 miss**，且 VRAM 行
+			//   连"干净的"都从未进过 cache（flush 全扫 128 行一次都没见过 tag 0x170/0x171）。
+			//   根因：fit[i] = ~r_flush && (...)，flush 期间 hit 被强制为 0；而 miss 分支无
+			//   !r_flush 门控，于是 flush 窗口里任何 CPU 请求（stall 时 mmreq 取锁存的 rmreq）
+			//   都会走进 miss 分支 —— 但分支内写 tag 被 `if(!r_flush)` 挡掉、
+			//   `ddr_rd <= ~dirty & ~r_flush` 也恒 0 发不出填充 ⇒ **该次访问被静默丢弃**：
+			//   行永不 resident，CPU 重试仍 miss，dirty 永远置不上，VRAM 自然永不写回
+			//   （这也解释了写回序列里反复出现的 0afe00/028028 都是被逐出的非 VRAM 行）。
+			//   十次修复只给 LRU/dirty 块加了 ~r_flush 门控，STATE 的 miss 分支漏了，此处补齐。
+			//   修复后：flush 期间 CPU 请求直接让位给 flush 扫描分支；CPU 访问只在 r_flush=0
+			//   时被服务，此时 tag 正常安装、填充正常发出 → 重试必命中 → dirty 能置 1 → 可写回。
+			if(mmreq && !hit && !r_flush) begin	// cache miss（flush 期间不处理，避免静默丢弃）
 				if(!r_flush) begin
 					cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
 					vblk <= fblk;   // ★ 十次修复：锁存 victim way，供 STATE 011 写回/111 填充的端口 A 使用
@@ -430,6 +445,8 @@ module cache_controller(
 			dbg_flush_vram_seen_sticky <= 1'b1;
 			if(dirty) dbg_flush_vram_dirty_sticky <= 1'b1;
 		end
+		// ★ 十七次：flush 期间仍有 CPU 请求在等待 → 修复前会走 miss 分支被静默丢弃
+		if(st0 && mmreq && r_flush) dbg_miss_in_flush_sticky <= 1'b1;
 	end
 	
 endmodule

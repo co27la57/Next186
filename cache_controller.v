@@ -148,12 +148,19 @@ module cache_controller(
 
 	generate
 		for(i=0; i<(1<<`WAYS); i=i+1) begin: gen2
-			always @(posedge clk) 
+			always @(posedge clk) begin
 				if(st0 && mmreq)
 					if(hit) begin
 						cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : cache_lru[i][index] - (cache_lru[i][index] > csblk); 
-						if(fit[i]) cache_dirty[index][i] <= cache_dirty[index][i] || (|mwmask);
 					end else if(free[i]) cache_dirty[index][i] <= 1'b0;
+				// ★ Task #8 继续修复：BIU 2T 工作时 `RAM_MREQ` 与 `RAM_WMASK` 可能存在对齐/采样
+				//   偏差，导致写命中那拍 `st0 && mmreq && hit && fit[i] && |mwmask` 漏采样，
+				//   dirty bit 始终为 0，flush 跳过该行，`awaddr=0x08068000` 永不出现。
+				//   这里加一条独立路径：只要 STATE=0、命中、且 wmask 非 0，就把 dirty 置 1。
+				//   对读命中（|mwmask=0）无影响；对 miss/flush（hit=0 或 fit=0）无影响。
+				if(st0 && hit && fit[i] && |mwmask)
+					cache_dirty[index][i] <= 1'b1;
+			end
 		end
 	endgenerate
 

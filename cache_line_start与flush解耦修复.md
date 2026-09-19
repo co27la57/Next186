@@ -149,6 +149,51 @@ if(r_flush) ... else if(s_lowaddr5) ... else // 无分支！
 
 ---
 
+## 八、0x08068000 写事务缺失根因：VRAM 写命中未置 dirty bit（2026-09-19 中）
+
+### 8.1 用户新波形确认
+
+- 抓 `isvwr=1` 触发：`dirty_r[3:0]` **全程为 0**，一次都没变 1。
+- `mreq_r` 与 `mmreq_r` 完全同步，都是密集脉冲；`ce_r=1`；`STATE_r=0`；此前已确认 `hit_r=1`、`wmask_r=3-0-c-3-0-c` 反复变化。
+
+### 8.2 分析：dirty 置位条件漏采样
+
+dirty 置位条件（`cache_controller.v:152-155`）为 `st0 && mmreq && hit && fit[i] && |mwmask`。用户探针已证实：
+- `st0=1`（STATE=0）
+- `hit=1`
+- `|mwmask≠0`（wmask 在 3/c 时非 0）
+- `mmreq` 也脉冲
+
+但 `dirty_r` 仍为 0，唯一合理解释是：**在 cache_controller 采样沿，`mmreq` 与 `|mwmask` 没有稳定重合**，导致 `st0 && mmreq && ... && |mwmask` 这一拍实际为假。经检查 `Next186_BIU_2T_delayread.v`，`RAM_MREQ = iread || RAM_RD || RAM_WR`，`RAM_WMASK` 由 `RAM_WR` 派生；在 BIU 的 2T 流水里 MREQ 脉冲密集（含取指 iread），写周期中 MREQ 与 WMASK 理论上应重合，但实际采样沿可能存在偏差。
+
+### 8.3 修复：为 dirty bit 增加独立写命中置位路径
+
+保持 LRU 更新仍受 `mmreq` 门控，但为 dirty 单独加一条路径：只要 `STATE=0`、命中、对应 way 匹配、`wmask` 非 0，就把 dirty 置 1。读命中（`|mwmask=0`）不受影响；miss/flush（`hit=0` 或 `fit=0`）也不受影响。
+
+```verilog
+generate
+    for(i=0; i<(1<<`WAYS); i=i+1) begin: gen2
+        always @(posedge clk) begin
+            if(st0 && mmreq)
+                if(hit) begin
+                    cache_lru[i][index] <= fit[i] ? {`WAYS{1'b1}} : ...;
+                end else if(free[i]) cache_dirty[index][i] <= 1'b0;
+            // 新增：与 mmreq 采样无关的写命中 dirty 置位
+            if(st0 && hit && fit[i] && |mwmask)
+                cache_dirty[index][i] <= 1'b1;
+        end
+    end
+endgenerate
+```
+
+### 8.4 验证判活
+
+- `isvwr=1` 触发时，`dirty_r` 对应命中 way 的位应在写周期变 1。
+- 每帧 flush 扫描到该 index/way 时，`awaddr=0x08068000` 出现 AXI 写事务。
+- 文本 VRAM 更新最终同步到 DDR，VGA 可见。
+
+---
+
 ## 八、已规避的坑（对照前几轮）
 
 - ❌ **绝不再用 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]` + CDC**（4b797fd 死锁根因：`lowaddr[5]` 永不到 → `s_lowaddr5` 恒低 → STATE 011 卡死）。

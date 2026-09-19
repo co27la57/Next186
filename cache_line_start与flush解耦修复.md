@@ -401,6 +401,72 @@ end
 
 ---
 
+## 十三、dirty 已置但 0x08068000 无写事务 + 0x40 读偏移根因：状态机提前半行退出（2026-09-19 下）
+
+### 13.1 用户新波形结论
+
+- `dirty_cond2_r` 有脉冲、`lru_wr_r=3`、`hit=1`、`fit=0001`、`blk=0`、`index=00`、`tag=0x170` → **LRU/dirty 更新已生效**（commit `1c2b14e` 的 generate→普通 always 修复成功）。
+- 但 `awaddr=0x08068000` AXI 写事务仍抓不到；同时 VGA 读在 `0x08068040` 读到 `aaaaaaaa`，偏移从之前的 0x20 恶化到 0x40。
+
+### 13.2 写回条件 checklist（dirty 已满足，还需以下全部）
+
+| 条件 | 当前状态 | 说明 |
+|---|---|---|
+| ① dirty bit 置 1 | ✅ 已满足 | `cache_dirty[index]` 在写命中时被置位 |
+| ② `auto_flush` 产生 flush 脉冲 | 需确认 | `vblnk` 下降沿应产生 `auto_flush==3'b110`，用 `rflush_r` 判活 |
+| ③ `flushcount[7]` 置位 → `r_flush=1` | 需确认 | `flushreq` 被锁存后，STATE 000 置 `flushcount[7]` |
+| ④ flush 扫描到脏行所在 index/way | 需确认 | `flushcount` 从当前值自由运行，128 步后回到起点；way=flushcount[6:5]，index=flushcount[4:0] |
+| ⑤ 扫描到脏行时 `dirty=\|(free & cache_dirty[index])=1` | 理论上满足 | 若 dirty bit 在 way0/index0，当 flushcount[6:0]=0x00 时 dirty=1 |
+| ⑥ STATE 011 把整行脏数据写回 DDR | ❌ 有 bug | 原状态机在 burst **中点**（lowaddr=16）就退出，导致后半行写错地址 |
+
+### 13.3 0x40 偏移根因：状态机在 AXI burst 中点退出
+
+`top_zynq7010.v` 的 AXI FSM 对 cache 读/写命令固定发 **16 拍 burst**（`main_awlen/arlen = 15`），每拍 32 bit（由两个 16 bit `ram_wdata` 拼成），共 **32 个 16 bit 字 = 64 字节**，正好一个 cache line。
+
+但 `cache_controller.v` 原状态机：
+- `s_lowaddr5 <= lowaddr[4]` → 高电平对应 lowaddr=16..31；
+- STATE 011 在 `if(s_lowaddr5)` 就退出，即 **lowaddr=16（burst 第 17 字）时退出**；
+- STATE 111 在 `if(~s_lowaddr5)` 退出，同样是中点附近。
+
+后果：
+1. **脏行写回**时，状态机提前进入 STATE 111，执行 `hiaddr <= maddr[20:6]`，把写回地址改成下一行的地址；AXI burst 仍在继续，后半行（32 字节）被写到**错误地址**，产生 0x20/0x40 偏移。
+2. **读填充**时，只读了半行就返回 STATE 000，后半行 cache 数据是旧值；后续 CPU 写后半行再写回时，进一步放大错位。
+3. 即使 flush 把脏行写回，若写回过程中地址被改，VGA 在预期的 `0x08068000` 就看不到数据，而会在 `0x08068040` 等偏移处看到。
+
+### 13.4 修复：等整行 burst 完成（s_lowaddr5 下降沿）再切状态
+
+新增：
+```verilog
+reg s_lowaddr5_d1 = 0;
+wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0
+```
+
+状态机改动要点：
+- 干净 miss：STATE 000 直接进 STATE 111（读填充），不再经 STATE 100/101。
+- 脏 miss：STATE 011 等 `s_lowaddr5_fall` 再进 STATE 111；STATE 111 等 `s_lowaddr5_fall` 再回 STATE 000。
+- flush：STATE 011 等 `s_lowaddr5_fall` 再进 STATE 100；flush 期间不改 `hiaddr`。
+- STATE 100 仅用于 flush 推进；STATE 101 保留但不再使用。
+
+这样确保 AXI 64B burst 完整完成前，状态机不会切走、不会改 `hiaddr`。
+
+### 13.5 下板验证判活
+
+1. `s_lowaddr5`：应为 16 拍低、16 拍高的方波（lowaddr 0..15/16..31）。
+2. `s_lowaddr5_fall_r`：每行事务末尾出现 1 拍高脉冲。
+3. `dbg_ctl_ddr_wr_r`：flush 时应持续高直到 `s_lowaddr5_fall_r` 脉冲。
+4. `awaddr=0x08068000`：dirty 置位后下一帧 vblnk 应出现写事务。
+5. `rflush_r`/`flushcount_r`：确认 flush 触发且扫描到 `flushcount[6:0]=0x00`。
+6. VGA 读：PS/CPU 写 `0x08068000` 后，VGA 在 `0x08068000`（而非 `0x08068040`）读到新数据。
+
+### 13.6 若仍抓不到 0x08068000 写事务
+
+- 检查 `rflush_r` 是否为 1；若始终 0 → `auto_flush` 未产生 flush 脉冲，查 `vblnk` 连接/auto_flush 逻辑。
+- 检查 `flushcount_r` 是否在变化；若卡死 → 状态机仍有死锁，看 `STATE_r`。
+- 检查 `flushcount_r` 是否经过 `0x00`；若经过且 `dirty_r` 仍为 1 但无 awaddr → 写回地址计算错误（需再查 hiaddr/sdraddr）。
+- 检查 `dirty_r` 是否在 flush 扫描前被清 0 → 有后续 miss 把 way0 踢掉（LRU 不应选 way0，若发生说明 LRU 逻辑仍有问题）。
+
+---
+
 ## 八、已规避的坑（对照前几轮）
 
 - ❌ **绝不再用 6-bit `lowaddr` + `s_lowaddr5=lowaddr[5]` + CDC**（4b797fd 死锁根因：`lowaddr[5]` 永不到 → `s_lowaddr5` 恒低 → STATE 011 卡死）。

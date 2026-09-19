@@ -16,6 +16,11 @@
 //   - 关键：lowaddr 保持 5-bit（原作者），s_lowaddr5 = lowaddr[4]（电平 16..31 高、回绕
 //     到 0 变低），**不用 6-bit + lowaddr[5]**（4b797fd 曾因此导致 s_lowaddr5 恒低死锁，
 //     因为 cache_line_start 在 bit5 置位前就把 lowaddr 归零了）。
+// ★★ 新增（2026-09-19）：整行 64B burst 完成后再切状态。
+//     原代码在 s_lowaddr5 上升沿（lowaddr=16，burst 中点）就退出 STATE 011/111，但 top_zynq7010.v
+//     的 AXI FSM 固定发 16 拍 burst（32 个 16bit 字=64B）。状态机提前切走会导致第二半 burst 期间
+//     hiaddr 被改/新事务开始，写回/填充数据错位，表现为 0x20/0x40 偏移。现改为检测 s_lowaddr5
+//     下降沿（lowaddr 从 31 回绕到 0）才退出，确保整行 64B 完成。
 //////////////////////////////////////////////////////////////////////////////////
 
 `timescale 1ns / 1ps
@@ -78,6 +83,8 @@ module cache_controller(
 	reg [2:0]STATE = 0;
 	(* mark_debug = "true" *) reg [`LINE-2:0]lowaddr = 0; //cache mem address
 	(* mark_debug = "true" *) reg s_lowaddr5 = 0;
+	(* mark_debug = "true" *) reg s_lowaddr5_d1 = 0;
+	wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0，标志整行 64B burst 完成
 	wire [31:0]cache_QA;
 	wire [`WAYS-1:0]lru[(1<<`WAYS)-1:0];
 
@@ -96,6 +103,7 @@ module cache_controller(
 	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_fit_r;        // 当前访问的 way 命中向量
 	(* mark_debug = "true" *) reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
 	(* mark_debug = "true" *) reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
+	(* mark_debug = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
 
 	// ---- Task #8 诊断探针（深挖 dirty 置 1 条件，2026-09-19）----
 	(* mark_debug = "true" *) reg        dbg_ctl_mwmask_v_r;  // 当拍 |mwmask 是否有效（与 isvwr 锁存值对比，验证 wmask 是否滞后 mreq）
@@ -181,6 +189,7 @@ module cache_controller(
 		
 	always @(posedge clk) begin
 		s_lowaddr5 <= lowaddr[`LINE-2];
+		s_lowaddr5_d1 <= s_lowaddr5;
 		flushreq <= ~flushcount[`WAYS+`SETS] & (flushreq | flush);
 		if(ce) begin
 			raddr <= addr;
@@ -196,7 +205,8 @@ module cache_controller(
 				if(!r_flush) cache_addr[fblk][index] <= maddr[`ADDR-1:`LINE+`SETS];
 				ddr_rd <= ~dirty & ~r_flush;
 				ddr_wr <= dirty;
-				STATE <= dirty ? 3'b011 : 3'b100;
+				// ★ 整行修复：脏行先写回(011)，再直接进读填充(111)；干净行直接读填充(111)。
+				STATE <= dirty ? 3'b011 : 3'b111;
 				ce <= 1'b0;
 			end else if(r_flush) begin
 				// ★ 修复(回退 af6f44b 后丢失)：flush 与 CPU 访问解耦。
@@ -219,7 +229,10 @@ module cache_controller(
 		end
 		3'b011: begin	// write cache to ddr
 			ddr_rd <= ~r_flush; //1'b1;
-			if(s_lowaddr5) begin
+			// ★ 整行修复：必须等 lowaddr 从 31 回绕到 0（s_lowaddr5_fall）才退出。
+			//   原代码在 s_lowaddr5 高电平（lowaddr=16）就退出，此时 AXI burst 还在传后半行，
+			//   状态机若提前进入 111 会更新 hiaddr，导致后半行写错地址（0x20/0x40 偏移）。
+			if(s_lowaddr5_fall) begin
 				ddr_wr <= 1'b0;
 				// ★ flush 写完脏行后直接推进扫描(STATE 100)，不再进入 111 回填：
 				//   否则会把刚写回 DDR 的行又用 DDR 旧数据覆盖掉，且与晚到的 CPU 写入存在回写竞态。
@@ -228,25 +241,20 @@ module cache_controller(
 		end
 		3'b111: begin // read cache from ddr
 			if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE]; // flush 期间不改 hiaddr（写回地址已在 STATE 000 锁定）
-			if(~s_lowaddr5) STATE <= 3'b100;
+			// ★ 整行修复：同样等整行读填充完成（lowaddr 回绕）再返回 IDLE。
+			if(s_lowaddr5_fall) begin
+				ddr_rd <= 1'b0;
+				STATE <= 3'b000;
+			end
 		end
-			3'b100: begin	
-				if(r_flush) begin
-					flushcount <= flushcount + 1'b1;
-					STATE <= 3'b000;
-				end else if(s_lowaddr5) begin
-					ddr_rd <= 1'b0;
-					STATE <= 3'b101;
-				end else begin
-					// ★ 防止 STATE 111 退出时 s_lowaddr5 已被采样为低（CDC/相位导致错过高电平），
-					//   否则 STATE 100 在 r_flush=0/s_lowaddr5=0 时无分支，会卡死。
-					ddr_rd <= 1'b0;
-					STATE <= 3'b000;
-				end
-			end
-			3'b101: begin
-				if(~s_lowaddr5) STATE <= 3'b000;
-			end
+		3'b100: begin	// flush 扫描推进
+			flushcount <= flushcount + 1'b1;
+			STATE <= 3'b000;
+		end
+		3'b101: begin
+			// 保留但不再使用，防止综合器对未用状态优化产生意外行为
+			STATE <= 3'b000;
+		end
 		endcase
 	end
 
@@ -274,6 +282,7 @@ module cache_controller(
 		dbg_ctl_lru_wr_r    <= cache_lru[blk][index];
 		dbg_ctl_dirty_wr_r   <= cache_dirty[index][blk];
 		dbg_ctl_dirty_wr_d1_r <= dbg_ctl_dirty_wr_r;
+		dbg_ctl_s_lowaddr5_fall_r <= s_lowaddr5_fall;
 	end
 	
 endmodule

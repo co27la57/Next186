@@ -120,6 +120,14 @@ module cache_controller(
 	//   写回地址=0x2E00(VRAM)"时置 1，可一锤定音：能触发=VRAM 写回确实发生（之前为 VGA 读误判），
 	//   永不触发=VRAM 行从未成为 victim，需回头查 victim 选择 / LRU 退化。
 	(* mark_debug = "true" *) reg        dbg_ctl_vram_wr_r;
+	// ★ 十六次诊断探针（纯观测，不参与任何主逻辑）：把"CPU 到底有没有写 VRAM"和
+	//   "VRAM 到底有没有写回 DDR"做成**粘滞标志**（置 1 后一直保持），这样上板跑一段时间后
+	//   直接读这两个 bit 即可，无需触发、不受 1028 采样窗口远短于一帧(16.7ms)的限制。
+	//   判读：isvwr_sticky=0 → CPU 从未写 VRAM（问题不在 cache，在 CPU/BIOS 流程）；
+	//         isvwr_sticky=1 且 vram_wr_sticky=0 → VRAM 脏了却从不写回（真 cache bug）；
+	//         两者都=1 → VRAM 写回已发生，转查 VGA 读地址。
+	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_sticky_r = 1'b0;   // CPU 曾写 VRAM（粘滞，显式上电清零防误判）
+	(* mark_debug = "true" *) reg        dbg_ctl_vram_wr_sticky_r = 1'b0; // VRAM 行曾写回 DDR（粘滞，显式上电清零防误判）
 
 	// ---- Task #8 诊断探针（保留：way 选择与 LRU 轮转观测）----
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
@@ -398,7 +406,15 @@ module cache_controller(
 		// ---- Task #8 八次诊断探针采样 ----
 		dbg_ctl_flushreq_r  <= flushreq;
 		dbg_ctl_dirtywire_r <= dirty;
-		dbg_ctl_vram_wr_r   <= (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00); // VRAM 行写回事件（hiaddr=0x2E00, 物理 0x08068000）
+		// ★ 十六次：放宽到全部 VRAM 行（tag 0x170 = n0-31，tag 0x171 = n32-62，hiaddr 0x2E00-0x2E3F），
+		//   原 ==0x2E00 只匹配 index0 一条行，会漏判其余 62 行。
+		dbg_ctl_vram_wr_r   <= (STATE == 3'b011) && ddr_wr &&
+		                       (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171);
+		// 粘滞标志：置 1 后保持，供上板后直接读取（不受触发窗口限制）
+		if(mmreq && is_video_wr) dbg_ctl_isvwr_sticky_r <= 1'b1;
+		if((STATE == 3'b011) && ddr_wr &&
+		   (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171))
+			dbg_ctl_vram_wr_sticky_r <= 1'b1;
 	end
 	
 endmodule

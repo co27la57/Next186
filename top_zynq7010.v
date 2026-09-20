@@ -95,10 +95,10 @@ module top_zynq7010 (
     wire [1:0]  ram_cmd;
     reg  [1:0]  ram_cmd_ack;
     wire [23:0] ram_addr;
-    wire [15:0] ram_wdata;
+    (* mark_debug = "true" *) wire [15:0] ram_wdata;     // ★ 实验探针：写回半字（= cache 侧 ddr_dout 经 SoC 直通）
     wire [15:0] ram_rdata;
     wire        ram_rd_valid;
-    wire        ram_wr_valid;
+    (* mark_debug = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案 B 已把窗口前移一拍）
     wire        SDLED;
 
     reg [25:0] blink_cnt = 0;
@@ -132,7 +132,7 @@ module top_zynq7010 (
     reg [31:0] main_awaddr;
     reg [7:0]  main_awlen;
     reg        main_awvalid;
-    reg [31:0] main_wdata;
+    (* mark_debug = "true" *) reg [31:0] main_wdata;    // ★ 实验探针：拼出的 32-bit 写数据
     reg        main_wlast;
     reg        main_wvalid;
     reg        main_bready;
@@ -185,12 +185,12 @@ module top_zynq7010 (
     localparam W_WAIT_W  = 4'd8;
     localparam B_RESP    = 4'd9;
 
-    reg [3:0]  state;
+    (* mark_debug = "true" *) reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
-    reg [15:0] latched_wdata_low;
+    (* mark_debug = "true" *) reg [15:0] latched_wdata_low; // ★ 实验探针：W_ISSUE 采到的半字
     reg        rlast_latched;
-    reg [4:0]  w_burst_cnt;
+    (* mark_debug = "true" *) reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
     reg [31:0] timeout_cnt = 32'd0;
 
     localparam TIMEOUT_MAX = 32'd500_000;
@@ -345,7 +345,13 @@ module top_zynq7010 (
     // ==========================================
     assign ram_rdata    = (state == R_PUSH_0) ? latched_rdata[15:0] : latched_rdata[31:16];
     assign ram_rd_valid = (state == R_PUSH_0) || (state == R_PUSH_1);
-    assign ram_wr_valid = (state == W_L) || (state == W_H);
+    // ★ 方案 B（2026-09-20 实验）：cache 读窗口由 (W_L||W_H) 前移一拍为 (W_ISSUE||W_L)。
+    //   根因：cache 侧 ddr_dout 相对 lowaddr 有 2 级寄存延迟，而 lowaddr 每个 32-bit 字步进 2；
+    //   FSM 原在 W_ISSUE(=拍0) 与 W_H(=拍2) 两次采样，两点相隔 2 拍 → lowaddr[0] 奇偶回原值
+    //   → 两次采到同一半字 → main_wdata={X,X}（三组 PS dump 100% 成对重复即此）。
+    //   前移窗口后，W_ISSUE→W_H 之间 lowaddr 只净步进 1 → 两次采到高低两半（cell1→cell0 / cell3→cell2）。
+    //   ram_wr_valid 仅驱动 cache_read_data（ddr_186.v:275,477），不影响 AXI wvalid/wdata 时序。
+    assign ram_wr_valid = (state == W_ISSUE) || (state == W_L);
 
     assign test_led[0] = init_done && !init_fail;
     assign test_led[1] = init_done &&  init_fail;

@@ -698,3 +698,57 @@ flush 期间 CPU 请求让位给 flush 扫描分支，**不再被丢弃**（CPU 
 `dbg_vram_wr_hit_sticky` 应变 1（VRAM 写开始命中）→ 随后 `dbg_ctl_vram_wr_sticky_r` 变 1 → `sdraddr=0x034000` → `awaddr=0x08068000` → **VGA 文本更新**。
 辅助：`dbg_miss_in_flush_sticky=1` 可确认前述丢弃路径此前确实活跃。
 
+---
+
+### 21. 十八次修复（2026-09-20）：fit 自 generate 改为显式 assign——VRAM 脏位写错 way 致永不写回
+
+下板结果（十七次修复后，`vram_wr_hit=1` 已证明 VRAM 行能 resident，但 `vram_wr=0`/`flush_vram_seen=0`）：
+
+- 用户两条决定性判据：
+  1. **`0x034000` 在 `ddr_wr` 下永不出现** → 写回事务从不发生；
+  2. **空闲时 `dbg_sdraddr=0x034000` 可触发** → VGA 读地址映射正确（已复核 `vga_ddr_row_col=17'h14000` → `sdraddr=0x034000` → `awaddr=0x08068000`，且写回侧 `sdraddr={memmap_mux[8:0],cache_hi_addr[9:0],5'b0}` 经 `main_awaddr=0x0800_0000+ram_addr*2` 也精确落到 `0x08068000`，地址路径无 bug）。
+
+#### 21.1 根因：fit 在 generate 块内被 Vivado 综合错 → 脏位写进错误 way
+
+`fit[i]` 原在 `gen1` generate-for 内赋值（`assign fit[i] = ~r_flush && (cache_addr[i][index]==maddr[20:11])`）。本 design 的 generate 块曾两度被 Vivado 综合错（见第 8/10/11 次修复注释，gen2 寄存器写失效、free mux 嫌疑同类病），`fit` 即属同一隐患。
+
+位序错乱后两种表象：
+
+- `|fit`（即 `hit`）仍成立 → `vram_wr_hit_sticky=1` 与实测一致；
+- 但 `cache_dirty[index] <= cache_dirty[index] | fit`（291-292）把脏位写进"错误 way"。
+
+而 `cache_addr`（命中行 tag）由 **miss 分支的 `fblk`（三级比较器 `vblk_lru`，非 `fit`）** 写入，落在**正确 way**。
+
+后果链：
+
+1. VRAM 行 tag 正确 resident，但**正确 way 的 `dirty=0`**；
+2. flush 扫到正确 way 时 `dirty=0` → 不写回；
+3. VRAM 行很快被同索引的其它访问（代码/数据在低地址 index0-15）逐出 → tag 被覆盖 → `flush_vram_seen_sticky=0`；
+4. 逐出时正确 way 的 dirty 仍为 0 → `ddr_wr` 不触发 → **`0x034000@ddr_wr` 永不出现**（正是用户两条判据）。
+
+> 注：这与"flush 没扫到"是同一现象的两面——VRAM 行在 flush 前已被逐出，而逐出不写回是因为脏位从未落到正确 way。
+
+#### 21.2 修复（commit 55f0dcc）
+
+`fit0..fit3` 改为**显式 assign**，每位精确对应各自 way：
+
+```verilog
+wire fit0 = ~r_flush && (cache_addr[0][index] == maddr[`ADDR-1:`LINE+`SETS]);
+wire fit1 = ~r_flush && (cache_addr[1][index] == maddr[`ADDR-1:`LINE+`SETS]);
+wire fit2 = ~r_flush && (cache_addr[2][index] == maddr[`ADDR-1:`LINE+`SETS]);
+wire fit3 = ~r_flush && (cache_addr[3][index] == maddr[`ADDR-1:`LINE+`SETS]);
+assign fit = {fit3, fit2, fit1, fit0};
+```
+
+脏位随之写对位置，VRAM 行每帧 flush 必被写回 → `sdraddr=0x034000@ddr_wr` 出现。
+
+附：删除十五次修复起已无引用的 `lru[i]` 线网（`{WAYS{fit[i]}} & cache_lru[i][index]`，仅旧 `csblk` 用过），`cache_lru` 寄存器数组与 `dbg_ctl_lru_wr_r` 探针保留。
+
+#### 21.3 下板判据（本轮）
+
+- `dbg_ctl_vram_wr_sticky_r` 应变 1，且 `dbg_sdraddr=0x034000` 在 `ddr_wr=1` 下出现；
+- `dbg_flush_vram_seen_sticky` 应变 1（VRAM 行在 flush 扫描中可见，tag 不再被提前逐出覆盖）；
+- VGA 文本随清屏更新。
+
+若仍不出现 `0x034000@ddr_wr`，则根因转向"VRAM 行在 flush 前仍被逐出但逐出写回路径本身异常"，需复查 miss 分支 `ddr_wr<=dirty`（345 行）在跨时钟域下 `dirty` 采样。
+

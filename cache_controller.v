@@ -90,7 +90,14 @@ module cache_controller(
 	//   LRU/dirty 块和 STATE 块两个 always 写端口驱动，Vivado 无法推断 RAM ->
 	//   Synth 8-2914 Unsupported RAM template [v:70] + 8-5743，综合直接失败。
 	//   现将清 dirty 挪入 LRU/dirty 块（下方），cache_dirty 恢复单写端口。
-	wire flush_wb_done = (STATE == 3'b011) && r_flush && ddr_wr && s_lowaddr5_fall;
+	// ★ 二十一次修复（2026-09-20）：写回完成即清脏位——无论 flush 写回还是"读缺失逐出"写回。
+	//   根因：VGA 每帧扫描文本缓冲，对未命中行触发读缺失 → 先把脏行(字符串)写回 DDR(STATE 011)、
+	//   再填充新行(STATE 111)。原 flush_wb_done 仅当 r_flush 才清脏位；读缺失逐出写回(r_flush=0)后
+	//   脏位未清 → 该 way 仍脏、且其槽位已被 DDR 旧值(=0)填充 → 随后 flush 把"0"再次写回 DDR，
+	//   覆盖掉字符串 → 前段 VRAM(index0 及被 VGA 先读的行)整片变 0（本次实测 cells 0-33 全 0）。
+	//   现改为：任何 STATE 011 写回完成都清对应 way 的脏位（用写回时冻结的 wb_hiaddr/wb_way，
+	//   与 flush/逐出同源，两类写回均指向正确的 index/way）。
+	wire flush_wb_done = (STATE == 3'b011) && ddr_wr && s_lowaddr5_fall;
 	wire [31:0]cache_QA;
 
 	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
@@ -284,11 +291,15 @@ module cache_controller(
 	//   而普通 always 块（STATE 块写 cache_addr）有效。dirty 改整字写，绕开单 bit 写综合异常。
 	integer w;
 	always @(posedge clk) begin
-		// ★ 十一次修复：flush 写回完成时清该行该 way 的 dirty（从 STATE 块挪入，保证 cache_dirty 单写端口）。
-		//   flush_wb_done 蕴含 r_flush=1，与下方 else if 的 !r_flush 互斥，优先级无冲突。
+		// ★ 二十一次修复（2026-09-20）：写回完成即清脏位——用写回时冻结的 wb_hiaddr/wb_way，
+		//   对 flush 写回 与 "读缺失逐出"写回 通用且指向正确的 index/way。
+		//   原实现用 flushcount 索引：flushcount 仅在 flush 扫描时推进，读缺失逐出(STATE 011,r_flush=0)
+		//   期间保持上一次 flush 残留值 → 清错行的脏位（误清没写回的行、漏清真正写回的行），会造成数据丢失。
+		//   现改为 wb_hiaddr[`SETS-1:0]=写回行 index、wb_way=写回 way：STATE 000 决定逐出时锁存，
+		//   STATE 011 全程冻结，两类写回均精确命中。与下方 else if(!r_flush) 互斥（同拍不可能既写回又 miss）。
 		if(flush_wb_done) begin
-			cache_dirty[flushcount[`SETS-1:0]] <=
-				cache_dirty[flushcount[`SETS-1:0]] & ~(4'b0001 << flushcount[`WAYS+`SETS-1:`SETS]);
+			cache_dirty[wb_hiaddr[`SETS-1:0]] <=
+				cache_dirty[wb_hiaddr[`SETS-1:0]] & ~(4'b0001 << wb_way);
 		// ★ 十次修复：加 ~r_flush 门控——flush 扫描期间（fit 恒 0、hit 恒 0）若残留 CPU 请求
 		//   （mmreq=rmreq=1）会误入 miss 分支，用扫描 way 污染 LRU / 误清扫描行 dirty。
 		end else if(st0 && mmreq && !r_flush) begin

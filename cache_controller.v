@@ -92,7 +92,6 @@ module cache_controller(
 	//   现将清 dirty 挪入 LRU/dirty 块（下方），cache_dirty 恢复单写端口。
 	wire flush_wb_done = (STATE == 3'b011) && r_flush && ddr_wr && s_lowaddr5_fall;
 	wire [31:0]cache_QA;
-	wire [`WAYS-1:0]lru[(1<<`WAYS)-1:0];
 
 	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
 	(* mark_debug = "true" *) reg        dbg_ctl_mreq_r;
@@ -151,13 +150,24 @@ module cache_controller(
 	wire is_video_mem = (maddr[`ADDR-1:12] == 9'h0B8);
 	wire is_video_wr  = is_video_mem & (|mwmask);
 
-	genvar i;
-	generate
-		for(i=0; i<(1<<`WAYS); i=i+1) begin: gen1
-			assign fit[i] = ~r_flush && (cache_addr[i][index] == maddr[`ADDR-1:`LINE+`SETS]);
-			assign lru[i] = {`WAYS{fit[i]}} & cache_lru[i][index];
-		end
-	endgenerate
+	// ★★ 十八次修复（2026-09-20）：fit 自 generate-for 改为显式 assign。
+	//   本 design 下 generate 块曾两度被 Vivado 综合错（记忆 + 八次修复注释：gen1/gen2 数组
+	//   写失效、free mux 嫌疑）。fit[i] 即处在该 generate 块（gen1）内，是同一类隐患。
+	//   若 fit 各位被综合成"同一 way 的比较结果"或位序错乱：
+	//     - |fit（即 hit）仍成立 → vram_wr_hit_sticky 能置 1（与实测一致）；
+	//     - 但 cache_dirty[index] <= cache_dirty[index] | fit（291-292）会把脏位写进"错误 way"，
+	//       而 cache_addr（命中行 tag）由 miss 分支的 fblk（三级比较器，非 fit）写入，属正确 way。
+	//   后果链：VRAM 行 tag 正确 resident、但脏位落在别的 way → flush 扫到正确 way 时 dirty=0
+	//   → 不写回；VRAM 行很快被同索引其它访问逐出（tag 被覆盖 → flush_vram_seen=0），
+	//   逐出时正确 way 的 dirty 仍为 0 → ddr_wr 不触发 → 0x034000 在 ddr_wr 下永不出现
+	//   （正是用户两条决定性判据）。改显式 assign 后 fit 每位精确对应各自 way，脏位写对位置，
+	//   VRAM 行必被每帧 flush 写回 → sdraddr=0x034000@ddr_wr 出现 → VGA 文本更新。
+	//   原 lru[i] 线网（{WAYS{fit[i]}} & cache_lru[i][index]）自十五次修复起已无引用，一并删除。
+	wire fit0 = ~r_flush && (cache_addr[0][index] == maddr[`ADDR-1:`LINE+`SETS]);
+	wire fit1 = ~r_flush && (cache_addr[1][index] == maddr[`ADDR-1:`LINE+`SETS]);
+	wire fit2 = ~r_flush && (cache_addr[2][index] == maddr[`ADDR-1:`LINE+`SETS]);
+	wire fit3 = ~r_flush && (cache_addr[3][index] == maddr[`ADDR-1:`LINE+`SETS]);
+	assign fit = {fit3, fit2, fit1, fit0};
 
 	// ★ Task #8 八次修复（2026-09-19 波形定案）：free 判脏路径移出 generate，改显式赋值。
 	//   波形矛盾：flush 脉冲后 2 拍探针仍显示 cache_dirty[0]=0001（way0 脏、tag=000 命中），

@@ -95,10 +95,10 @@ module top_zynq7010 (
     wire [1:0]  ram_cmd;
     reg  [1:0]  ram_cmd_ack;
     wire [23:0] ram_addr;
-    (* mark_debug = "true" *) wire [15:0] ram_wdata;     // ★ 实验探针：写回半字（= cache 侧 ddr_dout 经 SoC 直通）
+    (* mark_debug = "true" *) wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
     wire [15:0] ram_rdata;
     wire        ram_rd_valid;
-    (* mark_debug = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案 B 已把窗口前移一拍）
+    (* mark_debug = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
     wire        SDLED;
 
     reg [25:0] blink_cnt = 0;
@@ -188,7 +188,6 @@ module top_zynq7010 (
     (* mark_debug = "true" *) reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
-    (* mark_debug = "true" *) reg [15:0] latched_wdata_low; // ★ 实验探针：W_ISSUE 采到的半字
     reg        rlast_latched;
     (* mark_debug = "true" *) reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
     reg [31:0] timeout_cnt = 32'd0;
@@ -280,7 +279,7 @@ module top_zynq7010 (
 
                     W_ISSUE: begin
                         if (main_awvalid && m_axi_awready) main_awvalid <= 1'b0;
-                        latched_wdata_low <= ram_wdata;
+                        // ★ 方案A：不再采半字（整字在 W_H 拍一次锁存）
                         state             <= W_L;
                     end
 
@@ -289,7 +288,8 @@ module top_zynq7010 (
                     end
 
                     W_H: begin
-                        main_wdata  <= {latched_wdata_low, ram_wdata};
+                        // ★ 方案A：W_H 拍 cache 已给出整 32-bit 字（ddr_dout=cache_QA=word n），直接锁存
+                        main_wdata  <= ram_wdata;
                         main_wlast  <= (w_burst_cnt == 5'd15);
                         main_wvalid <= 1'b1;
                         state       <= W_WAIT_W;
@@ -345,13 +345,13 @@ module top_zynq7010 (
     // ==========================================
     assign ram_rdata    = (state == R_PUSH_0) ? latched_rdata[15:0] : latched_rdata[31:16];
     assign ram_rd_valid = (state == R_PUSH_0) || (state == R_PUSH_1);
-    // ★ 方案 B（2026-09-20 实验）：cache 读窗口由 (W_L||W_H) 前移一拍为 (W_ISSUE||W_L)。
-    //   根因：cache 侧 ddr_dout 相对 lowaddr 有 2 级寄存延迟，而 lowaddr 每个 32-bit 字步进 2；
-    //   FSM 原在 W_ISSUE(=拍0) 与 W_H(=拍2) 两次采样，两点相隔 2 拍 → lowaddr[0] 奇偶回原值
-    //   → 两次采到同一半字 → main_wdata={X,X}（三组 PS dump 100% 成对重复即此）。
-    //   前移窗口后，W_ISSUE→W_H 之间 lowaddr 只净步进 1 → 两次采到高低两半（cell1→cell0 / cell3→cell2）。
-    //   ram_wr_valid 仅驱动 cache_read_data（ddr_186.v:275,477），不影响 AXI wvalid/wdata 时序。
-    assign ram_wr_valid = (state == W_ISSUE) || (state == W_L);
+    // ★ 方案 A（2026-09-20）：取消 16-bit 半字 × 2 拍配对，写回直接送整 32-bit 字。
+    //   方案 B（把本窗口由 (W_L||W_H) 前移为 (W_ISSUE||W_L)）实测仅 56% 正确
+    //   （粘滞计数 dup=1771 / ok=2293），证明 2-beat 配对对 AXI wready 造成的
+    //   W_WAIT_W 抖动敏感、不可靠 → 回退窗口，改用整字（配对彻底消失）：
+    //   W_H 拍 cache 已给出 word n 的整字（lowaddr 每字步进 2 → W_L 拍 address_a=word n
+    //   → 寄存 1 拍后 W_H 拍 q_a=word n），FSM 直接 main_wdata<=ram_wdata，与停顿无关。
+    assign ram_wr_valid = (state == W_L) || (state == W_H);
 
     assign test_led[0] = init_done && !init_fail;
     assign test_led[1] = init_done &&  init_fail;
@@ -359,29 +359,19 @@ module top_zynq7010 (
     assign test_led[3] = SDLED;
 
     // ==========================================
-    // ★ 写回配对诊断粘滞标志（2026-09-20 实验，纯观测，不影响主逻辑）
-    //   目的：**不用解析波形**即可判断"写回的 32-bit 字两半是否相同"。
-    //   采样点＝W_H 拍：此拍 ram_wdata=第二半字，latched_wdata_low=W_ISSUE 采到的第一半字，
-    //   二者即 main_wdata 的高/低两半。上电清零、置 1 后保持（不受触发窗口限制），
-    //   上板跑几秒后直接读 bit 即可：
-    //     dbg_pair_dup_sticky = 1        → 仍存在 {X,X} 半字重复（Fix B 未生效/未覆盖全部）
-    //     dbg_pair_ok_sticky  = 1 且 dup_cnt 不再增长 → 配对已正确（每字两半不同）
-    //     dup_cnt : 两半相同的字数；ok_cnt : 两半不同的字数（比值即好坏比例）
+    // ★ 方案 A 验证粘滞计数（2026-09-20，纯观测，不影响主逻辑）
+    //   dbg_wb_word_cnt  : 累计写出的 32-bit 字数（每次 AXI 写握手 +1）
+    //   dbg_wb_burst_cnt : 累计写回 burst 数（w_burst_cnt 到 15 时 +1）
+    //   上电清零、持续累加；上板跑几秒读数即可确认写回在持续进行。
+    //   **数据是否正确以 PS dump 为准**：0x08068000 起应不再"每 16-bit 成对重复"。
     // ==========================================
-    (* mark_debug = "true" *) reg        dbg_pair_dup_sticky = 1'b0;
-    (* mark_debug = "true" *) reg        dbg_pair_ok_sticky  = 1'b0;
-    (* mark_debug = "true" *) reg [15:0] dbg_pair_dup_cnt    = 16'd0;
-    (* mark_debug = "true" *) reg [15:0] dbg_pair_ok_cnt     = 16'd0;
+    (* mark_debug = "true" *) reg [15:0] dbg_wb_word_cnt  = 16'd0;
+    (* mark_debug = "true" *) reg [15:0] dbg_wb_burst_cnt = 16'd0;
 
     always @(posedge m_axi_aclk) begin
-        if (state == W_H) begin
-            if (ram_wdata == latched_wdata_low) begin
-                dbg_pair_dup_sticky <= 1'b1;
-                dbg_pair_dup_cnt    <= dbg_pair_dup_cnt + 1'b1;
-            end else begin
-                dbg_pair_ok_sticky  <= 1'b1;
-                dbg_pair_ok_cnt     <= dbg_pair_ok_cnt + 1'b1;
-            end
+        if (state == W_WAIT_W && main_wvalid && m_axi_wready) begin
+            dbg_wb_word_cnt <= dbg_wb_word_cnt + 1'b1;
+            if (w_burst_cnt == 5'd15) dbg_wb_burst_cnt <= dbg_wb_burst_cnt + 1'b1;
         end
     end
 

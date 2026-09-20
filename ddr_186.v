@@ -6,7 +6,7 @@ module system
          output wire [1:0]  ram_cmd,        
          input  wire [1:0]  ram_cmd_ack,    
          output wire [23:0] ram_addr,       
-         output wire [15:0] ram_wdata,      
+         output wire [31:0] ram_wdata,      
          input  wire [15:0] ram_rdata,      
          input  wire        ram_rd_valid,   
          input  wire        ram_wr_valid,   
@@ -56,7 +56,7 @@ module system
 
 	initial SD_n_CS = 1'b1;
 	//wire [15:0] cpu_wdata_latch;//new
-	wire [15:0]cntrl0_user_input_data;
+	wire [31:0]cntrl0_user_input_data;
 	wire [15:0]sys_DOUT;	
 	wire [31:0] DOUT;
 	wire [15:0]CPU_DOUT;

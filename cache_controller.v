@@ -38,7 +38,7 @@ module cache_controller(
 	 input [3:0]wmask,
 	 output reg ce = 1'b1,	// clock enable for CPU
 	 input [15:0]ddr_din,
-	 output reg[15:0]ddr_dout,
+	 output reg[31:0]ddr_dout,
 	 input ddr_clk,
 	 input cache_write_data, // 1 when data must be written to cache, on posedge ddr_clk
 	 input cache_read_data, // 1 when data must be read from cache, on posedge ddr_clk
@@ -244,7 +244,12 @@ module cache_controller(
 		//   行填充若从错误行内偏移开始写 cache，CPU 会读到垃圾 → 永不到达写显存指令 → isvwr 不触发）。
 		if(cache_line_start) lowaddr <= {(`LINE-2){1'b0}};
 		else if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
-		ddr_dout <= lowaddr[0] ? cache_QA[15:0] : cache_QA[31:16];
+		// ★ 方案 A：写回直接输出整 32-bit 字（取消 lowaddr[0] 半字选择）。
+		//   原 `ddr_dout <= lowaddr[0] ? [15:0] : [31:16]` 使写回按 2 拍送高低半字，
+		//   而 ddr_dout 相对 lowaddr 有 2 级寄存延迟（BRAM q_a + 本寄存器），
+		//   AXI 写 FSM 在 W_ISSUE/W_H 两次采样极易采到同一半字 → DDR 每 16-bit 成对重复。
+		//   改整字后 FSM 单拍锁存，无配对、与 W_WAIT_W 停顿无关。
+		ddr_dout <= cache_QA;
 	end
 		
 	cache cache_mem

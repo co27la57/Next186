@@ -9,7 +9,7 @@ module Next186_SoC (
     output wire [1:0]  ram_cmd,
     input  wire [1:0]  ram_cmd_ack,
     output wire [23:0] ram_addr,
-    output wire [15:0] ram_wdata,
+    output wire [31:0] ram_wdata,
     input  wire [15:0] ram_rdata,
     input  wire        ram_rd_valid,
     input  wire        ram_wr_valid,

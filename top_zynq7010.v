@@ -180,6 +180,7 @@ module top_zynq7010 (
     localparam R_PUSH_0  = 4'd3;
     localparam R_PUSH_1  = 4'd4;
     localparam W_ISSUE   = 4'd5;
+    localparam W_PRE     = 4'd10;  // ★ 二十二次修复：插入一拍等待 cache_line_start 到达 cache_controller 并把 lowaddr 归零
     localparam W_L       = 4'd6;
     localparam W_H       = 4'd7;
     localparam W_WAIT_W  = 4'd8;
@@ -280,7 +281,14 @@ module top_zynq7010 (
                     W_ISSUE: begin
                         if (main_awvalid && m_axi_awready) main_awvalid <= 1'b0;
                         // ★ 方案A：不再采半字（整字在 W_H 拍一次锁存）
-                        state             <= W_L;
+                        state             <= W_PRE;
+                    end
+
+                    W_PRE: begin
+                        // ★ 二十二次修复：多等一拍，让 ddr_186.v 发出的 cache_line_start 脉冲
+                        //   在 W_L 拍前到达 cache_controller 并把 lowaddr 强置 0，消除 W_H 拍首字读到
+                        //   旧 cache line 残留或 0 造成的 +1 word 偏移。
+                        state <= W_L;
                     end
 
                     W_L: begin

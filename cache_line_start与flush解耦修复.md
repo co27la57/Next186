@@ -752,3 +752,29 @@ assign fit = {fit3, fit2, fit1, fit0};
 
 若仍不出现 `0x034000@ddr_wr`，则根因转向"VRAM 行在 flush 前仍被逐出但逐出写回路径本身异常"，需复查 miss 分支 `ddr_wr<=dirty`（345 行）在跨时钟域下 `dirty` 采样。
 
+---
+
+### 22. 十九次修复（2026-09-20）：flush 期间挂起 cache_mem 端口 B——写回读与 CPU 写同字竞争（花屏/字符重叠）
+
+十八次修复后 `0x034000@ddr_wr` 已触发（VRAM 写回发生），但出现**写时序**问题：少量花屏 + 大量字符重叠。VRAMdump（`0x08068000` 起）显示主体为顺序可读字符串（`" SacigBO nSCr ls…"`），仅两处单元损坏——`0x08068048=0x1515`、`0x0806804C=0x8940`，**均属性字节错乱**（attr 0x15/0x89，正常应为 0x01），字符字节也乱。
+
+#### 22.1 错因：写回读与 CPU 写竞争同一 cache 字
+
+`cache_mem` 是真双口 block RAM：端口 A（`ddr_clk`，flush 写回读）+ 端口 B（`clk`，CPU 写）。flush 期间 CPU 被 `ce<=0` 挂起，但请求锁存于 `rmreq`。flush 扫描的 `st0` 周期里：
+
+```verilog
+.enable_b(mmreq && hit && st0)   // 原 260 行，未加 !r_flush
+```
+
+ce<=0 时 `mmreq=rmreq`，若 held 的 VRAM 写命中，则经端口 B 写入——而此刻端口 A 正对该行做写回读；两端口异步时钟、访问同一 32-bit 字 → 读回陈旧/错乱字节（Xilinx BRAM 读写同地址未定义语义）→ 该单元以损坏值写回 DDR。VGA 在应显新字处显示旧/错字 = **字符重叠 + 花屏**。`LRU/dirty` 块（271 行）早已 `!r_flush` 门控，此处漏了。
+
+#### 22.2 修复（commit 1dbd82f）
+
+`enable_b` 加 `!r_flush`：flush 期间 CPU 写完全挂起（CPU 本就 `ce<=0`），请求在 flush 结束后正常服务，**无功能回退**。
+
+#### 22.3 下板判据
+
+- 清屏后 VGA 文本应无花屏/重叠；VRAMdump 中 `0x08068048`/`0x0806804C` 等单元属性应为 0x01、字符正常；
+- 仍用 `dbg_sdraddr=0x034000@ddr_wr` 确认写回持续正确，且无单元属性错乱。
+- 若仍有零星花屏：转向 VGA 读路径在写回突发期间的撕裂（DDR 控制器仲裁），可进一步确认 flush 写回是否完全落在 vblank 内。
+

@@ -358,4 +358,31 @@ module top_zynq7010 (
     assign test_led[2] = blink_cnt[25];
     assign test_led[3] = SDLED;
 
+    // ==========================================
+    // ★ 写回配对诊断粘滞标志（2026-09-20 实验，纯观测，不影响主逻辑）
+    //   目的：**不用解析波形**即可判断"写回的 32-bit 字两半是否相同"。
+    //   采样点＝W_H 拍：此拍 ram_wdata=第二半字，latched_wdata_low=W_ISSUE 采到的第一半字，
+    //   二者即 main_wdata 的高/低两半。上电清零、置 1 后保持（不受触发窗口限制），
+    //   上板跑几秒后直接读 bit 即可：
+    //     dbg_pair_dup_sticky = 1        → 仍存在 {X,X} 半字重复（Fix B 未生效/未覆盖全部）
+    //     dbg_pair_ok_sticky  = 1 且 dup_cnt 不再增长 → 配对已正确（每字两半不同）
+    //     dup_cnt : 两半相同的字数；ok_cnt : 两半不同的字数（比值即好坏比例）
+    // ==========================================
+    (* mark_debug = "true" *) reg        dbg_pair_dup_sticky = 1'b0;
+    (* mark_debug = "true" *) reg        dbg_pair_ok_sticky  = 1'b0;
+    (* mark_debug = "true" *) reg [15:0] dbg_pair_dup_cnt    = 16'd0;
+    (* mark_debug = "true" *) reg [15:0] dbg_pair_ok_cnt     = 16'd0;
+
+    always @(posedge m_axi_aclk) begin
+        if (state == W_H) begin
+            if (ram_wdata == latched_wdata_low) begin
+                dbg_pair_dup_sticky <= 1'b1;
+                dbg_pair_dup_cnt    <= dbg_pair_dup_cnt + 1'b1;
+            end else begin
+                dbg_pair_ok_sticky  <= 1'b1;
+                dbg_pair_ok_cnt     <= dbg_pair_ok_cnt + 1'b1;
+            end
+        end
+    end
+
 endmodule

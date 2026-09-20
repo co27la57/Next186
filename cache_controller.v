@@ -257,7 +257,15 @@ module cache_controller(
 		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
 		.q_a(cache_QA), // output [31 : 0] douta
 		.clock_b(clk), // input clkb
-		.enable_b(mmreq && hit && st0), // input enb
+		// ★ 十九次修复（2026-09-20）：flush 期间挂起 CPU 端（端口 B）访问。
+		//   根因：flush 写回读走端口 A(ddr_clk)，而 ce<=0 时 CPU 请求锁存在 rmreq；
+		//   在 flush 扫描的 st0 周期里 `mmreq && hit && st0` 会让 held 的 VRAM 写经端口 B(clk)
+		//   写入——与端口 A 同一 cache 字正处于写回读，异步时钟下读回陈旧/错乱字节 →
+		//   该行写回 DDR 的该单元损坏（属性字节变 0x15/0x89 之类）→ VGA 显示旧/错字叠在新字上
+		//   = 花屏 + 大量字符重叠（VRAMdump 中 0x08068048=0x1515、0x0806804C=0x8940 即此）。
+		//   LRU/dirty 块（271 行）早已用 !r_flush 门控，此处漏了。flush 期间 CPU 本就 ce<=0 挂起，
+		//   加 !r_flush 仅取消这一竞争窗口，请求在 flush 结束后正常服务，无功能回退。
+		.enable_b(mmreq && hit && st0 && !r_flush), // input enb
 		.wren_b(|mwmask),
 		.byteena_b(mwmask), // input [3 : 0] web
 		.address_b({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], maddr[`LINE-1:2]}), // input [10 : 0] addrb

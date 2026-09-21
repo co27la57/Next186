@@ -864,9 +864,9 @@ module system
     assign ram_addr  = sdraddr;
     assign ram_wdata = cntrl0_user_input_data; 
     assign sys_DOUT  = ram_rdata;             
-    (* mark_debug = "true" *) reg [14:0] dbg_cache_hiaddr;
+    reg [14:0] dbg_cache_hiaddr;
     (* mark_debug = "true" *) reg        dbg_cache_ddr_wr;
-    (* mark_debug = "true" *) reg [23:0] dbg_sdraddr;
+    reg [23:0] dbg_sdraddr;
     // ★ 十五次修复探针精简（2026-09-19）：移除 dbg_fifo_dout / dbg_cpu_halt / dbg_ram_wdata_lo /
     //   dbg_fifo_words_r。dbg_cpu_halt 与 Next186_CPU.v 的 dbg_HALT 完全重复；fifo / 写数据通路
     //   探针属早期 bring-up 遗留，当前 cache / 显存写回调试不再需要，删除以释放 ILA 位宽与布线。

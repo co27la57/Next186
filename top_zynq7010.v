@@ -373,8 +373,8 @@ module top_zynq7010 (
     //   上电清零、持续累加；上板跑几秒读数即可确认写回在持续进行。
     //   **数据是否正确以 PS dump 为准**：0x08068000 起应不再"每 16-bit 成对重复"。
     // ==========================================
-    (* mark_debug = "true" *) reg [15:0] dbg_wb_word_cnt  = 16'd0;
-    (* mark_debug = "true" *) reg [15:0] dbg_wb_burst_cnt = 16'd0;
+    reg [15:0] dbg_wb_word_cnt  = 16'd0;
+    reg [15:0] dbg_wb_burst_cnt = 16'd0;
 
     always @(posedge m_axi_aclk) begin
         if (state == W_WAIT_W && main_wvalid && m_axi_wready) begin

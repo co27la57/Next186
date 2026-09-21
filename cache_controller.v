@@ -158,6 +158,52 @@ module cache_controller(
 		dbg_cache_QA_r <= cache_QA;
 		dbg_ddr_dout_r <= ddr_dout;
 	end
+
+	// ★ 二十四次诊断（2026-09-21）：eviction 写回相位粘滞捕获（非 top 模块，reg+always）。
+	//   目的：一次上电后直接读值即可判定"写回首 word 是否丢失 / 数据相对 lowaddr 滞后几拍"，
+	//   免去人工抓 ILA 波形（上两次修复因相位猜错打偏，本组探针把相位钉死）。
+	//   逻辑：只抓"VRAM 行(tag 0x170/0x171)的 eviction 写回(STATE011 && !r_flush)"，
+	//   锁存前 4 个写回 beat 的 ddr_dout（=实际写进 DDR 的 32-bit 字），
+	//   并要求本行出现过非零字（跳过全 0 的 index0，锁定含字符串的行）。首次锁定后不再覆盖。
+	(* mark_debug = "true" *) reg        dbg_evic_sticky      = 1'b0; // 发生过 eviction 写回（STATE011 && !r_flush）
+	(* mark_debug = "true" *) reg        dbg_evic_vram_sticky = 1'b0; // eviction 命中 VRAM 行（tag 0x170/0x171）
+	(* mark_debug = "true" *) reg        dbg_evic_cap_done    = 1'b0; // 已锁定一组含非零字的 VRAM eviction，不再覆盖
+	(* mark_debug = "true" *) reg [4:0]  dbg_evic_beat        = 5'd0; // 当前 eviction 内 beat 序号（0..15），cache_line_start 归零
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_b0          = 32'd0;// beat0 写出的 ddr_dout（DDR 该行 word0）
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_b1          = 32'd0;// beat1 写出的 ddr_dout（DDR 该行 word1）
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_b2          = 32'd0;// beat2 写出的 ddr_dout（DDR 该行 word2）
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_b3          = 32'd0;// beat3 写出的 ddr_dout（DDR 该行 word3）
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_q0          = 32'd0;// beat0 时 cache_QA（BRAM 输出，比 ddr_dout 早 1 拍）
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_q1          = 32'd0;// beat1 时 cache_QA
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_q2          = 32'd0;// beat2 时 cache_QA
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_q3          = 32'd0;// beat3 时 cache_QA
+	(* mark_debug = "true" *) reg [4:0]  dbg_evic_b0_lowaddr  = 5'd0; // beat0 时 lowaddr[4:1]（地址相位，理论=0）
+	(* mark_debug = "true" *) reg [4:0]  dbg_evic_b1_lowaddr  = 5'd0; // beat1 时 lowaddr[4:1]（理论=1）
+	(* mark_debug = "true" *) reg        dbg_evic_nonzero     = 1'b0; // 当前 eviction 行出现过非零字（用于筛选字符串行）
+
+	wire evic_active = (STATE == 3'b011) && !r_flush;        // 读缺失逐出写回（非 flush）
+	wire evic_beat   = evic_active && cache_read_data;        // 每被 DDR 接受一个写回字
+	wire evic_vram   = (hiaddr[14:5] == 10'h170) || (hiaddr[14:5] == 10'h171); // VRAM 文本窗（index0-62）
+
+	always @(posedge ddr_clk) begin
+		if (evic_active)           dbg_evic_sticky      <= 1'b1;
+		if (evic_beat && evic_vram) dbg_evic_vram_sticky <= 1'b1;
+		// beat 计数：行事务起始 cache_line_start 归零，每接受一个写回字 +1
+		if (cache_line_start)      dbg_evic_beat <= 5'd0;
+		else if (evic_beat)        dbg_evic_beat <= dbg_evic_beat + 5'd1;
+		if (evic_beat && (ddr_dout != 32'd0)) dbg_evic_nonzero <= 1'b1;
+		// 锁定前 4 beat（仅首次、仅 VRAM 行、仅未锁定）
+		if (!dbg_evic_cap_done && evic_beat && evic_vram) begin
+			case (dbg_evic_beat)
+				5'd0: begin dbg_evic_b0 <= ddr_dout; dbg_evic_q0 <= cache_QA; dbg_evic_b0_lowaddr <= lowaddr[4:1]; end
+				5'd1: begin dbg_evic_b1 <= ddr_dout; dbg_evic_q1 <= cache_QA; dbg_evic_b1_lowaddr <= lowaddr[4:1]; end
+				5'd2: begin dbg_evic_b2 <= ddr_dout; dbg_evic_q2 <= cache_QA; end
+				5'd3: begin dbg_evic_b3 <= ddr_dout; dbg_evic_q3 <= cache_QA; end
+				default: ;
+			endcase
+			if (dbg_evic_beat == 5'd3 && dbg_evic_nonzero) dbg_evic_cap_done <= 1'b1;
+		end
+	end
 	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /
 	//   dbg_ctl_dirty_wr_r / dbg_ctl_dirty_wr_d1_r —— 它们分别被 dbg_ctl_wmask_r / dbg_ctl_fit_r /
 	//   dbg_ctl_dirty_r 完全覆盖，或属十次"blk way 错配"专题的一次性探针（该 bug 已定案修复）。

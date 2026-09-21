@@ -148,6 +148,16 @@ module cache_controller(
 	// ---- Task #8 诊断探针（保留：way 选择与 LRU 轮转观测）----
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_blk_r;       // 实际写入选中 way（cache_mem port B 用 blk）
 	(* mark_debug = "true" *) reg [1:0]  dbg_ctl_lru_wr_r;    // cache_lru[blk][index]：命中 way 的 LRU 当前值（十五次 LRU 轮转修复的验证依据）
+	// ★ 二十三次探针（拍错方案 A，2026-09-21）：观测写回数据相对读地址 lowaddr 的滞后相位。
+	//   cache_QA = BRAM q_a 输出（lag 第 1 级，1 拍）；ddr_dout = 再加 1 级寄存（lag 第 2 级）。
+	//   与 top_zynq7010.v 已有的 ram_wr_valid / w_burst_cnt / state 配合：在 main_wvalid&&m_axi_wready
+	//   接受第 K 字拍，比对 dbg_lowaddr_r[4:1](=K?) 与 dbg_ddr_dout_r(=word[K] or word[K-1]) 即可判定滞后级数。
+	(* mark_debug = "true" *) reg [31:0] dbg_cache_QA_r;
+	(* mark_debug = "true" *) reg [31:0] dbg_ddr_dout_r;
+	always @(posedge ddr_clk) begin
+		dbg_cache_QA_r <= cache_QA;
+		dbg_ddr_dout_r <= ddr_dout;
+	end
 	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /
 	//   dbg_ctl_dirty_wr_r / dbg_ctl_dirty_wr_d1_r —— 它们分别被 dbg_ctl_wmask_r / dbg_ctl_fit_r /
 	//   dbg_ctl_dirty_r 完全覆盖，或属十次"blk way 错配"专题的一次性探针（该 bug 已定案修复）。

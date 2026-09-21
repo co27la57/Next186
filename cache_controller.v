@@ -151,7 +151,7 @@ module cache_controller(
 	// ★ 二十三次探针（拍错方案 A，2026-09-21）：观测写回数据相对读地址 lowaddr 的滞后相位。
 	//   cache_QA = BRAM q_a 输出（lag 第 1 级，1 拍）；ddr_dout = 再加 1 级寄存（lag 第 2 级）。
 	//   ★ 2026-09-21 精简：这两个 32-bit 常开镜像（64 bit）已从 ILA 移除（mark_debug 摘除），
-	//     其功能被带门控的 dbg_evic_q0/b0（只锁存 eviction 首 beat）取代，以缓解 probe 预算。
+	//     其功能被带门控的 dbg_evic_q0lo/b0lo/b1lo（只锁存 index1 写回的前 2 beat 低 16bit）取代，以缓解 probe 预算。
 	reg [31:0] dbg_cache_QA_r;
 	reg [31:0] dbg_ddr_dout_r;
 	always @(posedge ddr_clk) begin
@@ -159,36 +159,37 @@ module cache_controller(
 		dbg_ddr_dout_r <= ddr_dout;
 	end
 
-	// ★ 二十四次诊断 v2（2026-09-21）：锁定 index1（字符串行）的 eviction 写回，last-wins。
-	//   v1 抓"首个含非零字的 VRAM eviction"→ 抓到非字符串行/早期瞬态（误得 word0=0x00482412）。
-	//   改只抓 index1（tag 0x170 + index 1），每次 eviction 覆盖 → 读到的即稳态，可与 dump 直接对照。
-	//   判读：q0 = 该行 word0 的 cache_QA（缓存实际内容）；b0 = 写回首 beat 写出的 ddr_dout。
-	//     q0=0x0142014B(正确 'B','K') 且 b0=0 → 缓存正确、写回丢 word0；
-	//     q0=0                        → 缓存里 word0 本身就是 0（CPU 写没落 cache）。
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_q0         = 32'd0; // index1 缓存行 word0 的 cache_QA
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_b0         = 32'd0; // index1 写回首 beat 写出的 ddr_dout
-	(* mark_debug = "true" *) reg [4:0]  dbg_evic_b0_lowaddr = 5'd0;  // 首 beat 时 lowaddr[4:1]（理论=0）
-	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt        = 8'd0;  // index1 eviction beat 计数（>0 表示已抓到）
-	(* mark_debug = "true" *) reg        dbg_evic_i0_nonzero = 1'b0; // index0(首行) eviction 是否出现过非零字
-	reg [4:0] dbg_evic_beat = 5'd0;  // 内部，不占 probe
+	// ★ 二十四次诊断 v3（2026-09-21）：锁定 index1 字符串行写回；修 beat 复位 bug。
+	//   v2 用 cache_line_start 复位 beat → 若 index1 写回时该脉冲未触发，beat 不归零，
+	//   `beat==0` 只在开机极早期抓一次（抓到空/早期垃圾值 0x0000233a）。改由"进入 STATE 011"复位。
+	//   只取低 16 bit（= 偶数 cell 值）即可判字符：q0lo=缓存 word0(cell32)、b0lo=写回 beat0 的 cell32、
+	//   b1lo=写回 beat1 的 cell34。判据：
+	//     q0lo=0x014B('K') 且 b0lo=0x0000 且 b1lo=0x014B → 缓存正确、写回整行后移 1 word（丢 word0）；
+	//     q0lo=0x0000                                     → CPU 写没落 cache（缓存 word0 本身为空）。
+	(* mark_debug = "true" *) reg [15:0] dbg_evic_q0lo = 16'd0; // 缓存 word0 低 16bit（cell32）
+	(* mark_debug = "true" *) reg [15:0] dbg_evic_b0lo = 16'd0; // 写回 beat0 低 16bit（=DDR cell32）
+	(* mark_debug = "true" *) reg [15:0] dbg_evic_b1lo = 16'd0; // 写回 beat1 低 16bit（=DDR cell34）
+	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt  = 8'd0;  // index1 写回 beat 计数（>0 表示已抓到）
+	(* mark_debug = "true" *) reg [4:0]  dbg_evic_beat = 5'd0;  // 当前 beat（供核对复位是否生效）
+	reg st011_d = 1'b0; // 内部：上一拍是否处于 STATE 011
 
 	wire evic_active = (STATE == 3'b011) && !r_flush;
 	wire evic_i1 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd1);
-	wire evic_i0 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd0);
 	wire evic_beat = evic_i1 && cache_read_data;
+	wire entering011 = (STATE == 3'b011) && !st011_d;  // 进入写回态那一拍 → 复位 beat
 
 	always @(posedge ddr_clk) begin
-		if (cache_line_start) dbg_evic_beat <= 5'd0;
-		else if (evic_beat)   dbg_evic_beat <= dbg_evic_beat + 5'd1;
+		st011_d <= (STATE == 3'b011);
+		if (entering011)    dbg_evic_beat <= 5'd0;
+		else if (evic_beat) dbg_evic_beat <= dbg_evic_beat + 5'd1;
 		if (evic_beat) begin
 			dbg_evic_cnt <= dbg_evic_cnt + 8'd1;
-			if (dbg_evic_beat == 5'd0) begin
-				dbg_evic_q0         <= cache_QA;
-				dbg_evic_b0         <= ddr_dout;
-				dbg_evic_b0_lowaddr <= lowaddr[4:1];
-			end
+			case (dbg_evic_beat)
+				5'd0: begin dbg_evic_q0lo <= cache_QA[15:0]; dbg_evic_b0lo <= ddr_dout[15:0]; end
+				5'd1: dbg_evic_b1lo <= ddr_dout[15:0];
+				default: ;
+			endcase
 		end
-		if (evic_i0 && cache_read_data && (ddr_dout != 32'd0)) dbg_evic_i0_nonzero <= 1'b1;
 	end
 	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /
 	//   dbg_ctl_dirty_wr_r / dbg_ctl_dirty_wr_d1_r —— 它们分别被 dbg_ctl_wmask_r / dbg_ctl_fit_r /

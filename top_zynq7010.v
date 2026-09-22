@@ -95,10 +95,10 @@ module top_zynq7010 (
     wire [1:0]  ram_cmd;
     reg  [1:0]  ram_cmd_ack;
     wire [23:0] ram_addr;
-    (* mark_debug = "true" *) wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
+    (* mark_debug = "true", keep = "true" *) wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
     wire [15:0] ram_rdata;
     wire        ram_rd_valid;
-    (* mark_debug = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
+    (* mark_debug = "true", keep = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
     wire        SDLED;
 
     reg [25:0] blink_cnt = 0;
@@ -123,8 +123,8 @@ module top_zynq7010 (
         end
     end
 
-    (* mark_debug = "true" *) wire init_done = ~auto_rst_reg;
-    (* mark_debug = "true" *) reg  init_fail = 1'b0;
+    (* mark_debug = "true", keep = "true" *) wire init_done = ~auto_rst_reg;
+    (* mark_debug = "true", keep = "true" *) reg  init_fail = 1'b0;
 
     // ==========================================
     // 主 FSM 输出信号
@@ -132,7 +132,7 @@ module top_zynq7010 (
     reg [31:0] main_awaddr;
     reg [7:0]  main_awlen;
     reg        main_awvalid;
-    (* mark_debug = "true" *) reg [31:0] main_wdata;    // ★ 实验探针：拼出的 32-bit 写数据
+    (* mark_debug = "true", keep = "true" *) reg [31:0] main_wdata;    // ★ 实验探针：拼出的 32-bit 写数据
     reg        main_wlast;
     reg        main_wvalid;
     reg        main_bready;
@@ -186,11 +186,11 @@ module top_zynq7010 (
     localparam W_WAIT_W  = 4'd8;
     localparam B_RESP    = 4'd9;
 
-    (* mark_debug = "true" *) reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
+    (* mark_debug = "true", keep = "true" *) reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
     reg        rlast_latched;
-    (* mark_debug = "true" *) reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
+    (* mark_debug = "true", keep = "true" *) reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
     reg [31:0] timeout_cnt = 32'd0;
 
     localparam TIMEOUT_MAX = 32'd500_000;

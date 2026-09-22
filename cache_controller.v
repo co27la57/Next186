@@ -81,9 +81,9 @@ module cache_controller(
 		  '{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511}};
 
 	reg [2:0]STATE = 0;
-	(* mark_debug = "true" *) reg [`LINE-2:0]lowaddr = 0; //cache mem address
-	(* mark_debug = "true" *) reg s_lowaddr5 = 0;
-	(* mark_debug = "true" *) reg s_lowaddr5_d1 = 0;
+	(* mark_debug = "true", keep = "true" *) reg [`LINE-2:0]lowaddr = 0; //cache mem address
+	(* mark_debug = "true", keep = "true" *) reg s_lowaddr5 = 0;
+	(* mark_debug = "true", keep = "true" *) reg s_lowaddr5_d1 = 0;
 	wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0，标志整行 64B burst 完成
 	// ★ 十一次修复：flush 写回完成事件（STATE 011 且 r_flush 且整行 burst 结束，ddr_wr 此拍仍为 1）。
 	//   十次修复曾把"flush 写回后清 dirty"直接写在 STATE 块里，导致 cache_dirty 同时被
@@ -104,18 +104,18 @@ module cache_controller(
 	reg        dbg_ctl_mreq_r;
 	reg [3:0]  dbg_ctl_wmask_r;
 	reg        dbg_ctl_mmreq_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_hit_r;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_hit_r;
 	reg        dbg_ctl_ce_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;
-	(* mark_debug = "true" *) reg [2:0]  dbg_ctl_STATE_r;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_isvwr_r;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_rflush_r;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_ddr_wr_r;
+	(* mark_debug = "true", keep = "true" *) reg [2:0]  dbg_ctl_STATE_r;
 	reg [`WAYS+`SETS:0] dbg_ctl_flushcount_r;
 	reg [3:0]  dbg_ctl_dirty_r;      // cache_dirty[index] 当前 index 的 4 way
 	reg [3:0]  dbg_ctl_fit_r;        // 当前访问的 way 命中向量
 	reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
 	reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
-	(* mark_debug = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
 	// ---- Task #8 八次诊断探针：flush 扫描判脏链路（2026-09-19）----
 	reg        dbg_ctl_flushreq_r;   // flush 脉冲锁存
 	reg        dbg_ctl_dirtywire_r;  // dirty 组合线本体（flush 分支实际判据）
@@ -132,16 +132,16 @@ module cache_controller(
 	//   判读：isvwr_sticky=0 → CPU 从未写 VRAM（问题不在 cache，在 CPU/BIOS 流程）；
 	//         isvwr_sticky=1 且 vram_wr_sticky=0 → VRAM 脏了却从不写回（真 cache bug）；
 	//         两者都=1 → VRAM 写回已发生，转查 VGA 读地址。
-	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_sticky_r = 1'b0;   // CPU 曾写 VRAM（粘滞，显式上电清零防误判）
-	(* mark_debug = "true" *) reg        dbg_ctl_vram_wr_sticky_r = 1'b0; // VRAM 行曾写回 DDR（粘滞，显式上电清零防误判）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_isvwr_sticky_r = 1'b0;   // CPU 曾写 VRAM（粘滞，显式上电清零防误判）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_vram_wr_sticky_r = 1'b0; // VRAM 行曾写回 DDR（粘滞，显式上电清零防误判）
 	// ★ 十六次续：判别"isvwr=1 但 vram_wr=0"的三种真因（纯观测粘滞标志）
 	//   A: VRAM 写全是 miss（永不 hit）→ 填充不置 dirty，VRAM 永不脏
 	//   B: VRAM 曾 hit（dirty 已置 1），但 flush 扫描时 VRAM 行已不在 cache / 已不脏
 	//   C: flush 扫到 VRAM 行且判为脏，却没产生带 VRAM tag 的写回 → 写回地址/way 错配
-	(* mark_debug = "true" *) reg        dbg_vram_wr_hit_sticky = 1'b0;      // VRAM 写命中（命中即 dirty 被置 1）
-	(* mark_debug = "true" *) reg        dbg_vram_wr_miss_sticky = 1'b0;     // VRAM 写缺失（走填充，dirty 不置 1）
-	(* mark_debug = "true" *) reg        dbg_flush_vram_seen_sticky = 1'b0;  // flush 扫描时遇到过 VRAM 行（tag 0x170/0x171，不论脏否）
-	(* mark_debug = "true" *) reg        dbg_flush_vram_dirty_sticky = 1'b0; // flush 扫描时遇到过 VRAM 行且判为脏
+	(* mark_debug = "true", keep = "true" *) reg        dbg_vram_wr_hit_sticky = 1'b0;      // VRAM 写命中（命中即 dirty 被置 1）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_vram_wr_miss_sticky = 1'b0;     // VRAM 写缺失（走填充，dirty 不置 1）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_flush_vram_seen_sticky = 1'b0;  // flush 扫描时遇到过 VRAM 行（tag 0x170/0x171，不论脏否）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_flush_vram_dirty_sticky = 1'b0; // flush 扫描时遇到过 VRAM 行且判为脏
 	// ★ 十七次：确认"flush 窗口里是否真有待处理 CPU 请求"（修复前会被静默丢弃的那个前提）
 	reg        dbg_miss_in_flush_sticky = 1'b0;
 
@@ -508,11 +508,11 @@ module cache_controller(
 	//     ① =1 而 ③bit0=0 → tag 装进去了但从不逐出/flush 到 → 查 victim/脏位；
 	//     ② =0 → CPU 对 index0 的写从未置脏（写全 miss 被丢）→ 查写缺失路径。
 	// ============================================================================
-	(* mark_debug = "true" *) reg        dbg_i0_has170     = 1'b0; // index0 任一 way 曾持有 tag 0x170/0x171
-	(* mark_debug = "true" *) reg [3:0]  dbg_i0_dirty_or   = 4'd0; // OR 累加 index0 的 4-way dirty
-	(* mark_debug = "true" *) reg [4:0]  dbg_vram_wb_idx_or = 5'd0;// OR 累加所有 VRAM 写回的 index（bit0=index0）
-	(* mark_debug = "true" *) reg        dbg_fl_i0_seen    = 1'b0; // flush 扫描(st0&&r_flush)曾到 index0
-	(* mark_debug = "true" *) reg [9:0]  dbg_fl_i0_tag     = 10'd0;// 记录 flush 扫 index0 时该 way 的 tag
+	(* mark_debug = "true", keep = "true" *) reg        dbg_i0_has170     = 1'b0; // index0 任一 way 曾持有 tag 0x170/0x171
+	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbg_i0_dirty_or   = 4'd0; // OR 累加 index0 的 4-way dirty
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_vram_wb_idx_or = 5'd0;// OR 累加所有 VRAM 写回的 index（bit0=index0）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_fl_i0_seen    = 1'b0; // flush 扫描(st0&&r_flush)曾到 index0
+	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_fl_i0_tag     = 10'd0;// 记录 flush 扫 index0 时该 way 的 tag
 	always @(posedge clk) begin
 		if (cache_addr[0][0]==10'h170 || cache_addr[1][0]==10'h170 ||
 		    cache_addr[2][0]==10'h170 || cache_addr[3][0]==10'h170 ||
@@ -526,6 +526,39 @@ module cache_controller(
 		if (st0 && r_flush && (index == 5'd0)) begin
 			dbg_fl_i0_seen <= 1'b1;
 			dbg_fl_i0_tag  <= cache_addr[fblk][index];
+		end
+	end
+
+	// ============================================================================
+	// ★ 二十四次诊断 v9（2026-09-22）：index0 写回"数据抓不到"之谜。
+	//   v8 已证明 index0 确实被写回（dbg_vram_wb_idx_or.bit0=1），但 v6/v7 按 cache_read_data
+	//   计 beat 的捕获 cnt 恒 0 ⇒ **该次写回期间 cache_read_data 很可能没有脉冲**。
+	//   而 cache_read_data = crw && ram_wr_valid，同时是 BRAM 的 enable_a！
+	//   若它没脉冲 ⇒ 端口 A 未使能 ⇒ cache_QA 不是该行数据 ⇒ 写回数据错位（index0 内容错的真因）。
+	//   本组直接验证：index0 写回期间 cache_read_data 有没有脉冲。
+	//   判据：i0wb_seen=1 且 i0wb_crd=0 → 证实"写回时 BRAM 没使能" ⇒ 修使能/握手；
+	//         i0wb_crd=1            → 使能正常 ⇒ 继续查数据相位。
+	// ============================================================================
+	(* mark_debug = "true", keep = "true" *) reg        dbg_i0wb_seen = 1'b0; // index0 发生过写回(STATE011&&ddr_wr&&wb 地址=index0)
+	(* mark_debug = "true", keep = "true" *) reg        dbg_i0wb_crd  = 1'b0; // 该写回期间 cache_read_data 曾脉冲
+	(* mark_debug = "true", keep = "true" *) reg [31:0] dbg_i0wb_q    = 32'd0;// 该写回第 1 个 ddr_wr 拍的 cache_QA
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_i0wb_lo   = 5'd0; // 同一拍的 lowaddr
+	reg i0wb_latch = 1'b0;
+	reg st011c_d = 1'b0;
+	wire i0wb_act = (STATE == 3'b011) && ddr_wr &&
+	                (wb_hiaddr[14:5]==10'h170 || wb_hiaddr[14:5]==10'h171) && (wb_hiaddr[4:0]==5'd0);
+	wire entering011c = (STATE == 3'b011) && !st011c_d;
+	always @(posedge ddr_clk) begin
+		st011c_d <= (STATE == 3'b011);
+		if (entering011c) i0wb_latch <= 1'b0;
+		if (i0wb_act) begin
+			dbg_i0wb_seen <= 1'b1;
+			if (cache_read_data) dbg_i0wb_crd <= 1'b1;
+			if (!i0wb_latch) begin
+				dbg_i0wb_q  <= cache_QA;
+				dbg_i0wb_lo <= lowaddr[4:0];
+				i0wb_latch  <= 1'b1;
+			end
 		end
 	end
 	

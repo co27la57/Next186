@@ -295,13 +295,16 @@ module cache_controller(
 		//   行填充若从错误行内偏移开始写 cache，CPU 会读到垃圾 → 永不到达写显存指令 → isvwr 不触发）。
 		if(cache_line_start) lowaddr <= {(`LINE-2){1'b0}};
 		else if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
-		// ★ 方案 A：写回直接输出整 32-bit 字（取消 lowaddr[0] 半字选择）。
-		//   原 `ddr_dout <= lowaddr[0] ? [15:0] : [31:16]` 使写回按 2 拍送高低半字，
-		//   而 ddr_dout 相对 lowaddr 有 2 级寄存延迟（BRAM q_a + 本寄存器），
-		//   AXI 写 FSM 在 W_ISSUE/W_H 两次采样极易采到同一半字 → DDR 每 16-bit 成对重复。
-		//   改整字后 FSM 单拍锁存，无配对、与 W_WAIT_W 停顿无关。
-		ddr_dout <= cache_QA;
 	end
+
+	// ★★ 三十次修复（2026-09-22）：写回数据改"组合直通 cache_QA"，去掉多出来的一级寄存器。
+	//   实测（v5 探针，index1 行）：word0 的 W_H 拍 cache_QA 已是**正确 word0** 0x0142014B，
+	//   而同拍 ddr_dout 仍是上一拍的旧值（v4 实测 0x04000016）→ top 在 W_H 拍
+	//   `main_wdata <= ram_wdata(=ddr_dout)` 锁到的是**旧值** ⇒ 整行写回后移 1 word、首字为
+	//   上一行残留。这正是"方案 A 改整字却仍移位"的真因：移位来自这级寄存器，不是半字配对。
+	//   cache_QA = BRAM 输出（本身已寄存 1 拍），W_H 拍其值 = 该字正确内容；组合直通后
+	//   W_H 拍 ram_wdata = cache_QA = word n，与 top_zynq7010.v:360 的设计意图一致。
+	always @(*) ddr_dout = cache_QA;
 		
 	cache cache_mem
 	(

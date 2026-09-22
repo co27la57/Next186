@@ -159,24 +159,22 @@ module cache_controller(
 		dbg_ddr_dout_r <= ddr_dout;
 	end
 
-	// ★ 二十四次诊断 v5（2026-09-22）：抓 index1 行 word0 / word1 两拍，判定"缓存行本身是否已偏移"。
-	//   已知：ram_wr_valid 每字高 2 拍(W_L/W_H) → lowaddr 每字步进 2（lowaddr[4:1]=字索引）；
-	//   beat0=W_L(word0)、beat1=W_H(word0)、beat2=W_L(word1)、beat3=W_H(word1)。
-	//   v4 读数：qa0=0x00000000、dd0=0x04000016（≠qa0）、cnt=0x20 ⇒ 疑似"缓存行 word0 本身就是0 + 写回又滞后"。
-	//   判据（结合 dump 的 index1：word0=0、word1=0x0142014B）：
-	//     qa0=0x00000000 且 qa1=0x0142014B('B','K') → **缓存行自身已后移 1 word**（问题在 CPU 写/回填侧）；
-	//     qa0=0x0142014B 且 qa1=0x01610120(' ','a')  → 缓存行正确，问题在写回侧；
-	//     qa0=qa1=0                                  → 该行压根没写进缓存。
+	// ★ 二十四次诊断 v6（2026-09-22）：v5 已确认 index1 缓存行正确(qa0=0x0142014B)且修好写回移位；
+	//   现改抓 **index0（第一行）**，查 dump 里 index0 仍整体 +2 cell 偏移的成因。
+	//   已知：beat1=W_H(word0)、beat3=W_H(word1)（ram_wr_valid 每字 2 拍）。判据：
+	//     index0 应有 word0={'e','S'}=0x01650153、word1={'r','a'}=0x01720161；
+	//     qa0=0x01650153 → 缓存正确、问题在写回侧（第一行特有）
+	//     qa0=0x00000000 → CPU 写/回填侧（第一行首字丢）
 	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa0 = 32'd0; // W_H(word0) 拍 cache_QA
 	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa1 = 32'd0; // W_H(word1) 拍 cache_QA
 	(* mark_debug = "true" *) reg [31:0] dbg_evic_dd0 = 32'd0; // W_H(word0) 拍 ddr_dout（=被锁进 main_wdata）
-	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt = 8'd0;  // index1 写回 beat 计数（>0 表示已抓到）
+	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt = 8'd0;  // index0 写回 beat 计数（>0 表示已抓到；若恒 0 ⇒ index0 从不被写回）
 	reg [4:0] dbg_evic_beat = 5'd0; // 内部
 	reg st011_d = 1'b0;             // 内部：上一拍是否处于 STATE 011
 
 	wire evic_active = (STATE == 3'b011) && !r_flush;
-	wire evic_i1 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd1);
-	wire evic_beat = evic_i1 && cache_read_data;
+	wire evic_i0 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd0); // 改抓 index0(第一行)
+	wire evic_beat = evic_i0 && cache_read_data;
 	wire entering011 = (STATE == 3'b011) && !st011_d;
 
 	always @(posedge ddr_clk) begin

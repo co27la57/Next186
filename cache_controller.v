@@ -159,21 +159,24 @@ module cache_controller(
 		dbg_ddr_dout_r <= ddr_dout;
 	end
 
-	// ★ 二十四次诊断 v6（2026-09-22）：v5 已确认 index1 缓存行正确(qa0=0x0142014B)且修好写回移位；
-	//   现改抓 **index0（第一行）**，查 dump 里 index0 仍整体 +2 cell 偏移的成因。
-	//   已知：beat1=W_H(word0)、beat3=W_H(word1)（ram_wr_valid 每字 2 拍）。判据：
-	//     index0 应有 word0={'e','S'}=0x01650153、word1={'r','a'}=0x01720161；
-	//     qa0=0x01650153 → 缓存正确、问题在写回侧（第一行特有）
-	//     qa0=0x00000000 → CPU 写/回填侧（第一行首字丢）
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa0 = 32'd0; // W_H(word0) 拍 cache_QA
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa1 = 32'd0; // W_H(word1) 拍 cache_QA
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_dd0 = 32'd0; // W_H(word0) 拍 ddr_dout（=被锁进 main_wdata）
-	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt = 8'd0;  // index0 写回 beat 计数（>0 表示已抓到；若恒 0 ⇒ index0 从不被写回）
+	// ★ 二十四次诊断 v7（2026-09-22）：index0 写回诊断（含 flush 路径）。
+	//   v6 读数 qa0/qa1/cnt 全 0 ⇒ 本轮 index0 **从未经"读缺失逐出"路径写回**（v6 的 evic_active 带 !r_flush）。
+	//   但 dump 里 index0 有内容 ⇒ 两种可能：① index0 只经 **flush 写回**(r_flush=1)，被 v6 恰好排除；
+	//   ② 该内容是**上一次运行残留**（DDR3 不掉电不清零，重配 FPGA 不擦 DDR）。
+	//   v7：去掉 !r_flush；加 2 个粘滞位区分 flush / 逐出 两条路径。
+	//   （ddr_dout 已组合直通 cache_QA，dd0 恒等于 qa0，故不再单独抓。）
+	//   判据：cnt>0 且 i0_flush=1 → index0 走 flush 写回 ⇒ 重点查 flush 路径相位；
+	//         cnt=0 恒 0        → index0 确实从不写回 ⇒ dump 里是上次运行残留。
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa0 = 32'd0;      // index0 word0 的 W_H 拍 cache_QA
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa1 = 32'd0;      // index0 word1 的 W_H 拍 cache_QA
+	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt = 8'd0;       // index0 写回 beat 计数（flush+逐出）
+	(* mark_debug = "true" *) reg        dbg_evic_i0_flush = 1'b0;  // 曾由 flush(r_flush=1) 写回
+	(* mark_debug = "true" *) reg        dbg_evic_i0_evict = 1'b0;  // 曾由逐出(r_flush=0) 写回
 	reg [4:0] dbg_evic_beat = 5'd0; // 内部
-	reg st011_d = 1'b0;             // 内部：上一拍是否处于 STATE 011
+	reg st011_d = 1'b0;             // 内部
 
-	wire evic_active = (STATE == 3'b011) && !r_flush;
-	wire evic_i0 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd0); // 改抓 index0(第一行)
+	wire evic_active = (STATE == 3'b011);
+	wire evic_i0 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd0);
 	wire evic_beat = evic_i0 && cache_read_data;
 	wire entering011 = (STATE == 3'b011) && !st011_d;
 
@@ -181,14 +184,12 @@ module cache_controller(
 		st011_d <= (STATE == 3'b011);
 		if (entering011)    dbg_evic_beat <= 5'd0;
 		else if (evic_beat) dbg_evic_beat <= dbg_evic_beat + 5'd1;
-		if (evic_beat) dbg_evic_cnt <= dbg_evic_cnt + 8'd1;
-		if (evic_beat && (dbg_evic_beat == 5'd1)) begin  // word0 的 W_H 拍
-			dbg_evic_qa0 <= cache_QA;
-			dbg_evic_dd0 <= ddr_dout;
+		if (evic_beat) begin
+			dbg_evic_cnt <= dbg_evic_cnt + 8'd1;
+			if (r_flush) dbg_evic_i0_flush <= 1'b1; else dbg_evic_i0_evict <= 1'b1;
 		end
-		if (evic_beat && (dbg_evic_beat == 5'd3)) begin  // word1 的 W_H 拍
-			dbg_evic_qa1 <= cache_QA;
-		end
+		if (evic_beat && (dbg_evic_beat == 5'd1)) dbg_evic_qa0 <= cache_QA;  // word0 的 W_H 拍
+		if (evic_beat && (dbg_evic_beat == 5'd3)) dbg_evic_qa1 <= cache_QA;  // word1 的 W_H 拍
 	end
 	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /
 	//   dbg_ctl_dirty_wr_r / dbg_ctl_dirty_wr_d1_r —— 它们分别被 dbg_ctl_wmask_r / dbg_ctl_fit_r /

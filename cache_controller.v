@@ -101,20 +101,20 @@ module cache_controller(
 	wire [31:0]cache_QA;
 
 	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
-	(* mark_debug = "true" *) reg        dbg_ctl_mreq_r;
-	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_wmask_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_mmreq_r;
+	reg        dbg_ctl_mreq_r;
+	reg [3:0]  dbg_ctl_wmask_r;
+	reg        dbg_ctl_mmreq_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_hit_r;
-	(* mark_debug = "true" *) reg        dbg_ctl_ce_r;
+	reg        dbg_ctl_ce_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_isvwr_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_rflush_r;
 	(* mark_debug = "true" *) reg        dbg_ctl_ddr_wr_r;
 	(* mark_debug = "true" *) reg [2:0]  dbg_ctl_STATE_r;
 	reg [`WAYS+`SETS:0] dbg_ctl_flushcount_r;
-	(* mark_debug = "true" *) reg [3:0]  dbg_ctl_dirty_r;      // cache_dirty[index] 当前 index 的 4 way
+	reg [3:0]  dbg_ctl_dirty_r;      // cache_dirty[index] 当前 index 的 4 way
 	reg [3:0]  dbg_ctl_fit_r;        // 当前访问的 way 命中向量
-	(* mark_debug = "true" *) reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
-	(* mark_debug = "true" *) reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
+	reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
+	reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
 	(* mark_debug = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
 	// ---- Task #8 八次诊断探针：flush 扫描判脏链路（2026-09-19）----
 	reg        dbg_ctl_flushreq_r;   // flush 脉冲锁存
@@ -159,15 +159,16 @@ module cache_controller(
 		dbg_ddr_dout_r <= ddr_dout;
 	end
 
-	// ★ 二十四次诊断 v4（2026-09-21）：在"word0 的 W_H 拍"同时比较 cache_QA 与 ddr_dout。
-	//   关键：ram_wr_valid 每字高 2 拍(W_L/W_H) → lowaddr 每字步进 2（lowaddr[4:1]=字索引）；
-	//   top 在 W_H 拍 main_wdata<=ram_wdata(=ddr_dout)。故 beat0=W_L(word0)、beat1=W_H(word0)。
-	//   判据：
-	//     qa0=0x0142014B('B','K'=正确 word0) 而 dd0=旧值/0
-	//        → 缓存侧正确，是 ddr_dout 多一级寄存器把 word(n-1) 锁进 main_wdata
-	//          → fix：ddr_dout 改组合直通 cache_QA（或 top 锁 cache_QA）；
-	//     qa0 本身也是旧值(≠word0) → 地址/BRAM 流水线滞后 → fix 在地址侧。
+	// ★ 二十四次诊断 v5（2026-09-22）：抓 index1 行 word0 / word1 两拍，判定"缓存行本身是否已偏移"。
+	//   已知：ram_wr_valid 每字高 2 拍(W_L/W_H) → lowaddr 每字步进 2（lowaddr[4:1]=字索引）；
+	//   beat0=W_L(word0)、beat1=W_H(word0)、beat2=W_L(word1)、beat3=W_H(word1)。
+	//   v4 读数：qa0=0x00000000、dd0=0x04000016（≠qa0）、cnt=0x20 ⇒ 疑似"缓存行 word0 本身就是0 + 写回又滞后"。
+	//   判据（结合 dump 的 index1：word0=0、word1=0x0142014B）：
+	//     qa0=0x00000000 且 qa1=0x0142014B('B','K') → **缓存行自身已后移 1 word**（问题在 CPU 写/回填侧）；
+	//     qa0=0x0142014B 且 qa1=0x01610120(' ','a')  → 缓存行正确，问题在写回侧；
+	//     qa0=qa1=0                                  → 该行压根没写进缓存。
 	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa0 = 32'd0; // W_H(word0) 拍 cache_QA
+	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa1 = 32'd0; // W_H(word1) 拍 cache_QA
 	(* mark_debug = "true" *) reg [31:0] dbg_evic_dd0 = 32'd0; // W_H(word0) 拍 ddr_dout（=被锁进 main_wdata）
 	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt = 8'd0;  // index1 写回 beat 计数（>0 表示已抓到）
 	reg [4:0] dbg_evic_beat = 5'd0; // 内部
@@ -186,6 +187,9 @@ module cache_controller(
 		if (evic_beat && (dbg_evic_beat == 5'd1)) begin  // word0 的 W_H 拍
 			dbg_evic_qa0 <= cache_QA;
 			dbg_evic_dd0 <= ddr_dout;
+		end
+		if (evic_beat && (dbg_evic_beat == 5'd3)) begin  // word1 的 W_H 拍
+			dbg_evic_qa1 <= cache_QA;
 		end
 	end
 	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /

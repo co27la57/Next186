@@ -151,7 +151,7 @@ module cache_controller(
 	// ★ 二十三次探针（拍错方案 A，2026-09-21）：观测写回数据相对读地址 lowaddr 的滞后相位。
 	//   cache_QA = BRAM q_a 输出（lag 第 1 级，1 拍）；ddr_dout = 再加 1 级寄存（lag 第 2 级）。
 	//   ★ 2026-09-21 精简：这两个 32-bit 常开镜像（64 bit）已从 ILA 移除（mark_debug 摘除），
-	//     其功能被带门控的 dbg_evic_qa0/dd0（只锁存 index1 写回 word0 的 W_H 拍）取代，以缓解 probe 预算。
+	//     其功能由文件末尾的 v8 一组粘滞探针（index0 tag/dirty、VRAM 写回 index、flush 扫描）承担，以缓解 probe 预算。
 	reg [31:0] dbg_cache_QA_r;
 	reg [31:0] dbg_ddr_dout_r;
 	always @(posedge ddr_clk) begin
@@ -159,38 +159,7 @@ module cache_controller(
 		dbg_ddr_dout_r <= ddr_dout;
 	end
 
-	// ★ 二十四次诊断 v7（2026-09-22）：index0 写回诊断（含 flush 路径）。
-	//   v6 读数 qa0/qa1/cnt 全 0 ⇒ 本轮 index0 **从未经"读缺失逐出"路径写回**（v6 的 evic_active 带 !r_flush）。
-	//   但 dump 里 index0 有内容 ⇒ 两种可能：① index0 只经 **flush 写回**(r_flush=1)，被 v6 恰好排除；
-	//   ② 该内容是**上一次运行残留**（DDR3 不掉电不清零，重配 FPGA 不擦 DDR）。
-	//   v7：去掉 !r_flush；加 2 个粘滞位区分 flush / 逐出 两条路径。
-	//   （ddr_dout 已组合直通 cache_QA，dd0 恒等于 qa0，故不再单独抓。）
-	//   判据：cnt>0 且 i0_flush=1 → index0 走 flush 写回 ⇒ 重点查 flush 路径相位；
-	//         cnt=0 恒 0        → index0 确实从不写回 ⇒ dump 里是上次运行残留。
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa0 = 32'd0;      // index0 word0 的 W_H 拍 cache_QA
-	(* mark_debug = "true" *) reg [31:0] dbg_evic_qa1 = 32'd0;      // index0 word1 的 W_H 拍 cache_QA
-	(* mark_debug = "true" *) reg [7:0]  dbg_evic_cnt = 8'd0;       // index0 写回 beat 计数（flush+逐出）
-	(* mark_debug = "true" *) reg        dbg_evic_i0_flush = 1'b0;  // 曾由 flush(r_flush=1) 写回
-	(* mark_debug = "true" *) reg        dbg_evic_i0_evict = 1'b0;  // 曾由逐出(r_flush=0) 写回
-	reg [4:0] dbg_evic_beat = 5'd0; // 内部
-	reg st011_d = 1'b0;             // 内部
-
-	wire evic_active = (STATE == 3'b011);
-	wire evic_i0 = evic_active && (hiaddr[14:5] == 10'h170) && (hiaddr[4:0] == 5'd0);
-	wire evic_beat = evic_i0 && cache_read_data;
-	wire entering011 = (STATE == 3'b011) && !st011_d;
-
-	always @(posedge ddr_clk) begin
-		st011_d <= (STATE == 3'b011);
-		if (entering011)    dbg_evic_beat <= 5'd0;
-		else if (evic_beat) dbg_evic_beat <= dbg_evic_beat + 5'd1;
-		if (evic_beat) begin
-			dbg_evic_cnt <= dbg_evic_cnt + 8'd1;
-			if (r_flush) dbg_evic_i0_flush <= 1'b1; else dbg_evic_i0_evict <= 1'b1;
-		end
-		if (evic_beat && (dbg_evic_beat == 5'd1)) dbg_evic_qa0 <= cache_QA;  // word0 的 W_H 拍
-		if (evic_beat && (dbg_evic_beat == 5'd3)) dbg_evic_qa1 <= cache_QA;  // word1 的 W_H 拍
-	end
+	// ★ 二十四次诊断（v6/v7 已完成使命：确认 index0 从不被写回）——相关探针已移除，见文件末尾 v8 组。
 	// ★ 十五次修复探针精简：移除 dbg_ctl_mwmask_v_r / dbg_ctl_fit_wr_r / dbg_ctl_dirty_cond2_r /
 	//   dbg_ctl_dirty_wr_r / dbg_ctl_dirty_wr_d1_r —— 它们分别被 dbg_ctl_wmask_r / dbg_ctl_fit_r /
 	//   dbg_ctl_dirty_r 完全覆盖，或属十次"blk way 错配"专题的一次性探针（该 bug 已定案修复）。
@@ -527,6 +496,37 @@ module cache_controller(
 		end
 		// ★ 十七次：flush 期间仍有 CPU 请求在等待 → 修复前会走 miss 分支被静默丢弃
 		if(st0 && mmreq && r_flush) dbg_miss_in_flush_sticky <= 1'b1;
+	end
+
+	// ============================================================================
+	// ★ 二十四次诊断 v8（2026-09-22）：index0 为何"从不被写回 DDR"？
+	//   事实：v6/v7 两次读数 cnt/i0_flush/i0_evict 全 0；旧 sticky dbg_flush_vram_seen=0。
+	//   本组分别回答：① index0 的 tag 阵列里是否出现过 VRAM tag？② index0 的 dirty 是否置过？
+	//   ③ 所有 VRAM 写回里有没有 index0？④ flush 是否真的扫到过 index0、扫到时 tag 是什么？
+	//   判据：
+	//     ③的 bit0=0 且 ①=0 → index0 的 VRAM 行从未被装进缓存（写不进 → 也无需写回）；
+	//     ① =1 而 ③bit0=0 → tag 装进去了但从不逐出/flush 到 → 查 victim/脏位；
+	//     ② =0 → CPU 对 index0 的写从未置脏（写全 miss 被丢）→ 查写缺失路径。
+	// ============================================================================
+	(* mark_debug = "true" *) reg        dbg_i0_has170     = 1'b0; // index0 任一 way 曾持有 tag 0x170/0x171
+	(* mark_debug = "true" *) reg [3:0]  dbg_i0_dirty_or   = 4'd0; // OR 累加 index0 的 4-way dirty
+	(* mark_debug = "true" *) reg [4:0]  dbg_vram_wb_idx_or = 5'd0;// OR 累加所有 VRAM 写回的 index（bit0=index0）
+	(* mark_debug = "true" *) reg        dbg_fl_i0_seen    = 1'b0; // flush 扫描(st0&&r_flush)曾到 index0
+	(* mark_debug = "true" *) reg [9:0]  dbg_fl_i0_tag     = 10'd0;// 记录 flush 扫 index0 时该 way 的 tag
+	always @(posedge clk) begin
+		if (cache_addr[0][0]==10'h170 || cache_addr[1][0]==10'h170 ||
+		    cache_addr[2][0]==10'h170 || cache_addr[3][0]==10'h170 ||
+		    cache_addr[0][0]==10'h171 || cache_addr[1][0]==10'h171 ||
+		    cache_addr[2][0]==10'h171 || cache_addr[3][0]==10'h171)
+			dbg_i0_has170 <= 1'b1;
+		dbg_i0_dirty_or <= dbg_i0_dirty_or | cache_dirty[0];
+		if ((STATE == 3'b011) && ddr_wr &&
+		    (wb_hiaddr[14:5]==10'h170 || wb_hiaddr[14:5]==10'h171))
+			dbg_vram_wb_idx_or <= dbg_vram_wb_idx_or | wb_hiaddr[4:0];
+		if (st0 && r_flush && (index == 5'd0)) begin
+			dbg_fl_i0_seen <= 1'b1;
+			dbg_fl_i0_tag  <= cache_addr[fblk][index];
+		end
 	end
 	
 endmodule

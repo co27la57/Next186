@@ -296,17 +296,9 @@ module cache_controller(
 			lowaddr <= lowaddr + 1'b1;
 	end
 
-	// ★ 三十六次保险：写回等待超时（命令长期发不出）——体面退出回到 000/111，**不清脏位**
-	//   （脏位清除非 wb_full 不可，见下方 flush_wb_done）⇒ 数据留待下次重试，仅牺牲一次写回机会。
-	//   正常写回在数十拍内就能拿到命令，2^18 拍（≈5ms@50MHz）纯属保险，防"burst 永不发生"死等。
-	reg [17:0] txn_wait = 18'd0;
-	always @(posedge ddr_clk) begin
-		if(STATE == 3'b011 || STATE == 3'b111) begin
-			if(lowadv) txn_wait <= 18'd0;
-			else       txn_wait <= txn_wait + 1'b1;
-		end else txn_wait <= 18'd0;
-	end
-	wire txn_wait_to = (txn_wait == 18'h3FFFF);
+	// ★ 三十七次撤销超时兜底：111 相超时会作废刚装入的 tag ⇒ 填充命令若被 VGA 读饿死 >5ms，
+	//   CPU 就会反复 miss/重填（live-lock），用户实测表现为"屏幕乱码"。且 lowaddr 归位后 fall 已是
+	//   确定性的（fill 相内必然走满 32 拍才回绕），超时兜底不再需要。详见第 35 节。
 
 	// ★★ 三十三次修复（2026-09-23）：写回读地址改用"本次写回内独立的字序号计数"，
 	//   与共享的 lowaddr 彻底解耦 —— 修 index0 整行 +1 word（dump: cell0-1=0，cell2 起才
@@ -360,12 +352,16 @@ module cache_controller(
 		.clock_a(ddr_clk), // input clka
 		.enable_a(cache_write_data | cache_read_data), // input ena
 	  	.byteena_a({lowaddr[0], lowaddr[0], ~lowaddr[0], ~lowaddr[0]}),
-		// ★ 三十六次回退（2026-09-23）：此处曾加 `&& (STATE==3'b111)` 想把端口 A 的写限制在填充相，
-		//   但 ① 它把 clk_cpu 域的 STATE 组合进 ddr_clk 域的写使能（组合 CDC，边沿处可能漏写/多写）；
-		//       ② 一旦有合法的填充写在 STATE 已非 111 的那拍发生，就会被吞掉 ⇒ 半填行 ⇒ CPU 读到垃圾
-		//          （用户实测：加此门控后屏幕由"部分正确"变乱码）。故撤回，回到原行为。
-		//   "余波污染"的正确修法应放在数据源侧（crw/读 burst 的归属），待有读数后再动。
-		.wren_a(cache_write_data), // input [0 : 0] wea
+		// ★★ 三十七次修复：端口 A 的写**只允许在填充相**（STATE 111）。
+		//   证据链（三十七次那次上板）：
+		//     · `dbg_fwleak = 1` —— 确有填充数据写在 STATE!=111 时到达（实测）；
+		//     · 断电重上电后的 dump：cells 0-31 **全对**，但 cells 32/33/34 = 0x0000/0x0000/0x0005
+		//       —— 正是 index1 那一行的**行首 1.5 个字**被覆盖；空白区还每隔约 32 cell 冒一个孤立垃圾
+		//       （cell 64/65/96/130/160）⇒ 典型"泄漏的填充写落在行首字"的签名。
+		//   为何这次不会像三十六次那样吞掉合法写：`lowaddr` 归位后（见上），fill 相内必须走满
+		//   32 个 `cache_write_data` 脉冲才产生 fall ⇒ **所有合法填充写都落在 STATE==111 内**，
+		//   门控只会挡住"迟到的泄漏写"，不会丢任何合法数据。
+		.wren_a(cache_write_data && (STATE == 3'b111)), // input [0 : 0] wea
 		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], word_a}), // input [10 : 0] addra
 		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
 		.q_a(cache_QA), // output [31 : 0] douta
@@ -513,7 +509,7 @@ module cache_controller(
 			// ★ 整行修复：必须等 lowaddr 从 31 回绕到 0（s_lowaddr5_fall）才退出。
 			//   原代码在 s_lowaddr5 高电平（lowaddr=16）就退出，此时 AXI burst 还在传后半行，
 			//   状态机若提前进入 111 会更新 hiaddr，导致后半行写错地址（0x20/0x40 偏移）。
-			if(s_lowaddr5_fall || txn_wait_to) begin   // ★ 三十六次：超时兜底（不清脏位）
+			if(s_lowaddr5_fall) begin   // ★ 三十七次：回到纯 fall 判据（确定性，见第 35 节）
 				ddr_wr <= 1'b0;
 				// ★ 十一次修复：flush 写回后清 dirty 的写已挪入 LRU/dirty 块（flush_wb_done 事件），
 				//   避免 cache_dirty 双 always 写端口 → Unsupported RAM template 综合失败。
@@ -525,15 +521,8 @@ module cache_controller(
 		3'b111: begin // read cache from ddr
 			if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE]; // flush 期间不改 hiaddr（写回地址已在 STATE 000 锁定）
 			// ★ 整行修复：同样等整行读填充完成（lowaddr 回绕）再返回 IDLE。
-			// ★ 三十六次：同样加超时兜底。超时说明本行的填充数据根本没到 ⇒ 作废刚装入的 tag
-			//   （写 10'h3FF = bootstrap 保留的"未用"标签），让 CPU 下次访问重新 miss/填充，
-			//   避免"命中一个半填行"读到垃圾指令。
 			if(s_lowaddr5_fall) begin
 				ddr_rd <= 1'b0;
-				STATE <= 3'b000;
-			end else if(txn_wait_to) begin
-				ddr_rd <= 1'b0;
-				cache_addr[vblk][index] <= 10'h3FF;
 				STATE <= 3'b000;
 			end
 		end

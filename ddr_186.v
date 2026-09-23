@@ -266,6 +266,16 @@ module system
 		dbg_sd_ck_d <= SD_CK;
 		if(!SD_n_CS && SD_CK && !dbg_sd_ck_d && dbg_sd_ckc != 12'hFFF) dbg_sd_ckc <= dbg_sd_ckc + 1'b1;
 	end
+	// ★ 四十次（SD 探针 v2）：区分“完全没敲 SPI”与“只在片选拉低前敲了初始化时钟”。
+	//   dbg_sd_ckc 只统计 CS 低期间的时钟（初始化的 80 拍是 CS 高时发的，不会被计入）。
+	(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckall = 12'd0; // SD_CK 上升沿总数（不分 CS，饱和）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cslow = 1'b0;  // 粘滞：CS 曾拉低过（与 LED 交叉验证）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxnz  = 1'b0;  // 粘滞：SDI 曾非全 1（=卡把 MISO 拉低过）
+	always @(posedge clk_cpu) begin
+		if(dbg_sd_ck && !dbg_sd_ck_d && dbg_sd_ckall != 12'hFFF) dbg_sd_ckall <= dbg_sd_ckall + 1'b1;
+		if(!SD_n_CS) dbg_sd_cslow <= 1'b1;
+		if(dbg_sd_ck && !dbg_sd_ck_d && (SDI != 8'hFF)) dbg_sd_rxnz <= 1'b1;
+	end
 	assign SD_DI = CPU_DOUT[7];
 	
 // GPIO interface

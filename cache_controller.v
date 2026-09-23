@@ -118,9 +118,9 @@ module cache_controller(
 	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
 	reg        dbg_ctl_mreq_r;
 	reg [3:0]  dbg_ctl_wmask_r;
-	reg        dbg_ctl_mmreq_r;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_mmreq_r;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_hit_r;
-	reg        dbg_ctl_ce_r;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_ce_r;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_isvwr_r;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_rflush_r;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_ddr_wr_r;
@@ -641,20 +641,20 @@ module cache_controller(
 	//         (cache_write_data，把 DDR 旧内容写进 cache 行) 泄漏进来的。本组探针直接抓它。
 	//   判据：lk_nz=1 且 lk_dat ∈ {0x0010,0x0008,0x1000,0x0080,0x1001} ⇒ 泄漏写实锤；
 	//         lk_cnt=0                                        ⇒ 泄漏写不成立 → 看 dbg_wlost。
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_lk_cnt = 8'd0; // 泄漏写脉冲数（饱和 255）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_lk_nz  = 1'b0; // 出现过"非零数据"的泄漏写
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_lk_idx = 5'd0; // 最近一次非零泄漏写的 index
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_lk_lo  = 5'd0; // 同一写的 lowaddr[4:0]
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_lk_dat = 16'd0;// 同一写的数据（=被写进该行的值）
-	(* mark_debug = "true", keep = "true" *) reg [2:0]  dbg_lk_st  = 3'd0; // 同一写时的 STATE
+	reg [7:0]  dbg_lk_cnt = 8'd0; // 泄漏写脉冲数（饱和 255）
+	reg        dbg_lk_nz  = 1'b0; // 出现过"非零数据"的泄漏写
+	reg [4:0]  dbg_lk_idx = 5'd0; // 最近一次非零泄漏写的 index
+	reg [4:0]  dbg_lk_lo  = 5'd0; // 同一写的 lowaddr[4:0]
+	reg [15:0] dbg_lk_dat = 16'd0;// 同一写的数据（=被写进该行的值）
+	reg [2:0]  dbg_lk_st  = 3'd0; // 同一写时的 STATE
 	// ★ 三十八次诊断之二：**CPU 写被静默丢弃**检测。
 	//   代码事实：`fit[i] = ~r_flush && (...)` ⇒ 在 r_flush 刚拉高那一拍 hit 被强制 0、端口 B 写被挡
 	//   （enable_b 带 !r_flush），而同一拍 `ce` 仍是 1（r_flush 分支要到本拍结束才 ce<=0，见 STATE 000 的
 	//   `else if(r_flush)` 分支尾部）⇒ 该拍 CPU 若有 VRAM 写，会被 CPU 视为"已完成"但 cache 没收。
 	//   后果与该 cell 保留 DDR 填充旧值完全一致（现象与泄漏写无法从值上区分）⇒ 必须用本标志判别。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wlost  = 1'b0; // ce=1 但端口 B 未接受 CPU 写
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wl_idx = 5'd0; // 该丢失写的 cache index
-	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbg_wl_wrd = 4'd0; // 该丢失写在行内的字序号
+	reg        dbg_wlost  = 1'b0; // ce=1 但端口 B 未接受 CPU 写
+	reg [4:0]  dbg_wl_idx = 5'd0; // 该丢失写的 cache index
+	reg [3:0]  dbg_wl_wrd = 4'd0; // 该丢失写在行内的字序号
 	reg        dbg_wr0_seen  = 1'b0;
 	reg        dbg_wr0_st011 = 1'b0;
 	reg        dbg_wr0_fall  = 1'b0;

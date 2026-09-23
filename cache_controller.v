@@ -634,17 +634,38 @@ module cache_controller(
 	// ★ 三十六次补充探针：填充数据写（cache_write_data）曾在"非填充相(STATE!=111)"到达 ——
 	//   即"上一笔事务读 burst 的余波"的直接证据（它会把别的行数据写进当前 cache 行）。
 	(* mark_debug = "true", keep = "true" *) reg        dbg_fwleak    = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_seen  = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_st011 = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_fall  = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_cs    = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_clr   = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wr0_l0    = 5'd0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_n     = 6'd0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_np    = 6'd0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_nw    = 6'd0;  // 窗口内 cache_write_data 脉冲数（>0 即上一笔事务余波证据）
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w0    = 16'd0;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w1    = 16'd0;
+	// ★ 三十八次诊断（2026-09-23）：把"空白区零星色块"钉到具体机制上。
+	//   事实：清屏(rep stosw 写 0)后 cells 64/65/96/130/160 = 0x0010/0x0008/0x1000/0x0080/0x1001，
+	//         且 4/5 个都落在各自 cache 行的**首字**（word0），idx2/3/5 的 off0 + idx4 的 off4。
+	//   推理：CPU 对这些 cell 只写过 0 ⇒ 行里的非零字**不可能是 CPU 写的** ⇒ 只可能是填充数据写
+	//         (cache_write_data，把 DDR 旧内容写进 cache 行) 泄漏进来的。本组探针直接抓它。
+	//   判据：lk_nz=1 且 lk_dat ∈ {0x0010,0x0008,0x1000,0x0080,0x1001} ⇒ 泄漏写实锤；
+	//         lk_cnt=0                                        ⇒ 泄漏写不成立 → 看 dbg_wlost。
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_lk_cnt = 8'd0; // 泄漏写脉冲数（饱和 255）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_lk_nz  = 1'b0; // 出现过"非零数据"的泄漏写
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_lk_idx = 5'd0; // 最近一次非零泄漏写的 index
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_lk_lo  = 5'd0; // 同一写的 lowaddr[4:0]
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_lk_dat = 16'd0;// 同一写的数据（=被写进该行的值）
+	(* mark_debug = "true", keep = "true" *) reg [2:0]  dbg_lk_st  = 3'd0; // 同一写时的 STATE
+	// ★ 三十八次诊断之二：**CPU 写被静默丢弃**检测。
+	//   代码事实：`fit[i] = ~r_flush && (...)` ⇒ 在 r_flush 刚拉高那一拍 hit 被强制 0、端口 B 写被挡
+	//   （enable_b 带 !r_flush），而同一拍 `ce` 仍是 1（r_flush 分支要到本拍结束才 ce<=0，见 STATE 000 的
+	//   `else if(r_flush)` 分支尾部）⇒ 该拍 CPU 若有 VRAM 写，会被 CPU 视为"已完成"但 cache 没收。
+	//   后果与该 cell 保留 DDR 填充旧值完全一致（现象与泄漏写无法从值上区分）⇒ 必须用本标志判别。
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wlost  = 1'b0; // ce=1 但端口 B 未接受 CPU 写
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wl_idx = 5'd0; // 该丢失写的 cache index
+	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbg_wl_wrd = 4'd0; // 该丢失写在行内的字序号
+	reg        dbg_wr0_seen  = 1'b0;
+	reg        dbg_wr0_st011 = 1'b0;
+	reg        dbg_wr0_fall  = 1'b0;
+	reg        dbg_wr0_cs    = 1'b0;
+	reg        dbg_wr0_clr   = 1'b0;
+	reg [4:0]  dbg_wr0_l0    = 5'd0;
+	reg [5:0]  dbg_wr0_n     = 6'd0;
+	reg [5:0]  dbg_wr0_np    = 6'd0;
+	reg [5:0]  dbg_wr0_nw    = 6'd0;  // 窗口内 cache_write_data 脉冲数（>0 即上一笔事务余波证据）
+	reg [15:0] dbg_wr0_w0    = 16'd0;
+	reg [15:0] dbg_wr0_w1    = 16'd0;
 	reg [5:0] wr0_cnt = 6'd0, wr0_np_cnt = 6'd0, wr0_nw_cnt = 6'd0;
 	reg       wr0_any = 1'b0, wr0_np_any = 1'b0, wr0_l0_done = 1'b0;
 	wire wr0_act    = (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00);
@@ -657,7 +678,23 @@ module cache_controller(
 	                    (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171);
 	always @(posedge ddr_clk) begin
 		if(wbx_any_vram) dbg_wbx_seen <= 1'b1;
-		if(cache_write_data && (STATE != 3'b111)) dbg_fwleak <= 1'b1;
+		if(cache_write_data && (STATE != 3'b111)) begin
+			dbg_fwleak <= 1'b1;
+			if(dbg_lk_cnt != 8'hFF) dbg_lk_cnt <= dbg_lk_cnt + 8'd1;
+			if(ddr_din != 16'd0) begin          // 只锁"非零数据"的泄漏（空白区该是 0，非零即证据）
+				dbg_lk_nz  <= 1'b1;
+				dbg_lk_idx <= index;
+				dbg_lk_lo  <= lowaddr[4:0];
+				dbg_lk_dat <= ddr_din;
+				dbg_lk_st  <= STATE;
+			end
+		end
+		// ★ 三十八次诊断：r_flush 刚拉高那一拍（hit 已被 ~r_flush 打掉）而 ce 仍为 1 → CPU 写被丢
+		if(ce && mreq && (|wmask) && (STATE == 3'b000) && r_flush) begin
+			dbg_wlost  <= 1'b1;
+			dbg_wl_idx <= maddr[`LINE+`SETS-1:`LINE];
+			dbg_wl_wrd <= maddr[`LINE-1:2];
+		end
 
 		// (a) 窗口口径的读脉冲计数（不受 STATE/ddr_wr 提前变化影响）
 		if(wr0_np_win) begin

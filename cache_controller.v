@@ -265,6 +265,46 @@ module cache_controller(
 		else if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
 	end
 
+	// ★★ 三十三次修复（2026-09-23）：写回读地址改用"本次写回内独立的字序号计数"，
+	//   与共享的 lowaddr 彻底解耦 —— 修 index0 整行 +1 word（dump: cell0-1=0，cell2 起才
+	//   出现字符串 'S','e'…；而同一次运行的 index1 完全对齐）。
+	//
+	//   机理：写回时 BRAM 端口 A 的读地址此前取 `lowaddr[LINE-2:1]`。`lowaddr` 是**填充与
+	//   写回共用**的计数器，只由外部单周期脉冲 `cache_line_start` 复位。只要该脉冲与本次
+	//   写回的相位不齐（或上一行残留未清），整行读出的字序号就整体偏移 1 个字 ——
+	//   而"整行偏移"正是所有 dump 里 index0 的形状；index1 恰好相位对齐故正常。
+	//   （此前测到的 dbg_i0wb_crd=0 / cache_QA 值不像本行内容，也是同一相位问题的副作用：
+	//     STATE 011 的可见窗口只有几个 clk_sdr 周期，探针按 ddr_dr 采样极易漏掉。）
+	//
+	//   修法：写回 burst 内自建计数器 wb_pcnt，只在**本次写回**内累加：
+	//     - 复位：`cache_line_start` 脉冲 或 `ddr_wr` 上升沿（写回开始事件，先于 burst 若干拍）；
+	//     - 递增：每个 `cache_read_data` 脉冲（= top 的 W_L/W_H，每字恰好 2 拍，与 AXI
+	//       wready 停顿无关 → 结构性保证，不依赖任何节拍假设）；
+	//     - 字序号 = wb_pcnt[5:1]（每 2 拍一个字）。
+	//   于是 beat n（W_L 拍）present 的地址恒为 word n，W_H 拍 q_a 即 word n，
+	//   与 top_zynq7010.v:360 的设计意图严格一致。
+	reg  [5:0] wb_pcnt    = 6'd0;
+	reg        ddr_wr_d   = 1'b0;
+	reg        wb_started = 1'b0;
+	wire [3:0] wb_word    = wb_pcnt[5:1];
+	always @(posedge ddr_clk) begin
+		ddr_wr_d <= ddr_wr;
+		if(!ddr_wr) begin
+			wb_pcnt <= 6'd0; wb_started <= 1'b0;      // 写回结束 → 归零
+		end else begin
+			// 仅在"本行写回的第一个脉冲之前"允许复位，确保 beat0 恒为 word0；
+			// 首个脉冲出现后即锁定（wb_started），避免迟到的 cache_line_start 把序号打回 0。
+			if(!wb_started && (cache_line_start || (ddr_wr & ~ddr_wr_d)))
+				wb_pcnt <= 6'd0;
+			else if(cache_read_data)
+				wb_pcnt <= wb_pcnt + 1'b1;
+			if(cache_read_data) wb_started <= 1'b1;
+		end
+	end
+	// 写回读窗口（cache_read_data=1）用内部字序号；填充写入窗口用 lowaddr（原行为不变）。
+	//   两者天然互斥：写回时 cache_write_data=0、填充时 cache_read_data=0。
+	wire [`LINE-3:0] word_a = cache_read_data ? wb_word : lowaddr[`LINE-2:1];
+
 	// ★★ 三十次修复（2026-09-22）：写回数据改"组合直通 cache_QA"，去掉多出来的一级寄存器。
 	//   实测（v5 探针，index1 行）：word0 的 W_H 拍 cache_QA 已是**正确 word0** 0x0142014B，
 	//   而同拍 ddr_dout 仍是上一拍的旧值（v4 实测 0x04000016）→ top 在 W_H 拍
@@ -280,7 +320,7 @@ module cache_controller(
 		.enable_a(cache_write_data | cache_read_data), // input ena
 	  	.byteena_a({lowaddr[0], lowaddr[0], ~lowaddr[0], ~lowaddr[0]}),
 		.wren_a(cache_write_data), // input [0 : 0] wea
-		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], lowaddr[`LINE-2:1]}), // input [10 : 0] addra
+		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], word_a}), // input [10 : 0] addra
 		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
 		.q_a(cache_QA), // output [31 : 0] douta
 		.clock_b(clk), // input clkb
@@ -530,35 +570,32 @@ module cache_controller(
 	end
 
 	// ============================================================================
-	// ★ 二十四次诊断 v9（2026-09-22）：index0 写回"数据抓不到"之谜。
-	//   v8 已证明 index0 确实被写回（dbg_vram_wb_idx_or.bit0=1），但 v6/v7 按 cache_read_data
-	//   计 beat 的捕获 cnt 恒 0 ⇒ **该次写回期间 cache_read_data 很可能没有脉冲**。
-	//   而 cache_read_data = crw && ram_wr_valid，同时是 BRAM 的 enable_a！
-	//   若它没脉冲 ⇒ 端口 A 未使能 ⇒ cache_QA 不是该行数据 ⇒ 写回数据错位（index0 内容错的真因）。
-	//   本组直接验证：index0 写回期间 cache_read_data 有没有脉冲。
-	//   判据：i0wb_seen=1 且 i0wb_crd=0 → 证实"写回时 BRAM 没使能" ⇒ 修使能/握手；
-	//         i0wb_crd=1            → 使能正常 ⇒ 继续查数据相位。
-	// ============================================================================
-	(* mark_debug = "true", keep = "true" *) reg        dbg_i0wb_seen = 1'b0; // index0 发生过写回(STATE011&&ddr_wr&&wb 地址=index0)
-	(* mark_debug = "true", keep = "true" *) reg        dbg_i0wb_crd  = 1'b0; // 该写回期间 cache_read_data 曾脉冲
-	(* mark_debug = "true", keep = "true" *) reg [31:0] dbg_i0wb_q    = 32'd0;// 该写回第 1 个 ddr_wr 拍的 cache_QA
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_i0wb_lo   = 5'd0; // 同一拍的 lowaddr
-	reg i0wb_latch = 1'b0;
-	reg st011c_d = 1'b0;
-	wire i0wb_act = (STATE == 3'b011) && ddr_wr &&
-	                (wb_hiaddr[14:5]==10'h170 || wb_hiaddr[14:5]==10'h171) && (wb_hiaddr[4:0]==5'd0);
-	wire entering011c = (STATE == 3'b011) && !st011c_d;
+	// ★ 三十三次修复配套探针（2026-09-23）：证实"写回起点字序号曾被 lowaddr 相位带偏"。
+	//   写回读地址此前取自共享的 lowaddr（cache_line_start 复位、填充/写回共用）；实测 index0
+	//   整行 +1 word（dump cell0-1=0、cell2 起才是 'S','e'…），而 index1 完全对齐 ⇒ 某些写回的
+	//   lowaddr 起点被残留值带偏 1 个字。本修复改用写回内独立计数 wb_pcnt，不受其影响。
+	//   读法（读一次上电后的稳态值）：
+	//     wbx_seen = 抓到 VRAM index0 行的写回（应为 1）
+	//     wbx_lo0  = 首个 cache_read_data 脉冲时的 lowaddr[4:0]（**旧路径起点**；≠0 即被带偏）
+	//     wbx_q1   = 第 2 个脉冲（W_H word0）时的 cache_QA 低 16（应为 0x0153 = 'S'）
+	//     wbx_n    = 该行写回内 cache_read_data 脉冲总数（应为 0x20 = 32 = 16 字×2 拍）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wbx_lo0  = 5'd0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wbx_q1   = 16'd0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wbx_n    = 6'd0;
+	reg [5:0] wbx_cnt  = 6'd0;
+	reg       wbx_any  = 1'b0;
+	wire wbx_act = (STATE == 3'b011) && ddr_wr &&
+	               (wb_hiaddr[14:5]==10'h170 || wb_hiaddr[14:5]==10'h171) && (wb_hiaddr[4:0]==5'd0);
 	always @(posedge ddr_clk) begin
-		st011c_d <= (STATE == 3'b011);
-		if (entering011c) i0wb_latch <= 1'b0;
-		if (i0wb_act) begin
-			dbg_i0wb_seen <= 1'b1;
-			if (cache_read_data) dbg_i0wb_crd <= 1'b1;
-			if (!i0wb_latch) begin
-				dbg_i0wb_q  <= cache_QA;
-				dbg_i0wb_lo <= lowaddr[4:0];
-				i0wb_latch  <= 1'b1;
-			end
+		if(!ddr_wr) begin                       // 写回结束：记录本次脉冲总数并清零
+			if(wbx_any) dbg_wbx_n <= wbx_cnt;
+			wbx_cnt <= 6'd0; wbx_any <= 1'b0;
+		end else if(wbx_act && cache_read_data) begin
+			wbx_cnt <= wbx_cnt + 1'b1; wbx_any <= 1'b1;
+			dbg_wbx_seen <= 1'b1;
+			if(wbx_cnt == 6'd0) dbg_wbx_lo0 <= lowaddr[4:0];
+			if(wbx_cnt == 6'd1) dbg_wbx_q1   <= cache_QA[15:0];
 		end
 	end
 	

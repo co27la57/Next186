@@ -85,6 +85,13 @@ module cache_controller(
 	(* mark_debug = "true", keep = "true" *) reg s_lowaddr5 = 0;
 	(* mark_debug = "true", keep = "true" *) reg s_lowaddr5_d1 = 0;
 	wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0，标志整行 64B burst 完成
+	// ★ 三十三次修复引入的写回内自持计数（声明提前，供 flush_wb_done 使用）
+	reg  [5:0] wb_pcnt    = 6'd0;   // 本次写回内 cache_read_data 脉冲数（每字 2 拍）
+	reg        ddr_wr_d   = 1'b0;   // ddr_wr 延迟一拍，用于取上升沿
+	reg        wb_started = 1'b0;   // 本行写回已收到第一个读脉冲（之后禁止再复位计数）
+	// ★ 三十五次修复：本次写回的数据相是否**真的跑完**（脉冲 ≥31 ≈ 16 字×2 拍）。
+	//   只有它为 1 才允许清脏位 —— 否则写回没读出行数据也会清脏 ⇒ 脏数据静默丢弃。
+	reg        wb_full    = 1'b0;
 	// ★ 十一次修复：flush 写回完成事件（STATE 011 且 r_flush 且整行 burst 结束，ddr_wr 此拍仍为 1）。
 	//   十次修复曾把"flush 写回后清 dirty"直接写在 STATE 块里，导致 cache_dirty 同时被
 	//   LRU/dirty 块和 STATE 块两个 always 写端口驱动，Vivado 无法推断 RAM ->
@@ -97,7 +104,15 @@ module cache_controller(
 	//   覆盖掉字符串 → 前段 VRAM(index0 及被 VGA 先读的行)整片变 0（本次实测 cells 0-33 全 0）。
 	//   现改为：任何 STATE 011 写回完成都清对应 way 的脏位（用写回时冻结的 wb_hiaddr/wb_way，
 	//   与 flush/逐出同源，两类写回均指向正确的 index/way）。
-	wire flush_wb_done = (STATE == 3'b011) && ddr_wr && s_lowaddr5_fall;
+	// ★ 三十五次修复（2026-09-23）：清脏位必须**确认整行数据相真的跑完**（wb_full）。
+	//   实测（dbg_wr0_seen=0）：VRAM row0 的写回被"启动"（STATE011 & ddr_wr=1 & hiaddr=0x2E00，
+	//   ddr_186 侧 memmap 也已锁存=6），但该窗口内 cache_read_data 脉冲数为 **0**；
+	//   而 state 机仍在 s_lowaddr5_fall 上退出、旧逻辑照样清了脏位 ⇒ 脏数据被静默丢弃、
+	//   该行永远到不了 DDR（= index0 内容一直是旧 bitstream 化石的直接原因）。
+	//   现要求 wb_full（本次写回读脉冲 ≥31）为必要条件：没真读出行数据就不清脏位，
+	//   数据留待下一次写回。最坏后果只是"多写回一次"，绝不丢数据。
+	wire flush_wb_done_old = (STATE == 3'b011) && ddr_wr && s_lowaddr5_fall; // 旧判据（仅探针观测用）
+	wire flush_wb_done     = flush_wb_done_old && wb_full;
 	wire [31:0]cache_QA;
 
 	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
@@ -283,14 +298,11 @@ module cache_controller(
 	//     - 字序号 = wb_pcnt[5:1]（每 2 拍一个字）。
 	//   于是 beat n（W_L 拍）present 的地址恒为 word n，W_H 拍 q_a 即 word n，
 	//   与 top_zynq7010.v:360 的设计意图严格一致。
-	reg  [5:0] wb_pcnt    = 6'd0;
-	reg        ddr_wr_d   = 1'b0;
-	reg        wb_started = 1'b0;
 	wire [3:0] wb_word    = wb_pcnt[5:1];
 	always @(posedge ddr_clk) begin
 		ddr_wr_d <= ddr_wr;
 		if(!ddr_wr) begin
-			wb_pcnt <= 6'd0; wb_started <= 1'b0;      // 写回结束 → 归零
+			wb_pcnt <= 6'd0; wb_started <= 1'b0; wb_full <= 1'b0;  // 写回结束 → 归零
 		end else begin
 			// 仅在"本行写回的第一个脉冲之前"允许复位，确保 beat0 恒为 word0；
 			// 首个脉冲出现后即锁定（wb_started），避免迟到的 cache_line_start 把序号打回 0。
@@ -299,6 +311,7 @@ module cache_controller(
 			else if(cache_read_data)
 				wb_pcnt <= wb_pcnt + 1'b1;
 			if(cache_read_data) wb_started <= 1'b1;
+			if(cache_read_data && (wb_pcnt >= 6'd30)) wb_full <= 1'b1;  // 第 31 个脉冲起认定数据相已跑完
 		end
 	end
 	// 写回读窗口（cache_read_data=1）用内部字序号；填充写入窗口用 lowaddr（原行为不变）。
@@ -570,42 +583,76 @@ module cache_controller(
 	end
 
 	// ============================================================================
-	// ★ 三十四次诊断（2026-09-23）：VRAM row0 到底有没有被写回、写回的**内容**是什么。
-	//   背景：33 次修复后 dump 与多个改变了写回数据通路的 bitstream（8e180bc/e7b8d0c/cc472aa/
-	//   8d3de5f）**逐字节相同**，而 index0 的形状恰是 e7b8d0c **之前**的 +1 word 写回签名；
-	//   同一批 bitstream 下 index1 却真的变了（e7b8d0c 后对齐）⇒ 强烈怀疑 index0 的 DDR 内容是
-	//   **旧 bitstream 的化石**：本轮运行根本没把 VRAM row0 写回。
-	//   旧 gate "tag∈{0x170,0x171} && index==0" 会同时匹配 row0(hiaddr 0x2E00) 与
-	//   row32(hiaddr 0x2E20，内容全 0) ⇒ 上一轮 q1=0 很可能是 row32，属歧义读数。
-	//   本组**精确 gate `wb_hiaddr == 15'h2E00`（只 VRAM row0）**，读数一次定性：
-	//     wr0_seen = 本轮是否发生过 VRAM row0 写回。**=0 ⇒ 化石成立：row0 从未写回**（去查
-	//                eviction/flush 为何不覆盖 row0 / 或写回被丢）；=1 ⇒ 见下。
-	//     wr0_w0   = 该写回第 2 个读脉冲(=W_H word0) 的 cache_QA 低16；行内容正确应 = 0x0153('S')
-	//     wr0_w1   = 第 4 个读脉冲(=W_H word1) 的 cache_QA 低16；行内容正确应 = 0x0161('a')
-	//     wr0_n    = 本次写回读脉冲总数（正常 = 0x20 = 32 = 16 字×2 拍）
-	//   判读：seen=1 且 w0=0x0153 ⇒ 缓存行正确、数据已写出 ⇒ 问题在写回**地址/写事务被丢**
-	//         （配合 ddr_186 的 dbg_wr0_memmap[3:0]，应=4'h6）；seen=1 且 w0=0 ⇒ 缓存行本身
-	//         已偏移 ⇒ fill / CPU 写侧问题。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen = 1'b0; // 任一 VRAM 行(tag 0x170/0x171)曾写回
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_seen = 1'b0; // 精确: VRAM row0 (hiaddr==0x2E00) 曾写回
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w0   = 16'd0;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w1   = 16'd0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_n    = 6'd0;
-	reg [5:0] wr0_cnt = 6'd0;
-	reg       wr0_any = 1'b0;
-	wire wr0_act = (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00);
+	// ★ 三十五次诊断（2026-09-23）：钉死"VRAM row0 写回被启动、数据相却没跑"的机制。
+	//   已知（三十四次）：`dbg_wr0_seen=0`（精确 gate `wb_hiaddr==0x2E00`）——row0 的写回窗口内
+	//   **没有任何 cache_read_data 脉冲**；而 `dbg_wbx_seen=1`（其它 VRAM 行能写回）、
+	//   ddr_186 的 `dbg_wr0_memmap=6`（确实有过 s_ddr_wr && hiaddr==0x2E00）。⇒ 写回被"启动"但没读数据。
+	//   本组再分开两件事：
+	//     st011 = STATE011 & ddr_wr=1 & hiaddr=0x2E00 曾成立（写回启动过）
+	//     np[5:0]= **窗口口径**的读脉冲数：只在"冻结的写回地址仍是 row0"这一窗口（`wb_hiaddr==0x2E00`）
+	//              内计数，不要求 STATE==011 也不要求 ddr_wr=1 ⇒ 即使 state 机提前退出/命令拉低，
+	//              burst 打在 cache_read_data 上的脉冲仍被计入。=32 ⇒ burst 其实跑了（只是 FSM 已走）；
+	//              =0 ⇒ burst 根本没跑（写回在命令层被饿死 / 命令从未发出）。
+	//     n[5:0] = 旧口径（STATE011 内的读脉冲数，前面测到 0）
+	//     l0[4:0]= 该窗口开始时的 lowaddr（≥16 且随后 cache_line_start 复位 ⇒ 假 s_lowaddr5_fall ⇒ 提前退出）
+	//     cs     = 该窗口内 cache_line_start 曾为 1（复位 lowaddr 的来源）
+	//     fall   = 该窗口内 s_lowaddr5_fall 曾为 1（终止事件）
+	//     clr    = 该窗口内**旧判据** flush_wb_done_old 曾为 1（⇒ 脏位被清、数据被丢）
+	//   判读：np=32 ⇒ 提前退出（burst 跑了但 state 机已走）→ 查退出条件/地址是否被 VGA 优先权改坏；
+	//         np=0  ⇒ 命令层饿死（ddr_186 的 s_prog_empty 优先于 s_ddr_wr）→ 改写回优先级；
+	//         l0≥16 ⇒ 证实"复位 lowaddr 造成假 fall"。
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen  = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_seen  = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_st011 = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_fall  = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_cs    = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_clr   = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wr0_l0    = 5'd0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_n     = 6'd0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_np    = 6'd0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w0    = 16'd0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w1    = 16'd0;
+	reg [5:0] wr0_cnt = 6'd0, wr0_np_cnt = 6'd0;
+	reg       wr0_any = 1'b0, wr0_np_any = 1'b0, wr0_l0_done = 1'b0;
+	wire wr0_act    = (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00);
+	// np 口径：只看"冻结的写回地址仍是 row0"这一窗口（wb_hiaddr 在 STATE 011 全程冻结、
+	//   直到下一次写回决定才变），因此**即使 state 机提前离开 011、或 ddr_wr 已拉低**，
+	//   burst 期间打在 cache_read_data 上的脉冲仍会被计入 ⇒ 能区分
+	//   "burst 根本没跑(np=0)" 与 "burst 跑了但 FSM 已提前退出(np=32)"。
+	wire wr0_np_win = (wb_hiaddr == 15'h2E00);
 	wire wbx_any_vram = (STATE == 3'b011) && ddr_wr &&
 	                    (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171);
 	always @(posedge ddr_clk) begin
 		if(wbx_any_vram) dbg_wbx_seen <= 1'b1;
+
+		// (a) 窗口口径的读脉冲计数（不受 STATE/ddr_wr 提前变化影响）
+		if(wr0_np_win) begin
+			if(cache_read_data) begin
+				wr0_np_cnt <= wr0_np_cnt + 1'b1; wr0_np_any <= 1'b1;
+			end
+		end else begin
+			if(wr0_np_any) dbg_wr0_np <= wr0_np_cnt;   // 窗口关闭 → 记录本次
+			wr0_np_cnt <= 6'd0; wr0_np_any <= 1'b0;
+		end
+
+		// (b) STATE 011 窗口内的观测
 		if(!ddr_wr) begin
 			if(wr0_any) dbg_wr0_n <= wr0_cnt;
-			wr0_cnt <= 6'd0; wr0_any <= 1'b0;
-		end else if(wr0_act && cache_read_data) begin
-			wr0_cnt <= wr0_cnt + 1'b1; wr0_any <= 1'b1;
-			dbg_wr0_seen <= 1'b1;
-			if(wr0_cnt == 6'd1) dbg_wr0_w0 <= cache_QA[15:0];
-			if(wr0_cnt == 6'd3) dbg_wr0_w1 <= cache_QA[15:0];
+			wr0_cnt <= 6'd0; wr0_any <= 1'b0; wr0_l0_done <= 1'b0;
+		end else begin
+			if(wr0_act) begin
+				dbg_wr0_st011 <= 1'b1;
+				if(s_lowaddr5_fall)   dbg_wr0_fall <= 1'b1;
+				if(cache_line_start)  dbg_wr0_cs   <= 1'b1;
+				if(flush_wb_done_old) dbg_wr0_clr  <= 1'b1;
+				if(!wr0_l0_done) begin dbg_wr0_l0 <= lowaddr[4:0]; wr0_l0_done <= 1'b1; end
+			end
+			if(wr0_act && cache_read_data) begin
+				wr0_cnt <= wr0_cnt + 1'b1; wr0_any <= 1'b1;
+				dbg_wr0_seen <= 1'b1;
+				if(wr0_cnt == 6'd1) dbg_wr0_w0 <= cache_QA[15:0];
+				if(wr0_cnt == 6'd3) dbg_wr0_w1 <= cache_QA[15:0];
+			end
 		end
 	end
 	

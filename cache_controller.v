@@ -570,32 +570,42 @@ module cache_controller(
 	end
 
 	// ============================================================================
-	// ★ 三十三次修复配套探针（2026-09-23）：证实"写回起点字序号曾被 lowaddr 相位带偏"。
-	//   写回读地址此前取自共享的 lowaddr（cache_line_start 复位、填充/写回共用）；实测 index0
-	//   整行 +1 word（dump cell0-1=0、cell2 起才是 'S','e'…），而 index1 完全对齐 ⇒ 某些写回的
-	//   lowaddr 起点被残留值带偏 1 个字。本修复改用写回内独立计数 wb_pcnt，不受其影响。
-	//   读法（读一次上电后的稳态值）：
-	//     wbx_seen = 抓到 VRAM index0 行的写回（应为 1）
-	//     wbx_lo0  = 首个 cache_read_data 脉冲时的 lowaddr[4:0]（**旧路径起点**；≠0 即被带偏）
-	//     wbx_q1   = 第 2 个脉冲（W_H word0）时的 cache_QA 低 16（应为 0x0153 = 'S'）
-	//     wbx_n    = 该行写回内 cache_read_data 脉冲总数（应为 0x20 = 32 = 16 字×2 拍）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wbx_lo0  = 5'd0;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wbx_q1   = 16'd0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wbx_n    = 6'd0;
-	reg [5:0] wbx_cnt  = 6'd0;
-	reg       wbx_any  = 1'b0;
-	wire wbx_act = (STATE == 3'b011) && ddr_wr &&
-	               (wb_hiaddr[14:5]==10'h170 || wb_hiaddr[14:5]==10'h171) && (wb_hiaddr[4:0]==5'd0);
+	// ★ 三十四次诊断（2026-09-23）：VRAM row0 到底有没有被写回、写回的**内容**是什么。
+	//   背景：33 次修复后 dump 与多个改变了写回数据通路的 bitstream（8e180bc/e7b8d0c/cc472aa/
+	//   8d3de5f）**逐字节相同**，而 index0 的形状恰是 e7b8d0c **之前**的 +1 word 写回签名；
+	//   同一批 bitstream 下 index1 却真的变了（e7b8d0c 后对齐）⇒ 强烈怀疑 index0 的 DDR 内容是
+	//   **旧 bitstream 的化石**：本轮运行根本没把 VRAM row0 写回。
+	//   旧 gate "tag∈{0x170,0x171} && index==0" 会同时匹配 row0(hiaddr 0x2E00) 与
+	//   row32(hiaddr 0x2E20，内容全 0) ⇒ 上一轮 q1=0 很可能是 row32，属歧义读数。
+	//   本组**精确 gate `wb_hiaddr == 15'h2E00`（只 VRAM row0）**，读数一次定性：
+	//     wr0_seen = 本轮是否发生过 VRAM row0 写回。**=0 ⇒ 化石成立：row0 从未写回**（去查
+	//                eviction/flush 为何不覆盖 row0 / 或写回被丢）；=1 ⇒ 见下。
+	//     wr0_w0   = 该写回第 2 个读脉冲(=W_H word0) 的 cache_QA 低16；行内容正确应 = 0x0153('S')
+	//     wr0_w1   = 第 4 个读脉冲(=W_H word1) 的 cache_QA 低16；行内容正确应 = 0x0161('a')
+	//     wr0_n    = 本次写回读脉冲总数（正常 = 0x20 = 32 = 16 字×2 拍）
+	//   判读：seen=1 且 w0=0x0153 ⇒ 缓存行正确、数据已写出 ⇒ 问题在写回**地址/写事务被丢**
+	//         （配合 ddr_186 的 dbg_wr0_memmap[3:0]，应=4'h6）；seen=1 且 w0=0 ⇒ 缓存行本身
+	//         已偏移 ⇒ fill / CPU 写侧问题。
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen = 1'b0; // 任一 VRAM 行(tag 0x170/0x171)曾写回
+	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_seen = 1'b0; // 精确: VRAM row0 (hiaddr==0x2E00) 曾写回
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w0   = 16'd0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w1   = 16'd0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_n    = 6'd0;
+	reg [5:0] wr0_cnt = 6'd0;
+	reg       wr0_any = 1'b0;
+	wire wr0_act = (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00);
+	wire wbx_any_vram = (STATE == 3'b011) && ddr_wr &&
+	                    (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171);
 	always @(posedge ddr_clk) begin
-		if(!ddr_wr) begin                       // 写回结束：记录本次脉冲总数并清零
-			if(wbx_any) dbg_wbx_n <= wbx_cnt;
-			wbx_cnt <= 6'd0; wbx_any <= 1'b0;
-		end else if(wbx_act && cache_read_data) begin
-			wbx_cnt <= wbx_cnt + 1'b1; wbx_any <= 1'b1;
-			dbg_wbx_seen <= 1'b1;
-			if(wbx_cnt == 6'd0) dbg_wbx_lo0 <= lowaddr[4:0];
-			if(wbx_cnt == 6'd1) dbg_wbx_q1   <= cache_QA[15:0];
+		if(wbx_any_vram) dbg_wbx_seen <= 1'b1;
+		if(!ddr_wr) begin
+			if(wr0_any) dbg_wr0_n <= wr0_cnt;
+			wr0_cnt <= 6'd0; wr0_any <= 1'b0;
+		end else if(wr0_act && cache_read_data) begin
+			wr0_cnt <= wr0_cnt + 1'b1; wr0_any <= 1'b1;
+			dbg_wr0_seen <= 1'b1;
+			if(wr0_cnt == 6'd1) dbg_wr0_w0 <= cache_QA[15:0];
+			if(wr0_cnt == 6'd3) dbg_wr0_w1 <= cache_QA[15:0];
 		end
 	end
 	

@@ -178,6 +178,18 @@ module system
 	wire [14:0]cache_hi_addr;
 	wire [8:0]memmap;
 	wire [8:0]memmap_mux;
+	// ★ 三十四次诊断（第三十四次诊断）：VRAM row0 写回时锁存 memmap_mux
+	//   物理地址 = 0x0800_0000 + 2*sdraddr，上段由 memmap_mux 决定
+	//   期望 4'h6（map[11]=6）⇒ sdraddr=0x34000 → 物理 0x0806_8000
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_wr0_memmap = 4'd0;
+	reg dbg_wr0_mm_l = 1'b0;
+	always @(posedge clk_sdr) begin
+		if(!s_ddr_wr) dbg_wr0_mm_l <= 1'b0;
+		else if(!dbg_wr0_mm_l && (cache_hi_addr == 15'h2E00)) begin
+			dbg_wr0_memmap <= memmap_mux[3:0];
+			dbg_wr0_mm_l   <= 1'b1;
+		end
+	end
 	wire [7:0]font_dout;
 	wire [7:0]VGA_FONT_DATA;
 	wire vgatextreq;

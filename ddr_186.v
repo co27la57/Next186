@@ -247,6 +247,25 @@ module system
 	
 // SD interface
 	reg [7:0]SDI;
+	// ★ 三十九次诊断（2026-09-23）：SD/SPI 链路观测（clk_cpu 域采样）。
+	//   背景：SD 卡走端口 0x3DA 位敲 SPI——写 8-bit → SD_CK 一个脉冲 + SDI 移入 SD_DO；
+	//   SD_DI = CPU_DOUT[7]；写 16-bit → SD_n_CS <= ~CPU_DOUT[8]；读 0x3DA → 高字节 = SDI。
+	//   判读：上电后 dbg_sd_cs 有下拉 + dbg_sd_ckc > 0 ⇒ BIOS 确实在跑 SD 例程（即使没插卡）；
+	//         dbg_sd_rx 若恒 0xFF ⇒ 卡无响应（物理/初始化时序/卡类型）；若出现 0x01 ⇒ CMD0 成功进 SPI 模式。
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cs  = 1'b1;  // SD 片选（低 = 在通信）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_ck  = 1'b0;  // SPI 时钟（SCLK）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_di  = 1'b0;  // MOSI（BIOS → 卡）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_do  = 1'b0;  // MISO（卡 → BIOS）
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_sd_rx  = 8'd0;  // 最近收到的字节（SDI 镜像）
+	(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckc = 12'd0; // CS 低期间的时钟数（饱和）
+	reg dbg_sd_ck_d = 1'b0;
+	always @(posedge clk_cpu) begin
+		dbg_sd_cs <= SD_n_CS; dbg_sd_ck <= SD_CK;
+		dbg_sd_di <= SD_DI;   dbg_sd_do <= SD_DO;
+		dbg_sd_rx <= SDI;
+		dbg_sd_ck_d <= SD_CK;
+		if(!SD_n_CS && SD_CK && !dbg_sd_ck_d && dbg_sd_ckc != 12'hFFF) dbg_sd_ckc <= dbg_sd_ckc + 1'b1;
+	end
 	assign SD_DI = CPU_DOUT[7];
 	
 // GPIO interface

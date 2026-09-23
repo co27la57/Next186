@@ -1856,6 +1856,25 @@ endfunction
 (* mark_debug = "true", keep = "true" *) reg        dbg_IORQ;
 
     // ★ CPU 内部诊断探针：reg+always 采样（非 top 模块禁止用 wire，否则被布线优化掉）
+    // ★★ 四十一次（2026-09-24）：CPU 跑飞（逃逸）定位探针（粘滞）。
+    //   用法：上电后 dbg_boot_seen 应变 1（CPU 进了 BIOS 段 CS=0xF000）；
+    //         若之后 CS 变成别的值（逃逸）则 dbg_esc_seen 置 1，
+    //         dbg_esc_ip = **逃逸前一拍的 IP**（即崩点指令）、dbg_esc_cs = 逃逸后的 CS。
+    //   判读：esc_cs=0x0000 ⇒ 掉到段 0（全 0 指令流）= 卡死；esc_cs=0xFFFF ⇒ 走到 SD 加载 stub 的 ljmp（另一条路）。
+    (* mark_debug = "true", keep = "true" *) reg        dbg_boot_seen = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg        dbg_esc_seen  = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_ip    = 16'd0;
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_cs    = 16'd0;
+    reg [15:0] dbg_ip_d = 16'd0;
+    always @(posedge CLK) begin
+        dbg_ip_d <= IP;
+        if(CS == 16'hf000) dbg_boot_seen <= 1'b1;
+        if(dbg_boot_seen && !dbg_esc_seen && (CS != 16'hf000)) begin
+            dbg_esc_seen <= 1'b1;
+            dbg_esc_ip   <= dbg_ip_d;
+            dbg_esc_cs   <= CS;
+        end
+    end
     always @(posedge CLK) begin
         dbg_HALT  <= HALT;
         dbg_CS    <= CS;

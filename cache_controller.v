@@ -346,6 +346,286 @@ module cache_controller(
 	//   cache_QA = BRAM 输出（本身已寄存 1 拍），W_H 拍其值 = 该字正确内容；组合直通后
 	//   W_H 拍 ram_wdata = cache_QA = word n，与 top_zynq7010.v:360 的设计意图一致。
 	always @(*) ddr_dout = cache_QA;
+	// ====================================================================
+	// ★★ 四十一次修复（2026-09-24）：给 BIOS 代码区加**回填源 ROM**。
+	//   依据（第 37 节挖 cache 的结论，全部验算过）：
+	//     · BIOS 代码只存在于 cache（BlackBox 预置 way0 的 index16-31，再复制到 way1/2/3 = 4 份冗余）；
+	//       DDR 侧 0x0815_FC00 只能靠"逐出写回"（way0 预置脏位）被动播种。
+	//     · 而 BIOS 的 `call 0x10F`（映像 0x10F → IP=0xFD0F）会扫 maddr 0x2000-0x4000
+	//       = tag 4~7 × index 0~31；对 index 16-31 恰好是 4 个不同 tag ⇒ **把 BIOS 的 4 份副本全部逐出**。
+	//       ⇒ 此后每次取指都靠 DDR 回填：一旦播种没做成/写回被丢，取指读到 0 ⇒ 跑飞。
+	//   修法：填充相里，若**目标行属于 BIOS 区**（tag 0x1FF 且 index[4]=1），数据取本 ROM，不再依赖 DDR。
+	//   数据通路与原来逐字一致：仍是"每拍写一个 16-bit 半字"（byteena_a 由 lowaddr[0] 选半字），
+	//   所以只把 `ddr_din` 换成 ROM 的对应半字，地址/时序/word_a 全不动 ⇒ 对其它区域零影响。
+	//   ROM 地址 = { index[3:0], word_a } = { maddr[9:6], lowaddr[4:1] }（= 映像第 N 个 32-bit 字，与 BlackBox 同序）。
+	// ====================================================================
+	reg [31:0] bios_rom [0:255];
+	initial begin
+		bios_rom[8'h00] = 32'hC88CFCFA;
+		bios_rom[8'h01] = 32'hC08ED88E;
+		bios_rom[8'h02] = 32'h00BCD08E;
+		bios_rom[8'h03] = 32'hE7C033FC;
+		bios_rom[8'h04] = 32'hE706B080;
+		bios_rom[8'h05] = 32'hE70FB08B;
+		bios_rom[8'h06] = 32'hE634B08F;
+		bios_rom[8'h07] = 32'hE6C03243;
+		bios_rom[8'h08] = 32'hE840E640;
+		bios_rom[8'h09] = 32'hFF3300A9;
+		bios_rom[8'h0A] = 32'hE8FEC3BE;
+		bios_rom[8'h0B] = 32'hDEE800F8;
+		bios_rom[8'h0C] = 32'h0209E800;
+		bios_rom[8'h0D] = 32'h0375C085;
+		bios_rom[8'h0E] = 32'h8B0117E9;
+		bios_rom[8'h0F] = 32'h06EAC1D0;
+		bios_rom[8'h10] = 32'hB90AE0C1;
+		bios_rom[8'h11] = 32'hC12B0010;
+		bios_rom[8'h12] = 32'h3300DA83;
+		bios_rom[8'h13] = 32'h001AE8DB;
+		bios_rom[8'h14] = 32'h28E90372;
+		bios_rom[8'h15] = 32'h33D23301;
+		bios_rom[8'h16] = 32'h000EE8C0;
+		bios_rom[8'h17] = 32'h1CE90372;
+		bios_rom[8'h18] = 32'hF8834001;
+		bios_rom[8'h19] = 32'hE9F27640;
+		bios_rom[8'h1A] = 32'h525000E8;
+		bios_rom[8'h1B] = 32'hBF605351;
+		bios_rom[8'h1C] = 32'hE8920F00;
+		bios_rom[8'h1D] = 32'hE89200BA;
+		bios_rom[8'h1E] = 32'h92E800B6;
+		bios_rom[8'h1F] = 32'h75E86100;
+		bios_rom[8'h20] = 32'h81467201;
+		bios_rom[8'h21] = 32'h75654E3F;
+		bios_rom[8'h22] = 32'h027F8140;
+		bios_rom[8'h23] = 32'h39757478;
+		bios_rom[8'h24] = 32'h01C08349;
+		bios_rom[8'h25] = 32'h8100D283;
+		bios_rom[8'h26] = 32'hE80200C3;
+		bios_rom[8'h27] = 32'h29720158;
+		bios_rom[8'h28] = 32'hC381EFE2;
+		bios_rom[8'h29] = 32'hF6330200;
+		bios_rom[8'h2A] = 32'hE81FEEB9;
+		bios_rom[8'h2B] = 32'h18BF009A;
+		bios_rom[8'h2C] = 32'hE8C28B0F;
+		bios_rom[8'h2D] = 32'h56E8007A;
+		bios_rom[8'h2E] = 32'hEE478B00;
+		bios_rom[8'h2F] = 32'h7400F883;
+		bios_rom[8'h30] = 32'h75C23B04;
+		bios_rom[8'h31] = 32'hEB59F804;
+		bios_rom[8'h32] = 32'h59F95B02;
+		bios_rom[8'h33] = 32'h06C3585A;
+		bios_rom[8'h34] = 32'hB003C0BA;
+		bios_rom[8'h35] = 32'h08B0EE10;
+		bios_rom[8'h36] = 32'h03D4BAEE;
+		bios_rom[8'h37] = 32'h42EE0AB0;
+		bios_rom[8'h38] = 32'h4AEE20B0;
+		bios_rom[8'h39] = 32'h42EE0CB0;
+		bios_rom[8'h3A] = 32'h4AEE60B0;
+		bios_rom[8'h3B] = 32'h42EE0DB0;
+		bios_rom[8'h3C] = 32'h68EE00B0;
+		bios_rom[8'h3D] = 32'h3307B800;
+		bios_rom[8'h3E] = 32'h07D0B9FF;
+		bios_rom[8'h3F] = 32'hABF3C033;
+		bios_rom[8'h40] = 32'hB803C8BA;
+		bios_rom[8'h41] = 32'h42EE0101;
+		bios_rom[8'h42] = 32'hEEEE2AB0;
+		bios_rom[8'h43] = 32'h53C307EE;
+		bios_rom[8'h44] = 32'hE7C033FC;
+		bios_rom[8'h45] = 32'h40EB831F;
+		bios_rom[8'h46] = 32'hC35BF975;
+		bios_rom[8'h47] = 32'hB8006806;
+		bios_rom[8'h48] = 32'hAB01B407;
+		bios_rom[8'h49] = 32'hE8ACC307;
+		bios_rom[8'h4A] = 32'h84ACFFF2;
+		bios_rom[8'h4B] = 32'hC3F875C0;
+		bios_rom[8'h4C] = 32'hC10004B9;
+		bios_rom[8'h4D] = 32'h245004C0;
+		bios_rom[8'h4E] = 32'h720A3C0F;
+		bios_rom[8'h4F] = 32'h04070402;
+		bios_rom[8'h50] = 32'hFFD8E830;
+		bios_rom[8'h51] = 32'hC3ECE258;
+		bios_rom[8'h52] = 32'hC033D233;
+		bios_rom[8'h53] = 32'hE2D003AC;
+		bios_rom[8'h54] = 32'hA0BFC3FB;
+		bios_rom[8'h55] = 32'hFEFDBE00;
+		bios_rom[8'h56] = 32'hE8FFCBE8;
+		bios_rom[8'h57] = 32'h00BEFFB1;
+		bios_rom[8'h58] = 32'h0034E801;
+		bios_rom[8'h59] = 32'h2FE8FC8A;
+		bios_rom[8'h5A] = 32'hE8DC8A00;
+		bios_rom[8'h5B] = 32'h2488002A;
+		bios_rom[8'h5C] = 32'hF7754B46;
+		bios_rom[8'h5D] = 32'hD48EE433;
+		bios_rom[8'h5E] = 32'h000100EA;
+		bios_rom[8'h5F] = 32'hFD91BEF0;
+		bios_rom[8'h60] = 32'h07B9FB8B;
+		bios_rom[8'h61] = 32'hBFA4F300;
+		bios_rom[8'h62] = 32'hF633E000;
+		bios_rom[8'h63] = 32'hFF1000B9;
+		bios_rom[8'h64] = 32'hEAA5F3E3;
+		bios_rom[8'h65] = 32'hFFFF0000;
+		bios_rom[8'h66] = 32'hDABA80B4;
+		bios_rom[8'h67] = 32'hFA52B903;
+		bios_rom[8'h68] = 32'h02E8C0EC;
+		bios_rom[8'h69] = 32'h40E4FAEB;
+		bios_rom[8'h6A] = 32'h40E4E802;
+		bios_rom[8'h6B] = 32'hEC0008E8;
+		bios_rom[8'h6C] = 32'hD002E8C0;
+		bios_rom[8'h6D] = 32'h81F573DC;
+		bios_rom[8'h6E] = 32'hE40A5BE9;
+		bios_rom[8'h6F] = 32'hE4E83840;
+		bios_rom[8'h70] = 32'hC3F87540;
+		bios_rom[8'h71] = 32'h01B4FFB0;
+		bios_rom[8'h72] = 32'h73C003EE;
+		bios_rom[8'h73] = 32'hACC3EDFB;
+		bios_rom[8'h74] = 32'hE2FFF3E8;
+		bios_rom[8'h75] = 32'hEBE8C3FA;
+		bios_rom[8'h76] = 32'h472588FF;
+		bios_rom[8'h77] = 32'hE8C3F8E2;
+		bios_rom[8'h78] = 32'h06B9FFE2;
+		bios_rom[8'h79] = 32'hFFE7E800;
+		bios_rom[8'h7A] = 32'hD7E8F633;
+		bios_rom[8'h7B] = 32'h057446FF;
+		bios_rom[8'h7C] = 32'h74FFFC80;
+		bios_rom[8'h7D] = 32'h5250C3F5;
+		bios_rom[8'h7E] = 32'h0007E851;
+		bios_rom[8'h7F] = 32'h5901E983;
+		bios_rom[8'h80] = 32'h50C3585A;
+		bios_rom[8'h81] = 32'hB250C28A;
+		bios_rom[8'h82] = 32'hF48B5251;
+		bios_rom[8'h83] = 32'hB403DABA;
+		bios_rom[8'h84] = 32'h44C6EF01;
+		bios_rom[8'h85] = 32'hC9E8FF05;
+		bios_rom[8'h86] = 32'h06C483FF;
+		bios_rom[8'h87] = 32'h1675E40A;
+		bios_rom[8'h88] = 32'h80FFC5E8;
+		bios_rom[8'h89] = 32'h0E75FEFC;
+		bios_rom[8'h8A] = 32'hFB8B02B5;
+		bios_rom[8'h8B] = 32'hE8FFA7E8;
+		bios_rom[8'h8C] = 32'h8FE8FF92;
+		bios_rom[8'h8D] = 32'hC03341FF;
+		bios_rom[8'h8E] = 32'hFF88E8EF;
+		bios_rom[8'h8F] = 32'h03DABAC3;
+		bios_rom[8'h90] = 32'hE8000AB9;
+		bios_rom[8'h91] = 32'hFBE2FF7E;
+		bios_rom[8'h92] = 32'hBEEF01B4;
+		bios_rom[8'h93] = 32'h91E8FF38;
+		bios_rom[8'h94] = 32'h75CCFEFF;
+		bios_rom[8'h95] = 32'hFF3EBE65;
+		bios_rom[8'h96] = 32'hFEFF84E8;
+		bios_rom[8'h97] = 32'hB15B75CC;
+		bios_rom[8'h98] = 32'h8BE12B04;
+		bios_rom[8'h99] = 32'hFF6EE8FC;
+		bios_rom[8'h9A] = 32'hFC805858;
+		bios_rom[8'h9B] = 32'hBE4B75AA;
+		bios_rom[8'h9C] = 32'h6AE8FF50;
+		bios_rom[8'h9D] = 32'hFF4CE8FF;
+		bios_rom[8'h9E] = 32'hE8FF4ABE;
+		bios_rom[8'h9F] = 32'hCCFEFF64;
+		bios_rom[8'hA0] = 32'h56BEED74;
+		bios_rom[8'hA1] = 32'hFF57E8FF;
+		bios_rom[8'hA2] = 32'hE12B04B1;
+		bios_rom[8'hA3] = 32'h45E8FC8B;
+		bios_rom[8'hA4] = 32'h40A858FF;
+		bios_rom[8'hA5] = 32'hBE237458;
+		bios_rom[8'hA6] = 32'h42E8FF44;
+		bios_rom[8'hA7] = 32'h75E40AFF;
+		bios_rom[8'hA8] = 32'hFF44E819;
+		bios_rom[8'hA9] = 32'h75FEFC80;
+		bios_rom[8'hAA] = 32'h2B12B111;
+		bios_rom[8'hAB] = 32'hE8FC8BE1;
+		bios_rom[8'hAC] = 32'h4D8BFF24;
+		bios_rom[8'hAD] = 32'h41CD86F6;
+		bios_rom[8'hAE] = 32'hC033E78B;
+		bios_rom[8'hAF] = 32'hFF04E8EF;
+		bios_rom[8'hB0] = 32'h53C3C18B;
+		bios_rom[8'hB1] = 32'h63726165;
+		bios_rom[8'hB2] = 32'h676E6968;
+		bios_rom[8'hB3] = 32'h4F494220;
+		bios_rom[8'hB4] = 32'h6E6F2053;
+		bios_rom[8'hB5] = 32'h43445320;
+		bios_rom[8'hB6] = 32'h20647261;
+		bios_rom[8'hB7] = 32'h73616C28;
+		bios_rom[8'hB8] = 32'h4B382074;
+		bios_rom[8'hB9] = 32'h6E612042;
+		bios_rom[8'hBA] = 32'h69662064;
+		bios_rom[8'hBB] = 32'h20747372;
+		bios_rom[8'hBC] = 32'h74636573;
+		bios_rom[8'hBD] = 32'h2973726F;
+		bios_rom[8'hBE] = 32'h2E2E2E20;
+		bios_rom[8'hBF] = 32'h4F494200;
+		bios_rom[8'hC0] = 32'h6F6E2053;
+		bios_rom[8'hC1] = 32'h6F662074;
+		bios_rom[8'hC2] = 32'h2C646E75;
+		bios_rom[8'hC3] = 32'h69617720;
+		bios_rom[8'hC4] = 32'h676E6974;
+		bios_rom[8'hC5] = 32'h206E6F20;
+		bios_rom[8'hC6] = 32'h33325352;
+		bios_rom[8'hC7] = 32'h31282032;
+		bios_rom[8'hC8] = 32'h30323531;
+		bios_rom[8'hC9] = 32'h73706230;
+		bios_rom[8'hCA] = 32'h3066202C;
+		bios_rom[8'hCB] = 32'h313A3030;
+		bios_rom[8'hCC] = 32'h20293030;
+		bios_rom[8'hCD] = 32'h002E2E2E;
+		bios_rom[8'hCE] = 32'h00000040;
+		bios_rom[8'hCF] = 32'h00489500;
+		bios_rom[8'hD0] = 32'h87AA0100;
+		bios_rom[8'hD1] = 32'h00000049;
+		bios_rom[8'hD2] = 32'h4069FF00;
+		bios_rom[8'hD3] = 32'hFF000000;
+		bios_rom[8'hD4] = 32'h00000077;
+		bios_rom[8'hD5] = 32'h007AFF00;
+		bios_rom[8'hD6] = 32'hFF000000;
+		bios_rom[8'hD7] = 32'h00000000;
+		bios_rom[8'hD8] = 32'h00000000;
+		bios_rom[8'hD9] = 32'h00000000;
+		bios_rom[8'hDA] = 32'h00000000;
+		bios_rom[8'hDB] = 32'h00000000;
+		bios_rom[8'hDC] = 32'h00000000;
+		bios_rom[8'hDD] = 32'h00000000;
+		bios_rom[8'hDE] = 32'h00000000;
+		bios_rom[8'hDF] = 32'h00000000;
+		bios_rom[8'hE0] = 32'h00000000;
+		bios_rom[8'hE1] = 32'h00000000;
+		bios_rom[8'hE2] = 32'h00000000;
+		bios_rom[8'hE3] = 32'h00000000;
+		bios_rom[8'hE4] = 32'h00000000;
+		bios_rom[8'hE5] = 32'h00000000;
+		bios_rom[8'hE6] = 32'h00000000;
+		bios_rom[8'hE7] = 32'h00000000;
+		bios_rom[8'hE8] = 32'h00000000;
+		bios_rom[8'hE9] = 32'h00000000;
+		bios_rom[8'hEA] = 32'h00000000;
+		bios_rom[8'hEB] = 32'h00000000;
+		bios_rom[8'hEC] = 32'h00000000;
+		bios_rom[8'hED] = 32'h00000000;
+		bios_rom[8'hEE] = 32'h00000000;
+		bios_rom[8'hEF] = 32'h00000000;
+		bios_rom[8'hF0] = 32'h00000000;
+		bios_rom[8'hF1] = 32'h00000000;
+		bios_rom[8'hF2] = 32'h00000000;
+		bios_rom[8'hF3] = 32'h00000000;
+		bios_rom[8'hF4] = 32'h00000000;
+		bios_rom[8'hF5] = 32'h00000000;
+		bios_rom[8'hF6] = 32'h00000000;
+		bios_rom[8'hF7] = 32'h00000000;
+		bios_rom[8'hF8] = 32'h00000000;
+		bios_rom[8'hF9] = 32'h00000000;
+		bios_rom[8'hFA] = 32'h00000000;
+		bios_rom[8'hFB] = 32'h00000000;
+		bios_rom[8'hFC] = 32'h00FC00EA;
+		bios_rom[8'hFD] = 32'h000000F0;
+		bios_rom[8'hFE] = 32'h00000000;
+		bios_rom[8'hFF] = 32'h00000000;
+	end
+	//   位映射：tag = maddr[20:11]，index = maddr[10:6] ⇒ index[4] = maddr[10]、index[3:0] = maddr[9:6]。
+	//   ⚠️ 必须用 maddr[10]（=index[4]）判"index≥16"；写成 maddr[11] 会把"BIOS 代码下方的栈行"
+	//      （tag 也是 0x1FF、index 0-15）也算进 BIOS 区，导致栈行被填成 ROM 数据。
+	wire        bios_fill  = (STATE == 3'b111) && (maddr[`ADDR-1:`LINE+`SETS] == 10'h1FF) && maddr[`LINE+`SETS-1];
+	wire [7:0]  bios_raddr = {maddr[`LINE+`SETS-2:`LINE], word_a};  // index[3:0] + 行内字序号
+	wire [31:0] bios_word  = bios_rom[bios_raddr];
+	wire [15:0] bios_half  = lowaddr[0] ? bios_word[31:16] : bios_word[15:0];
+	wire [31:0] fill_data  = bios_fill ? {bios_half, bios_half} : {ddr_din, ddr_din};
 		
 	cache cache_mem
 	(
@@ -363,7 +643,7 @@ module cache_controller(
 		//   门控只会挡住"迟到的泄漏写"，不会丢任何合法数据。
 		.wren_a(cache_write_data && (STATE == 3'b111)), // input [0 : 0] wea
 		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], word_a}), // input [10 : 0] addra
-		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
+		.data_a(fill_data), // input [31 : 0] dina  // ★ 四十一次：BIOS 区取 ROM，其余取 DDR
 		.q_a(cache_QA), // output [31 : 0] douta
 		.clock_b(clk), // input clkb
 		// ★ 十九次修复（2026-09-20）：flush 期间挂起 CPU 端（端口 B）访问。

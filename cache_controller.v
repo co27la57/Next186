@@ -360,10 +360,12 @@ module cache_controller(
 		.clock_a(ddr_clk), // input clka
 		.enable_a(cache_write_data | cache_read_data), // input ena
 	  	.byteena_a({lowaddr[0], lowaddr[0], ~lowaddr[0], ~lowaddr[0]}),
-		// ★ 三十六次修复：端口 A 的写只属于**填 充相**（STATE 111）。原写法只要 cache_write_data=1 就写，
-		//   而 cache_write_data=crw&&sys_rd_data_valid —— 上一笔事务读 burst 的余波（crw 仍 1）会在
-		//   写回相(STATE 011)把**别的行数据**写进正在被写回的 cache 行 ⇒ 行内容被污染。
-		.wren_a(cache_write_data && (STATE == 3'b111)), // input [0 : 0] wea
+		// ★ 三十六次回退（2026-09-23）：此处曾加 `&& (STATE==3'b111)` 想把端口 A 的写限制在填充相，
+		//   但 ① 它把 clk_cpu 域的 STATE 组合进 ddr_clk 域的写使能（组合 CDC，边沿处可能漏写/多写）；
+		//       ② 一旦有合法的填充写在 STATE 已非 111 的那拍发生，就会被吞掉 ⇒ 半填行 ⇒ CPU 读到垃圾
+		//          （用户实测：加此门控后屏幕由"部分正确"变乱码）。故撤回，回到原行为。
+		//   "余波污染"的正确修法应放在数据源侧（crw/读 burst 的归属），待有读数后再动。
+		.wren_a(cache_write_data), // input [0 : 0] wea
 		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], word_a}), // input [10 : 0] addra
 		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
 		.q_a(cache_QA), // output [31 : 0] douta
@@ -640,6 +642,9 @@ module cache_controller(
 	//         np=0  ⇒ 命令层饿死（ddr_186 的 s_prog_empty 优先于 s_ddr_wr）→ 改写回优先级；
 	//         l0≥16 ⇒ 证实"复位 lowaddr 造成假 fall"。
 	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen  = 1'b0;
+	// ★ 三十六次补充探针：填充数据写（cache_write_data）曾在"非填充相(STATE!=111)"到达 ——
+	//   即"上一笔事务读 burst 的余波"的直接证据（它会把别的行数据写进当前 cache 行）。
+	(* mark_debug = "true", keep = "true" *) reg        dbg_fwleak    = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_seen  = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_st011 = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_wr0_fall  = 1'b0;
@@ -663,6 +668,7 @@ module cache_controller(
 	                    (wb_hiaddr[14:5] == 10'h170 || wb_hiaddr[14:5] == 10'h171);
 	always @(posedge ddr_clk) begin
 		if(wbx_any_vram) dbg_wbx_seen <= 1'b1;
+		if(cache_write_data && (STATE != 3'b111)) dbg_fwleak <= 1'b1;
 
 		// (a) 窗口口径的读脉冲计数（不受 STATE/ddr_wr 提前变化影响）
 		if(wr0_np_win) begin

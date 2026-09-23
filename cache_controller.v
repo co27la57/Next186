@@ -272,13 +272,41 @@ module cache_controller(
 	// ★ 十五次修复：csblk 已在 LRU 更新改用 fit_enc + `>=` 递减后成为死代码，删除。
 	//   （原 csblk = lru[0]|lru[1]|lru[2]|lru[3] 是多 hot fit 时取命中 way 的 LRU 供 `>` 比较用。）
 
+	// ★★ 三十六次修复（2026-09-23）：lowaddr 的**复位与推进都必须只属于"当前事务"**。
+	//   实测（三十五次探针，VRAM row0）：写回被启动（st011=1、ddr_wr=1、hiaddr=0x2E00），但
+	//     ① 该窗口内 cache_read_data 脉冲 = 0（np=0 ⇒ top 的写 burst 根本没跑）；
+	//     ② cache_line_start = 0（写回命令从未被 ack）；
+	//     ③ 却出现了 s_lowaddr5_fall = 1 ⇒ 状态机凭"假 fall"提前退出；而旧逻辑照样清了脏位 ⇒ 数据丢。
+	//   假 fall 的来路：lowaddr 原先被 `cache_write_data || cache_read_data` **无条件**推进，而
+	//   cache_write_data = crw && sys_rd_data_valid —— **上一笔事务读 burst 的余波**（cmd 11 已 ack、
+	//   crw 仍为 1）同样能推进它，于是新事务刚开始就被推进/回绕 ⇒ 交出假 fall。
+	//   修法：① 复位只在**事务起点**（STATE 进入 011/111 的那一拍；IDLE 时收到 cache_line_start 作兜底）；
+	//         ② 推进只认**本事务的数据相**（011→cache_read_data，111→cache_write_data）。
+	//   效果：写回会老老实实等到自己的命令被 ack、burst 跑完（32 脉冲回绕）才退出 ⇒
+	//   "被余波打断 / 被命令饿死"的写回不再被丢弃（row0 化石的直接堵漏）。
+	reg [2:0] st_d = 3'b000;
+	wire txn_start = (STATE != st_d) && (STATE == 3'b011 || STATE == 3'b111);
+	wire lowadv    = (STATE == 3'b011) ? cache_read_data :
+	                 (STATE == 3'b111) ? cache_write_data : 1'b0;
 	always @(posedge ddr_clk) begin
-		// ★ Task #8 修复：每个 cache 行事务(cache_line_start 单周期脉冲)起始强置 lowaddr=0，
-		//   消除上一行残留的非 0 行内偏移污染下一行（半行/0x20 错位根因：复位 miss 的 DDR
-		//   行填充若从错误行内偏移开始写 cache，CPU 会读到垃圾 → 永不到达写显存指令 → isvwr 不触发）。
-		if(cache_line_start) lowaddr <= {(`LINE-2){1'b0}};
-		else if(cache_write_data || cache_read_data) lowaddr <= lowaddr + 1'b1;
+		st_d <= STATE;
+		if(txn_start || (cache_line_start && (STATE == 3'b000)))
+			lowaddr <= {(`LINE-2){1'b0}};
+		else if(lowadv)
+			lowaddr <= lowaddr + 1'b1;
 	end
+
+	// ★ 三十六次保险：写回等待超时（命令长期发不出）——体面退出回到 000/111，**不清脏位**
+	//   （脏位清除非 wb_full 不可，见下方 flush_wb_done）⇒ 数据留待下次重试，仅牺牲一次写回机会。
+	//   正常写回在数十拍内就能拿到命令，2^18 拍（≈5ms@50MHz）纯属保险，防"burst 永不发生"死等。
+	reg [17:0] txn_wait = 18'd0;
+	always @(posedge ddr_clk) begin
+		if(STATE == 3'b011 || STATE == 3'b111) begin
+			if(lowadv) txn_wait <= 18'd0;
+			else       txn_wait <= txn_wait + 1'b1;
+		end else txn_wait <= 18'd0;
+	end
+	wire txn_wait_to = (txn_wait == 18'h3FFFF);
 
 	// ★★ 三十三次修复（2026-09-23）：写回读地址改用"本次写回内独立的字序号计数"，
 	//   与共享的 lowaddr 彻底解耦 —— 修 index0 整行 +1 word（dump: cell0-1=0，cell2 起才
@@ -332,7 +360,10 @@ module cache_controller(
 		.clock_a(ddr_clk), // input clka
 		.enable_a(cache_write_data | cache_read_data), // input ena
 	  	.byteena_a({lowaddr[0], lowaddr[0], ~lowaddr[0], ~lowaddr[0]}),
-		.wren_a(cache_write_data), // input [0 : 0] wea
+		// ★ 三十六次修复：端口 A 的写只属于**填 充相**（STATE 111）。原写法只要 cache_write_data=1 就写，
+		//   而 cache_write_data=crw&&sys_rd_data_valid —— 上一笔事务读 burst 的余波（crw 仍 1）会在
+		//   写回相(STATE 011)把**别的行数据**写进正在被写回的 cache 行 ⇒ 行内容被污染。
+		.wren_a(cache_write_data && (STATE == 3'b111)), // input [0 : 0] wea
 		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], word_a}), // input [10 : 0] addra
 		.data_a({ddr_din, ddr_din}), // input [31 : 0] dina
 		.q_a(cache_QA), // output [31 : 0] douta
@@ -480,7 +511,7 @@ module cache_controller(
 			// ★ 整行修复：必须等 lowaddr 从 31 回绕到 0（s_lowaddr5_fall）才退出。
 			//   原代码在 s_lowaddr5 高电平（lowaddr=16）就退出，此时 AXI burst 还在传后半行，
 			//   状态机若提前进入 111 会更新 hiaddr，导致后半行写错地址（0x20/0x40 偏移）。
-			if(s_lowaddr5_fall) begin
+			if(s_lowaddr5_fall || txn_wait_to) begin   // ★ 三十六次：超时兜底（不清脏位）
 				ddr_wr <= 1'b0;
 				// ★ 十一次修复：flush 写回后清 dirty 的写已挪入 LRU/dirty 块（flush_wb_done 事件），
 				//   避免 cache_dirty 双 always 写端口 → Unsupported RAM template 综合失败。
@@ -492,8 +523,15 @@ module cache_controller(
 		3'b111: begin // read cache from ddr
 			if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE]; // flush 期间不改 hiaddr（写回地址已在 STATE 000 锁定）
 			// ★ 整行修复：同样等整行读填充完成（lowaddr 回绕）再返回 IDLE。
+			// ★ 三十六次：同样加超时兜底。超时说明本行的填充数据根本没到 ⇒ 作废刚装入的 tag
+			//   （写 10'h3FF = bootstrap 保留的"未用"标签），让 CPU 下次访问重新 miss/填充，
+			//   避免"命中一个半填行"读到垃圾指令。
 			if(s_lowaddr5_fall) begin
 				ddr_rd <= 1'b0;
+				STATE <= 3'b000;
+			end else if(txn_wait_to) begin
+				ddr_rd <= 1'b0;
+				cache_addr[vblk][index] <= 10'h3FF;
 				STATE <= 3'b000;
 			end
 		end
@@ -610,9 +648,10 @@ module cache_controller(
 	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_wr0_l0    = 5'd0;
 	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_n     = 6'd0;
 	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_np    = 6'd0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wr0_nw    = 6'd0;  // 窗口内 cache_write_data 脉冲数（>0 即上一笔事务余波证据）
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w0    = 16'd0;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wr0_w1    = 16'd0;
-	reg [5:0] wr0_cnt = 6'd0, wr0_np_cnt = 6'd0;
+	reg [5:0] wr0_cnt = 6'd0, wr0_np_cnt = 6'd0, wr0_nw_cnt = 6'd0;
 	reg       wr0_any = 1'b0, wr0_np_any = 1'b0, wr0_l0_done = 1'b0;
 	wire wr0_act    = (STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h2E00);
 	// np 口径：只看"冻结的写回地址仍是 row0"这一窗口（wb_hiaddr 在 STATE 011 全程冻结、
@@ -630,9 +669,13 @@ module cache_controller(
 			if(cache_read_data) begin
 				wr0_np_cnt <= wr0_np_cnt + 1'b1; wr0_np_any <= 1'b1;
 			end
+			if(cache_write_data) wr0_nw_cnt <= wr0_nw_cnt + 1'b1;
 		end else begin
-			if(wr0_np_any) dbg_wr0_np <= wr0_np_cnt;   // 窗口关闭 → 记录本次
-			wr0_np_cnt <= 6'd0; wr0_np_any <= 1'b0;
+			if(wr0_np_any) begin
+				dbg_wr0_np <= wr0_np_cnt;              // 窗口关闭 → 记录本次
+				dbg_wr0_nw <= wr0_nw_cnt;
+			end
+			wr0_np_cnt <= 6'd0; wr0_np_any <= 1'b0; wr0_nw_cnt <= 6'd0;
 		end
 
 		// (b) STATE 011 窗口内的观测

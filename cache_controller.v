@@ -943,7 +943,7 @@ module cache_controller(
 	//   判读：np=32 ⇒ 提前退出（burst 跑了但 state 机已走）→ 查退出条件/地址是否被 VGA 优先权改坏；
 	//         np=0  ⇒ 命令层饿死（ddr_186 的 s_prog_empty 优先于 s_ddr_wr）→ 改写回优先级；
 	//         l0≥16 ⇒ 证实"复位 lowaddr 造成假 fall"。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen  = 1'b0;
+	reg        dbg_wbx_seen  = 1'b0;
 	// ★ 三十六次补充探针：填充数据写（cache_write_data）曾在"非填充相(STATE!=111)"到达 ——
 	//   即"上一笔事务读 burst 的余波"的直接证据（它会把别的行数据写进当前 cache 行）。
 	reg        dbg_fwleak    = 1'b0;
@@ -1072,19 +1072,19 @@ module cache_controller(
 	//     pbfe_dat 本身不是 0xFC31         → 写通路就没带对数据（或写被丢）；
 	//     s15wb_dat=0x00C8 而 DDR=0x1114   → 写回送出的数据与 DDR 不符 → 写回 way/地址错配。
 	// ============================================================================
-	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_seen = 1'b0;  // CPU 曾向该槽写入
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_pbfe_dat  = 16'd0;  // 写入的数据（期待 0xFC31）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_hit  = 1'b0;   // 该次写命中
-	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_miss = 1'b0;   // 该次写缺失
-	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_pbfe_way  = 2'd0;   // 该次写使用的 way（=blk）
+	reg        dbg_pbfe_seen = 1'b0;  // CPU 曾向该槽写入
+	reg [15:0] dbg_pbfe_dat  = 16'd0;  // 写入的数据（期待 0xFC31）
+	reg        dbg_pbfe_hit  = 1'b0;   // 该次写命中
+	reg        dbg_pbfe_miss = 1'b0;   // 该次写缺失
+	reg [1:0]  dbg_pbfe_way  = 2'd0;   // 该次写使用的 way（=blk）
 	reg        dbg_rbfe_seen = 1'b0;   // CPU 曾从该槽读
 	reg [15:0] dbg_rbfe_dat  = 16'd0;  // 读回的数据（期待 0xFC31）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_s15wb_seen = 1'b0;  // index15 行曾被写回
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_s15wb_dat  = 16'd0; // 写回该槽送出的数据
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_ra_n   = 8'd0; // 写入该槽的"0xFCxx"值次数（预期 3）
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_rra_n  = 8'd0; // 从该槽读回的"0xFCxx"值次数（预期 3；=2 ⇒ 崩点那次读失败）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_rbad_hit  = 1'b0; // 坏读且命中（行内容本身错）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_rbad_miss = 1'b0; // 坏读且缺失（填充数据错）
+	reg        dbg_s15wb_seen = 1'b0;  // index15 行曾被写回
+	reg [15:0] dbg_s15wb_dat  = 16'd0; // 写回该槽送出的数据
+	reg [7:0]  dbg_ra_n   = 8'd0; // 写入该槽的"0xFCxx"值次数（预期 3）
+	reg [7:0]  dbg_rra_n  = 8'd0; // 从该槽读回的"0xFCxx"值次数（预期 3；=2 ⇒ 崩点那次读失败）
+	reg        dbg_rbad_hit  = 1'b0; // 坏读且命中（行内容本身错）
+	reg        dbg_rbad_miss = 1'b0; // 坏读且缺失（填充数据错）
 	//   ★ 四十四次修订：原 last-wins 的两个 16-bit 数据探针**被跑飞后的垃圾访问污染**
 	//     （实测 pbfe_dat=0xF000 = 垃圾 push es；rbfe_dat=0x0000 = 垃圾 pop），故改为：
 	//       · pbfe_dat 改 **first-wins**（首次写入值，应为第一条 call 的返回址 0xFC26）；

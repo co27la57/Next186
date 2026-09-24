@@ -329,26 +329,26 @@ module top_zynq7010 (
     // ==========================================
     // ILA 探针
     // ==========================================
-    (* mark_debug = "true" *) reg [3:0]  dbg_test_state;
-    (* mark_debug = "true" *) reg [31:0] dbg_awaddr;
-    (* mark_debug = "true" *) reg        dbg_awvalid;
-    (* mark_debug = "true" *) reg        dbg_awready;
-    (* mark_debug = "true" *) reg [31:0] dbg_wdata;
-    (* mark_debug = "true" *) reg        dbg_wvalid;
-    (* mark_debug = "true" *) reg        dbg_wready;
-    (* mark_debug = "true" *) reg        dbg_bvalid;
-    (* mark_debug = "true" *) reg [31:0] dbg_araddr;
-    (* mark_debug = "true" *) reg        dbg_arvalid;
-    (* mark_debug = "true" *) reg        dbg_arready;
-    (* mark_debug = "true" *) reg [31:0] dbg_rdata;
-    (* mark_debug = "true" *) reg        dbg_rvalid;
-    (* mark_debug = "true" *) reg        dbg_rready;
-    (* mark_debug = "true" *) reg        dbg_rlast;
-    (* mark_debug = "true" *) reg [31:0] dbg_test_rdata_fail;
-    (* mark_debug = "true" *) reg        dbg_test_pass;
-    (* mark_debug = "true" *) reg        dbg_test_fail;
-    (* mark_debug = "true" *) reg [4:0]  dbg_r_beat_cnt;
-    (* mark_debug = "true" *) reg [4:0]  dbg_w_beat_cnt;
+    reg [3:0]  dbg_test_state;
+    reg [31:0] dbg_awaddr;
+    reg        dbg_awvalid;
+    reg        dbg_awready;
+    reg [31:0] dbg_wdata;
+    reg        dbg_wvalid;
+    reg        dbg_wready;
+    reg        dbg_bvalid;
+    reg [31:0] dbg_araddr;
+    reg        dbg_arvalid;
+    reg        dbg_arready;
+    reg [31:0] dbg_rdata;
+    reg        dbg_rvalid;
+    reg        dbg_rready;
+    reg        dbg_rlast;
+    reg [31:0] dbg_test_rdata_fail;
+    reg        dbg_test_pass;
+    reg        dbg_test_fail;
+    reg [4:0]  dbg_r_beat_cnt;
+    reg [4:0]  dbg_w_beat_cnt;
 
     always @(posedge m_axi_aclk) begin
         dbg_test_state       <= test_state;

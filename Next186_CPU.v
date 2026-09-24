@@ -1853,7 +1853,7 @@ reg [20:0] dbg_IADDR;
 //
 //// 内存/端口请求
 (* mark_debug = "true", keep = "true" *) reg        dbg_MREQ;
-(* mark_debug = "true", keep = "true" *) reg        dbg_IORQ;
+reg        dbg_IORQ;
 
     // ★ CPU 内部诊断探针：reg+always 采样（非 top 模块禁止用 wire，否则被布线优化掉）
     // ★★ 四十一次（2026-09-24）：CPU 跑飞（逃逸）定位探针（粘滞）。
@@ -1876,12 +1876,12 @@ reg [20:0] dbg_IADDR;
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
     (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_bx   = 16'd0; // 崩点时的 BX
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
-    (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bfe_cnt   = 8'd0;  // 对 0xFFBFE 的数据读次数（预期 3）
-    (* mark_debug = "true", keep = "true" *) reg        dbg_stale_popret = 1'b0; // pop(0xFFBFC)→ret(0xFFBFE) 读到同一数据
+    reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
+    reg [15:0] dbg_wild_bx   = 16'd0; // 崩点时的 BX
+    reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
+    reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
+    reg [7:0]  dbg_bfe_cnt   = 8'd0;  // 对 0xFFBFE 的数据读次数（预期 3）
+    reg        dbg_stale_popret = 1'b0; // pop(0xFFBFC)→ret(0xFFBFE) 读到同一数据
     reg [15:0] dbg_din_h1 = 16'd0;
     reg [15:0] dbg_din_h2 = 16'd0;
     reg [20:0] prev_rd_adr = 21'd0;

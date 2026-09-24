@@ -98,7 +98,7 @@ module top_zynq7010 (
     wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
     wire [15:0] ram_rdata;
     wire        ram_rd_valid;
-    (* mark_debug = "true", keep = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
+    wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
     wire        SDLED;
 
     reg [25:0] blink_cnt = 0;
@@ -190,7 +190,7 @@ module top_zynq7010 (
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
     reg        rlast_latched;
-    (* mark_debug = "true", keep = "true" *) reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
+    reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
     reg [31:0] timeout_cnt = 32'd0;
 
     localparam TIMEOUT_MAX = 32'd500_000;

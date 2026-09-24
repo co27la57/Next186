@@ -856,9 +856,9 @@ module system
 	//   （板端此前手加的 dbg_auto_flush_r/dbg_flush_r/dbg_vblnk_r 采样时钟不明，波形出现
 	//   flush 脉冲 2 拍、脉冲期间 auto_flush=4 而非 6、vblnk 无脉冲等自相矛盾读数——
 	//   按 RTL，flush=(auto_flush==3'b110) 每个 vblnk 下降沿只能持续 1 个 clk_cpu 周期。）
-	(* mark_debug = "true", keep = "true" *) reg [2:0] dbg_sys_auto_flush_r;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_sys_vblnk_r;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_sys_flush_r;
+	reg [2:0] dbg_sys_auto_flush_r;
+	reg       dbg_sys_vblnk_r;
+	reg       dbg_sys_flush_r;
 	always @(posedge clk_cpu) begin
 		dbg_sys_auto_flush_r <= auto_flush;
 		dbg_sys_vblnk_r      <= vblnk;
@@ -906,7 +906,7 @@ module system
     assign ram_wdata = cntrl0_user_input_data; 
     assign sys_DOUT  = ram_rdata;             
     reg [14:0] dbg_cache_hiaddr;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_cache_ddr_wr;
+    reg        dbg_cache_ddr_wr;
     reg [23:0] dbg_sdraddr;
     // ★ 十五次修复探针精简（2026-09-19）：移除 dbg_fifo_dout / dbg_cpu_halt / dbg_ram_wdata_lo /
     //   dbg_fifo_words_r。dbg_cpu_halt 与 Next186_CPU.v 的 dbg_HALT 完全重复；fifo / 写数据通路

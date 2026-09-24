@@ -1044,21 +1044,36 @@ module cache_controller(
 	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_hit  = 1'b0;   // 该次写命中
 	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_miss = 1'b0;   // 该次写缺失
 	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_pbfe_way  = 2'd0;   // 该次写使用的 way（=blk）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_rbfe_seen = 1'b0;   // CPU 曾从该槽读
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_rbfe_dat  = 16'd0;  // 读回的数据（期待 0xFC31）
+	reg        dbg_rbfe_seen = 1'b0;   // CPU 曾从该槽读
+	reg [15:0] dbg_rbfe_dat  = 16'd0;  // 读回的数据（期待 0xFC31）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_s15wb_seen = 1'b0;  // index15 行曾被写回
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_s15wb_dat  = 16'd0; // 写回该槽送出的数据
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_ra_n   = 8'd0; // 写入该槽的"0xFCxx"值次数（预期 3）
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_rra_n  = 8'd0; // 从该槽读回的"0xFCxx"值次数（预期 3；=2 ⇒ 崩点那次读失败）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_rbad_hit  = 1'b0; // 坏读且命中（行内容本身错）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_rbad_miss = 1'b0; // 坏读且缺失（填充数据错）
+	//   ★ 四十四次修订：原 last-wins 的两个 16-bit 数据探针**被跑飞后的垃圾访问污染**
+	//     （实测 pbfe_dat=0xF000 = 垃圾 push es；rbfe_dat=0x0000 = 垃圾 pop），故改为：
+	//       · pbfe_dat 改 **first-wins**（首次写入值，应为第一条 call 的返回址 0xFC26）；
+	//       · 新增 **计数型**探针（对 0xFCxx 这类"返回地址样式"的值计数）+ 坏读的 hit/miss 分流。
+	//     读数据比地址晚 1 拍（BRAM q_b 寄存输出，BIU 也是按 1 拍延迟消费）⇒ 用 rd_sa 延迟一拍照 dout。
 	wire bfe_addr = (maddr == 21'h0FFBFE);
+	wire wr_bfe   = mmreq && (|mwmask)  && bfe_addr;
+	wire rd_bfe   = mmreq && !(|mwmask) && bfe_addr;
+	wire wr_fc    = wr_bfe && (mdin[31:16] >= 16'hFC00);   // 写入"返回地址样式"
+	wire rd_fc    = rd_bfe && (dout[31:16] >= 16'hFC00);   // 读回"返回地址样式"
+	wire rd_bad   = rd_bfe && (dout[31:16] <  16'hFC00);   // 坏读
 	always @(posedge clk) begin
-		if(mmreq && (|mwmask) && bfe_addr) begin
+		if(wr_bfe) begin
 			dbg_pbfe_seen <= 1'b1;
-			dbg_pbfe_dat  <= mdin[31:16];   // 该槽是高半字（ADDR[1:0]=2 ⇒ 落在 mdin[31:16]）
+			if(!dbg_pbfe_seen) dbg_pbfe_dat <= mdin[31:16]; // first-wins
 			dbg_pbfe_way  <= blk;
 			if(hit) dbg_pbfe_hit <= 1'b1; else dbg_pbfe_miss <= 1'b1;
 		end
-		if(mmreq && !(|mwmask) && bfe_addr) begin
-			dbg_rbfe_seen <= 1'b1;
-			dbg_rbfe_dat  <= dout[31:16];   // BIU 对 ADDR[1:0]=2 取 RAM_DIN[31:16]
+		if(wr_fc && dbg_ra_n  != 8'hFF) dbg_ra_n  <= dbg_ra_n  + 1'b1;
+		if(rd_fc && dbg_rra_n != 8'hFF) dbg_rra_n <= dbg_rra_n + 1'b1;
+		if(rd_bad) begin
+			if(hit) dbg_rbad_hit <= 1'b1; else dbg_rbad_miss <= 1'b1;
 		end
 	end
 	always @(posedge ddr_clk) begin

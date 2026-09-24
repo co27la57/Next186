@@ -95,7 +95,7 @@ module top_zynq7010 (
     wire [1:0]  ram_cmd;
     reg  [1:0]  ram_cmd_ack;
     wire [23:0] ram_addr;
-    (* mark_debug = "true", keep = "true" *) wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
+    wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
     wire [15:0] ram_rdata;
     wire        ram_rd_valid;
     (* mark_debug = "true", keep = "true" *) wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）

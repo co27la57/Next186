@@ -1878,6 +1878,14 @@ reg [20:0] dbg_IADDR;
     (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_bx   = 16'd0; // 崩点时的 BX
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
+    (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bfe_cnt   = 8'd0;  // 对 0xFFBFE 的数据读次数（预期 3）
+    (* mark_debug = "true", keep = "true" *) reg        dbg_stale_popret = 1'b0; // pop(0xFFBFC)→ret(0xFFBFE) 读到同一数据
+    reg [15:0] dbg_din_h1 = 16'd0;
+    reg [15:0] dbg_din_h2 = 16'd0;
+    reg [20:0] prev_rd_adr = 21'd0;
+    reg [15:0] prev_rd_dat = 16'd0;
     reg [15:0] dbg_ip_d  = 16'd0;
     reg [15:0] dbg_okip  = 16'hfc00;
     reg [7:0]  dbg_okop  = 8'd0;
@@ -1901,8 +1909,21 @@ reg [20:0] dbg_IADDR;
             dbg_wild_ip   <= IP;
             dbg_wild_pre  <= dbg_okip;
             dbg_wild_op   <= dbg_okop;
-            dbg_wild_sp   <= SP;   // ★ 四十三次：崩点时的 SP（正常应 = 0xFC00，即从 0xFBFE 弹出）
-            dbg_wild_bx   <= BX;   // ★ 四十三次：崩点时的 BX（若 =0x00C8 ⇒ 弹出的是 push bx 那个槽）
+            dbg_wild_sp   <= SP;   // 崩点时的 SP（正常应 = 0xFC00，即从 0xFBFE 弹出）
+            dbg_wild_bx   <= BX;   // 崩点时的 BX
+            dbg_wild_d1   <= dbg_din_h1;  // ★ 四十四次：崩点前"最后两次"CPU 收到的读数据
+            dbg_wild_d2   <= dbg_din_h2;  //   若与 wild_ip(0x00C8) 相同 ⇒ 复用了上一次读的数据（读通路滞后）
+        end
+        // ★★ 四十四次：栈返回槽(maddr 0xFFBFE)的数据读观测 —— 定性"读通路"
+        dbg_din_h1 <= DIN;
+        dbg_din_h2 <= dbg_din_h1;
+        if(MREQ && !WR && !IFETCH) begin   // 只认"数据读"（排除取指预取，否则 pop/ret 之间会插入 fetch 污染历史）
+            if((ADDR == 21'h0FFBFE) && (dbg_bfe_cnt != 8'hFF)) dbg_bfe_cnt <= dbg_bfe_cnt + 1'b1;
+            // pop bx(0xFFBFC) 后紧接着 ret(0xFFBFE) 两次读到同一数据 ⇒ 读通路滞后/读低 2 字节
+            if((ADDR == 21'h0FFBFE) && (prev_rd_adr == 21'h0FFBFC) && (DIN == prev_rd_dat))
+                dbg_stale_popret <= 1'b1;
+            prev_rd_adr <= ADDR;
+            prev_rd_dat <= DIN;
         end
     end
     always @(posedge CLK) begin

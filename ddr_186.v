@@ -291,6 +291,35 @@ module system
 		if(SDI == 8'h01) dbg_sd_rx01 <= 1'b1;
 		if(SDI == 8'hFE) dbg_sd_rxfe <= 1'b1;
 	end
+	// ★ 四十八次探针：**字节对齐**捕获，直接看"卡回了什么"。
+	//   背景：四十七次读数 rxnz=1 / rx01=1 / rxfe=0 ⇒ 卡确实应答了，
+	//   但从未出现数据令牌 0xFE ⇒ 失败在 CMD0 之后、CMD9 之前。
+	//   rx01 是"任意时刻 SDI==0x01"，不对齐到字节边界，说服力不足 ⇒ 本次改成字节对齐。
+	//   字节边界 = 每 8 个 SD_CK 上升沿（每个 8-bit 写 = 1 个收到的字节）。
+	//   判读：dbg_sd_1st = 卡的第一条响应（CMD0 的 R1，期望 0x01；若为 0x05 则 CMD0 被拒）；
+	//         dbg_sd_aa  = 1 ⇒ 字节对齐地出现过 0xAA ⇒ **CMD8 的 R7 校验回显成功**（卡是 v2）；
+	//         dbg_sd_byte = 最后一个完成的字节（看总线当前状态）。
+	(* mark_debug = "true", keep = "true" *) reg [2:0] dbg_sd_sht  = 3'd0;   // 移位计数 mod 8
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_sd_byte = 8'hFF;  // 最后完成的字节（字节对齐）
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_sd_1st  = 8'hFF;  // 首个非 0xFF 字节（卡的第一条响应）
+	(* mark_debug = "true", keep = "true" *) reg       dbg_sd_aa   = 1'b0;   // 字节对齐值曾 == 0xAA（CMD8 R7 回显）
+	reg dbg_sd_ck_e = 1'b0;
+	reg dbg_sd_1st_seen = 1'b0;
+	reg dbg_sd_stb = 1'b0;
+	always @(posedge clk_cpu) begin
+		dbg_sd_ck_e <= SD_CK;
+		if (SD_CK && !dbg_sd_ck_e) dbg_sd_sht <= dbg_sd_sht + 3'd1;
+		// 第 8 次移位的下一拍，SDI 即为完整的一个字节
+		dbg_sd_stb <= (SD_CK && !dbg_sd_ck_e) && (dbg_sd_sht == 3'd7);
+		// 仅在片选拉低期统计（初始化的 80 拍在 CS 高时，不计）
+		if (dbg_sd_stb && !dbg_sd_cs) begin
+			dbg_sd_byte <= SDI;
+			if (SDI == 8'hAA) dbg_sd_aa <= 1'b1;
+			if (!dbg_sd_1st_seen && (SDI != 8'hFF)) begin
+				dbg_sd_1st <= SDI; dbg_sd_1st_seen <= 1'b1;
+			end
+		end
+	end
 	assign SD_DI = CPU_DOUT[7];
 	
 // GPIO interface

@@ -1843,7 +1843,7 @@ endfunction
 //// 指令指针
 (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_CS;
 (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_IP;
-(* mark_debug = "true", keep = "true" *) reg [20:0] dbg_IADDR;
+reg [20:0] dbg_IADDR;
 //
 //// 复位/中断状态
 //(* mark_debug = "true", keep = "true" *) wire        dbg_SRST      = SRST;
@@ -1869,13 +1869,15 @@ endfunction
     //     （CS=0xF000 且 IP<0xFC00）= 崩点本身；并附"最后一次在代码窗内的 IP + 当时译码的 opcode"
     //     = 肇事指令。开头用 okcnt>=32 做门限，避免上电瞬间的瞬态误触发。
     (* mark_debug = "true", keep = "true" *) reg        dbg_boot_seen = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_esc_seen  = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_ip    = 16'd0;
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_cs    = 16'd0;
+    reg        dbg_esc_seen  = 1'b0;
+    reg [15:0] dbg_esc_ip    = 16'd0;
+    reg [15:0] dbg_esc_cs    = 16'd0;
     (* mark_debug = "true", keep = "true" *) reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
     (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_bx   = 16'd0; // 崩点时的 BX
     reg [15:0] dbg_ip_d  = 16'd0;
     reg [15:0] dbg_okip  = 16'hfc00;
     reg [7:0]  dbg_okop  = 8'd0;
@@ -1899,6 +1901,8 @@ endfunction
             dbg_wild_ip   <= IP;
             dbg_wild_pre  <= dbg_okip;
             dbg_wild_op   <= dbg_okop;
+            dbg_wild_sp   <= SP;   // ★ 四十三次：崩点时的 SP（正常应 = 0xFC00，即从 0xFBFE 弹出）
+            dbg_wild_bx   <= BX;   // ★ 四十三次：崩点时的 BX（若 =0x00C8 ⇒ 弹出的是 push bx 那个槽）
         end
     end
     always @(posedge CLK) begin

@@ -123,8 +123,8 @@ module top_zynq7010 (
         end
     end
 
-    (* mark_debug = "true", keep = "true" *) wire init_done = ~auto_rst_reg;
-    (* mark_debug = "true", keep = "true" *) reg  init_fail = 1'b0;
+    wire init_done = ~auto_rst_reg;
+    reg  init_fail = 1'b0;
 
     // ==========================================
     // 主 FSM 输出信号
@@ -132,7 +132,7 @@ module top_zynq7010 (
     reg [31:0] main_awaddr;
     reg [7:0]  main_awlen;
     reg        main_awvalid;
-    (* mark_debug = "true", keep = "true" *) reg [31:0] main_wdata;    // ★ 实验探针：拼出的 32-bit 写数据
+    reg [31:0] main_wdata;    // ★ 实验探针：拼出的 32-bit 写数据
     reg        main_wlast;
     reg        main_wvalid;
     reg        main_bready;

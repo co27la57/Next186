@@ -147,16 +147,16 @@ module cache_controller(
 	//   判读：isvwr_sticky=0 → CPU 从未写 VRAM（问题不在 cache，在 CPU/BIOS 流程）；
 	//         isvwr_sticky=1 且 vram_wr_sticky=0 → VRAM 脏了却从不写回（真 cache bug）；
 	//         两者都=1 → VRAM 写回已发生，转查 VGA 读地址。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_isvwr_sticky_r = 1'b0;   // CPU 曾写 VRAM（粘滞，显式上电清零防误判）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_vram_wr_sticky_r = 1'b0; // VRAM 行曾写回 DDR（粘滞，显式上电清零防误判）
+	reg        dbg_ctl_isvwr_sticky_r = 1'b0;   // CPU 曾写 VRAM（粘滞，显式上电清零防误判）
+	reg        dbg_ctl_vram_wr_sticky_r = 1'b0; // VRAM 行曾写回 DDR（粘滞，显式上电清零防误判）
 	// ★ 十六次续：判别"isvwr=1 但 vram_wr=0"的三种真因（纯观测粘滞标志）
 	//   A: VRAM 写全是 miss（永不 hit）→ 填充不置 dirty，VRAM 永不脏
 	//   B: VRAM 曾 hit（dirty 已置 1），但 flush 扫描时 VRAM 行已不在 cache / 已不脏
 	//   C: flush 扫到 VRAM 行且判为脏，却没产生带 VRAM tag 的写回 → 写回地址/way 错配
-	(* mark_debug = "true", keep = "true" *) reg        dbg_vram_wr_hit_sticky = 1'b0;      // VRAM 写命中（命中即 dirty 被置 1）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_vram_wr_miss_sticky = 1'b0;     // VRAM 写缺失（走填充，dirty 不置 1）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_flush_vram_seen_sticky = 1'b0;  // flush 扫描时遇到过 VRAM 行（tag 0x170/0x171，不论脏否）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_flush_vram_dirty_sticky = 1'b0; // flush 扫描时遇到过 VRAM 行且判为脏
+	reg        dbg_vram_wr_hit_sticky = 1'b0;      // VRAM 写命中（命中即 dirty 被置 1）
+	reg        dbg_vram_wr_miss_sticky = 1'b0;     // VRAM 写缺失（走填充，dirty 不置 1）
+	reg        dbg_flush_vram_seen_sticky = 1'b0;  // flush 扫描时遇到过 VRAM 行（tag 0x170/0x171，不论脏否）
+	reg        dbg_flush_vram_dirty_sticky = 1'b0; // flush 扫描时遇到过 VRAM 行且判为脏
 	// ★ 十七次：确认"flush 窗口里是否真有待处理 CPU 请求"（修复前会被静默丢弃的那个前提）
 	reg        dbg_miss_in_flush_sticky = 1'b0;
 
@@ -870,11 +870,11 @@ module cache_controller(
 	//     ① =1 而 ③bit0=0 → tag 装进去了但从不逐出/flush 到 → 查 victim/脏位；
 	//     ② =0 → CPU 对 index0 的写从未置脏（写全 miss 被丢）→ 查写缺失路径。
 	// ============================================================================
-	(* mark_debug = "true", keep = "true" *) reg        dbg_i0_has170     = 1'b0; // index0 任一 way 曾持有 tag 0x170/0x171
-	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbg_i0_dirty_or   = 4'd0; // OR 累加 index0 的 4-way dirty
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_vram_wb_idx_or = 5'd0;// OR 累加所有 VRAM 写回的 index（bit0=index0）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_fl_i0_seen    = 1'b0; // flush 扫描(st0&&r_flush)曾到 index0
-	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_fl_i0_tag     = 10'd0;// 记录 flush 扫 index0 时该 way 的 tag
+	reg        dbg_i0_has170     = 1'b0; // index0 任一 way 曾持有 tag 0x170/0x171
+	reg [3:0]  dbg_i0_dirty_or   = 4'd0; // OR 累加 index0 的 4-way dirty
+	reg [4:0]  dbg_vram_wb_idx_or = 5'd0;// OR 累加所有 VRAM 写回的 index（bit0=index0）
+	reg        dbg_fl_i0_seen    = 1'b0; // flush 扫描(st0&&r_flush)曾到 index0
+	reg [9:0]  dbg_fl_i0_tag     = 10'd0;// 记录 flush 扫 index0 时该 way 的 tag
 	always @(posedge clk) begin
 		if (cache_addr[0][0]==10'h170 || cache_addr[1][0]==10'h170 ||
 		    cache_addr[2][0]==10'h170 || cache_addr[3][0]==10'h170 ||
@@ -913,7 +913,7 @@ module cache_controller(
 	(* mark_debug = "true", keep = "true" *) reg        dbg_wbx_seen  = 1'b0;
 	// ★ 三十六次补充探针：填充数据写（cache_write_data）曾在"非填充相(STATE!=111)"到达 ——
 	//   即"上一笔事务读 burst 的余波"的直接证据（它会把别的行数据写进当前 cache 行）。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_fwleak    = 1'b0;
+	reg        dbg_fwleak    = 1'b0;
 	// ★ 三十八次诊断（2026-09-23）：把"空白区零星色块"钉到具体机制上。
 	//   事实：清屏(rep stosw 写 0)后 cells 64/65/96/130/160 = 0x0010/0x0008/0x1000/0x0080/0x1001，
 	//         且 4/5 个都落在各自 cache 行的**首字**（word0），idx2/3/5 的 off0 + idx4 的 off4。
@@ -1023,6 +1023,50 @@ module cache_controller(
 		if(bios_fill) dbg_biosfill_seen <= 1'b1;
 		if((STATE == 3'b011) && ddr_wr && (wb_hiaddr[14:5] == 10'h1FF) && !wb_hiaddr[4])
 			dbg_stk_wb_seen <= 1'b1;
+	end
+
+	// ============================================================================
+	// ★★ 四十三次诊断（2026-09-24）：对"栈返回槽"三向对账。
+	//   槽 = maddr 0xFFBFE（SS:SP=0xF000:0xFBFE）→ tag 0x1FF / index 15 / 行内 offset 0x3E
+	//        → 物理 0x0815FBFE（cache 行 = index15，hiaddr = {0x1FF,15} = 15'h3FEF）。
+	//   背景（四十二次读数）：wild_pre=0xFD1B(=映像 0x11B 的 ret)、wild_op=0xC3(RET)、
+	//     wild_ip=0x00C8 —— ret 弹出的既不是正确返回址 0xFC31，也不是 DDR 噪声 0x1114，
+	//     而是确定性重复出现的 0x00C8（与上一次 esc 抓到的 CS 同值）。
+	//   本组回答：① CPU 到底有没有把 0xFC31 写进这个槽（写通路）；② 命中/缺失 + 用哪个 way；
+	//             ③ CPU 从该槽读回什么；④ 写回时该槽送出什么。
+	//   判读：
+	//     pbfe_dat=0xFC31 而 rbfe_dat=0x00C8 → 写进去了但读错 → 读通路/way 选择问题；
+	//     pbfe_dat 本身不是 0xFC31         → 写通路就没带对数据（或写被丢）；
+	//     s15wb_dat=0x00C8 而 DDR=0x1114   → 写回送出的数据与 DDR 不符 → 写回 way/地址错配。
+	// ============================================================================
+	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_seen = 1'b0;  // CPU 曾向该槽写入
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_pbfe_dat  = 16'd0;  // 写入的数据（期待 0xFC31）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_hit  = 1'b0;   // 该次写命中
+	(* mark_debug = "true", keep = "true" *) reg        dbg_pbfe_miss = 1'b0;   // 该次写缺失
+	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_pbfe_way  = 2'd0;   // 该次写使用的 way（=blk）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_rbfe_seen = 1'b0;   // CPU 曾从该槽读
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_rbfe_dat  = 16'd0;  // 读回的数据（期待 0xFC31）
+	(* mark_debug = "true", keep = "true" *) reg        dbg_s15wb_seen = 1'b0;  // index15 行曾被写回
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_s15wb_dat  = 16'd0; // 写回该槽送出的数据
+	wire bfe_addr = (maddr == 21'h0FFBFE);
+	always @(posedge clk) begin
+		if(mmreq && (|mwmask) && bfe_addr) begin
+			dbg_pbfe_seen <= 1'b1;
+			dbg_pbfe_dat  <= mdin[31:16];   // 该槽是高半字（ADDR[1:0]=2 ⇒ 落在 mdin[31:16]）
+			dbg_pbfe_way  <= blk;
+			if(hit) dbg_pbfe_hit <= 1'b1; else dbg_pbfe_miss <= 1'b1;
+		end
+		if(mmreq && !(|mwmask) && bfe_addr) begin
+			dbg_rbfe_seen <= 1'b1;
+			dbg_rbfe_dat  <= dout[31:16];   // BIU 对 ADDR[1:0]=2 取 RAM_DIN[31:16]
+		end
+	end
+	always @(posedge ddr_clk) begin
+		if((STATE == 3'b011) && ddr_wr && (wb_hiaddr == 15'h3FEF) &&
+		   (wb_pcnt[5:1] == 4'd15) && cache_read_data) begin
+			dbg_s15wb_seen <= 1'b1;
+			dbg_s15wb_dat  <= cache_QA[31:16]; // word15 的高半字 = 行内 offset 0x3E
+		end
 	end
 
 endmodule

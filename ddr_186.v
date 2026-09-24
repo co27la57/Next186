@@ -181,7 +181,7 @@ module system
 	// ★ 三十四次诊断（第三十四次诊断）：VRAM row0 写回时锁存 memmap_mux
 	//   物理地址 = 0x0800_0000 + 2*sdraddr，上段由 memmap_mux 决定
 	//   期望 4'h6（map[11]=6）⇒ sdraddr=0x34000 → 物理 0x0806_8000
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_wr0_memmap = 4'd0;
+	reg [3:0] dbg_wr0_memmap = 4'd0;
 	reg dbg_wr0_mm_l = 1'b0;
 	always @(posedge clk_sdr) begin
 		if(!s_ddr_wr) dbg_wr0_mm_l <= 1'b0;

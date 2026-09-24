@@ -1861,11 +1861,25 @@ endfunction
     //         若之后 CS 变成别的值（逃逸）则 dbg_esc_seen 置 1，
     //         dbg_esc_ip = **逃逸前一拍的 IP**（即崩点指令）、dbg_esc_cs = 逃逸后的 CS。
     //   判读：esc_cs=0x0000 ⇒ 掉到段 0（全 0 指令流）= 卡死；esc_cs=0xFFFF ⇒ 走到 SD 加载 stub 的 ljmp（另一条路）。
+    //   ★ 上一轮读数（esc）：boot_seen=1、esc_seen=1、esc_ip=0x12F6、esc_cs=0x00C8
+    //     ⇒ 逃逸发生在 CS=0xF000 段内、IP=0x12F6 —— **在 BIOS 代码窗 0xFC00-0xFFFF 之外**。
+    //       即：CPU 早已脱离 BIOS 代码，在段内空内存逐 +2 走，直到 0x12F6 处碰到非零垃圾字节，
+    //       执行出一条改 CS 的指令（pop cs / retf / iret / ljmp）才被 esc 抓到。esc 只是 aftermath。
+    //   ★★ 四十二次诊断（2026-09-24）：直接抓**第一次离开 BIOS 代码窗**的那一拍
+    //     （CS=0xF000 且 IP<0xFC00）= 崩点本身；并附"最后一次在代码窗内的 IP + 当时译码的 opcode"
+    //     = 肇事指令。开头用 okcnt>=32 做门限，避免上电瞬间的瞬态误触发。
     (* mark_debug = "true", keep = "true" *) reg        dbg_boot_seen = 1'b0;
     (* mark_debug = "true", keep = "true" *) reg        dbg_esc_seen  = 1'b0;
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_ip    = 16'd0;
     (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_cs    = 16'd0;
-    reg [15:0] dbg_ip_d = 16'd0;
+    (* mark_debug = "true", keep = "true" *) reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
+    (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
+    reg [15:0] dbg_ip_d  = 16'd0;
+    reg [15:0] dbg_okip  = 16'hfc00;
+    reg [7:0]  dbg_okop  = 8'd0;
+    reg [7:0]  dbg_okcnt = 8'd0;
     always @(posedge CLK) begin
         dbg_ip_d <= IP;
         if(CS == 16'hf000) dbg_boot_seen <= 1'b1;
@@ -1873,6 +1887,18 @@ endfunction
             dbg_esc_seen <= 1'b1;
             dbg_esc_ip   <= dbg_ip_d;
             dbg_esc_cs   <= CS;
+        end
+        if(CS == 16'hf000 && IP >= 16'hfc00) begin
+            dbg_okip  <= IP;
+            dbg_okop  <= FETCH[0];
+            if(dbg_okcnt != 8'hff) dbg_okcnt <= dbg_okcnt + 1'b1;
+        end
+        if(dbg_boot_seen && !dbg_wild_seen && (dbg_okcnt >= 8'd32) &&
+           (CS == 16'hf000) && (IP < 16'hfc00)) begin
+            dbg_wild_seen <= 1'b1;
+            dbg_wild_ip   <= IP;
+            dbg_wild_pre  <= dbg_okip;
+            dbg_wild_op   <= dbg_okop;
         end
     end
     always @(posedge CLK) begin

@@ -1011,6 +1011,20 @@ module cache_controller(
 		end
 	end
 	
+	// ★★ 四十二次诊断（2026-09-24，纯观测、不影响逻辑）：
+	//   ① dbg_biosfill_seen：BIOS 区（tag 0x1FF 且 index≥16）是否真的进入过填充相
+	//      —— 验证四十一次加的 ROM 回填路径**到底有没有被用到**；若恒 0，说明那次修复是 no-op。
+	//   ② dbg_stk_wb_seen：tag 0x1FF 且 index<16（= BIOS 映像正下方的 1KB 栈区）是否被写回过。
+	//      若栈区返回地址在逐出时丢失（脏位/写回问题）→ 后续 ret 弹出 0 → 跳 IP=0x0000 →
+	//      在段内空内存里逐 +2 跑飞（与本轮新读数吻合）。此位是判据之一。
+	(* mark_debug = "true", keep = "true" *) reg dbg_biosfill_seen = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg dbg_stk_wb_seen   = 1'b0;
+	always @(posedge ddr_clk) begin
+		if(bios_fill) dbg_biosfill_seen <= 1'b1;
+		if((STATE == 3'b011) && ddr_wr && (wb_hiaddr[14:5] == 10'h1FF) && !wb_hiaddr[4])
+			dbg_stk_wb_seen <= 1'b1;
+	end
+
 endmodule
 
 module seg_map(

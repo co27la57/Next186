@@ -276,10 +276,20 @@ module system
 (* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckall = 12'd0; // SD_CK 上升沿总数（不分 CS，饱和）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cslow = 1'b0;  // 粘滞：CS 曾拉低过（与 LED 交叉验证）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxnz  = 1'b0;  // 粘滞：SDI 曾非全 1（=卡把 MISO 拉低过）
+	// ★ 四十七次探针：直接判定“SD 初始化走到哪一步”（卡哪怕只回一次也能看出）。
+	//   dbg_sd_rxnz：MISO 曾被拉低（卡至少响应过）——已有。
+	//   dbg_sd_rx01：SDI 曾 == 0x01（CMD0 的 R1 特征值 ⇒ 卡已进 SPI 模式）。
+	//   dbg_sd_rxfe：SDI 曾 == 0xFE（数据令牌 ⇒ 已经在读扇区）。
+	//   判读：rxnz=0 ⇒ 卡从未应答（物理/时钟）；rx01=1 ⇒ 越过 CMD0；
+	//         rxfe=1 ⇒ 已到读扇区阶段（那就该查镜像位置/校验和）。
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rx01  = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxfe  = 1'b0;
 	always @(posedge clk_cpu) begin
 		if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckall != 12'hFFF) dbg_sd_ckall <= dbg_sd_ckall + 1'b1;
 		if(!SD_n_CS) dbg_sd_cslow <= 1'b1;
 		if(SD_CK && !dbg_sd_ck_d && (SDI != 8'hFF)) dbg_sd_rxnz <= 1'b1;
+		if(SDI == 8'h01) dbg_sd_rx01 <= 1'b1;
+		if(SDI == 8'hFE) dbg_sd_rxfe <= 1'b1;
 	end
 	assign SD_DI = CPU_DOUT[7];
 	

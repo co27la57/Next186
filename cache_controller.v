@@ -260,10 +260,43 @@ module cache_controller(
 	//   修复：① victim 不再依赖 "LRU==0"，改比较器选 LRU 最小 way（LRU 退化仍可轮转，
 	//   且 victim→MRU 的相对更新会逐渐自愈排列）；② dirty 判定改为 victim way 自己的
 	//   dirty 位——脏必写回，无论 LRU 处于什么状态都杜绝静默丢脏数据。
-	wire [1:0]vmin01 = (cache_lru[0][index] <= cache_lru[1][index]) ? 2'd0 : 2'd1;
-	wire [1:0]vmin23 = (cache_lru[2][index] <= cache_lru[3][index]) ? 2'd2 : 2'd3;
-	wire [1:0]vblk_lru = (cache_lru[vmin01][index] <= cache_lru[vmin23][index]) ? vmin01 : vmin23;
+	// ★★ 四十五次修复（2026-09-24）：保护"BIOS 活动栈行"不被逐出。
+	//   证据链（四十四次读数 + 反汇编 0x10F）：
+	//     · BIOS 的 1KB 映像只活在 cache（BlackBox 预置）；其活动栈紧贴映像下方
+	//       （SS:SP = 0xF000:0xFC00 ⇒ maddr 0xFFBFE，tag 0x1FF / index 15）。
+	//     · BIOS 主流程在进 SD 例程前调用 `scan256`（映像 0x10F）：`mov bx,0x4000` +
+	//       循环 `sub bx,0x40` ⇒ 读 256 个不同 64B 行 = 整块 cache（4 way×32 index=128 行）
+	//       的两倍 ⇒ **必然把栈行逐出**，其数据此后只能靠"写回 DDR → 再回填"往返。
+	//     · 实测：`dbg_pbfe_dat=0xFC31`（返回地址确实上了总线）而 `dbg_rbad_hit=1`（读回不是它、
+	//       且命中）；`dbg_wild_ip = dbg_wild_bx = 0x00C8`（`pop bx` 与 `ret` 读到**同一个**陈旧值
+	//       ⇒ 两次栈读都没拿到真实数据）；DDR 栈区 dump 全是上电噪声（无 0xFCxx）
+	//       ⇒ **栈行的"写回→回填"往返丢了数据** ⇒ `ret` 弹出垃圾 ⇒ CPU 跑飞、屏幕冻在第一串。
+	//   修法：victim 选择**优先挑"非 BIOS 栈行"的 way**；仅当某 index 的 4 个 way 全是保护行时
+	//     才退回 LRU（tag 0x1FF + 同一 index 只对应唯一 64B 行，最多占 1 个 way ⇒ 永不触发）。
+	//   效果：栈行常驻 cache，`scan256` 的 thrash 再也冲不掉它；栈数据每帧仍由 flush 写回 DDR。
+	wire [3:0] stk_pin;   // 各 way 是否 = 受保护的 BIOS 栈行（tag 0x1FF 且 index<16）
+	assign stk_pin[0] = (cache_addr[0][index] == 10'h1FF) && ~index[`SETS-1];
+	assign stk_pin[1] = (cache_addr[1][index] == 10'h1FF) && ~index[`SETS-1];
+	assign stk_pin[2] = (cache_addr[2][index] == 10'h1FF) && ~index[`SETS-1];
+	assign stk_pin[3] = (cache_addr[3][index] == 10'h1FF) && ~index[`SETS-1];
+	wire [3:0] vcand = ((&stk_pin) == 1'b1) ? 4'b1111 : ~stk_pin; // 候选 way（1=可选作 victim）
+	// 用 3-bit 键把"非候选"排到最大（7），候选键 = 3'b0xx，保证非候选永不被选中。
+	wire [2:0] vk0 = vcand[0] ? {1'b0, cache_lru[0][index]} : 3'b111;
+	wire [2:0] vk1 = vcand[1] ? {1'b0, cache_lru[1][index]} : 3'b111;
+	wire [2:0] vk2 = vcand[2] ? {1'b0, cache_lru[2][index]} : 3'b111;
+	wire [2:0] vk3 = vcand[3] ? {1'b0, cache_lru[3][index]} : 3'b111;
+	wire [1:0]vmin01 = (vk0 <= vk1) ? 2'd0 : 2'd1;
+	wire [1:0]vmin23 = (vk2 <= vk3) ? 2'd2 : 2'd3;
+	wire [2:0]vkmin01 = (vmin01 == 2'd0) ? vk0 : vk1;
+	wire [2:0]vkmin23 = (vmin23 == 2'd2) ? vk2 : vk3;
+	wire [1:0]vblk_lru = (vkmin01 <= vkmin23) ? vmin01 : vmin23;
 	wire [`WAYS-1:0]fblk = r_flush ? flushcount[`WAYS+`SETS-1:`SETS] : vblk_lru;
+	// 探针："栈行被逐出"的次数（修复后应恒 0；非 0 说明退回了 LRU 兜底）。
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_stk_evict_n = 4'd0;
+	always @(posedge clk) begin
+		if(st0 && mmreq && !hit && !r_flush && stk_pin[fblk] && (dbg_stk_evict_n != 4'hF))
+			dbg_stk_evict_n <= dbg_stk_evict_n + 1'b1;
+	end
 
 	// dirty = victim(fblk) way 自己的 dirty 位（不再经 free 向量 AND）。
 	// flush 扫描时 fblk=flushcount[6:5]、index=flushcount[4:0]，即扫描行自己的 dirty，语义不变。

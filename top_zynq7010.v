@@ -141,7 +141,42 @@ module top_zynq7010 (
     reg        main_arvalid;
     reg        main_rready;
 
-    wire next186_reset_trigger = auto_rst_reg;
+    // ==========================================
+    // [RST-BTN] Reset button (polarity-agnostic): sync + debounce + fixed-length pulse.
+    //   Background: next186_reset_trigger used to be driven ONLY by auto_rst_reg
+    //   (5 s after configuration). The physical BTN_SOUTH top-level input was left
+    //   dangling, so NO button could ever restart the BIOS.
+    //   Design: assume NOTHING about button polarity. A *stable level change* on the
+    //   pin (low->high OR high->low) generates one fixed-length reset pulse, so the
+    //   board can never be stuck permanently in reset, whatever the XDC polarity is.
+    //   Usage: hold the button >20 ms. Release also counts as a change (harmless,
+    //   it just produces one extra reset pulse).
+    // ==========================================
+    reg  [1:0]  rst_btn_sync  = 2'b11;  // 2-stage sync; init 1 = typical pulled-up idle
+    reg  [19:0] rst_btn_dbc   = 20'd0;  // debounce counter (~21 ms @50MHz)
+    reg         rst_btn_lvl   = 1'b1;   // debounced stable level
+    reg         rst_btn_pulse = 1'b0;   // reset pulse
+    reg  [21:0] rst_btn_cnt   = 22'd0;  // pulse width counter (2_000_000 ~ 40 ms @50MHz)
+
+    always @(posedge m_axi_aclk) begin
+        rst_btn_sync <= {rst_btn_sync[0], BTN_SOUTH};
+        if (rst_btn_sync[1] == rst_btn_lvl) begin
+            rst_btn_dbc <= 20'd0;
+        end else if (rst_btn_dbc != 20'hFFFFF) begin
+            rst_btn_dbc <= rst_btn_dbc + 1'b1;
+            if (rst_btn_dbc == 20'hFFFFE) begin  // level change confirmed stable
+                rst_btn_lvl   <= rst_btn_sync[1];
+                rst_btn_pulse <= 1'b1;
+                rst_btn_cnt   <= 22'd0;
+            end
+        end
+        if (rst_btn_pulse) begin
+            if (rst_btn_cnt == 22'd2_000_000) rst_btn_pulse <= 1'b0;
+            else                              rst_btn_cnt <= rst_btn_cnt + 1'b1;
+        end
+    end
+
+    wire next186_reset_trigger = auto_rst_reg | rst_btn_pulse;
 
     // ==========================================
     // Next186 SoC 实例化

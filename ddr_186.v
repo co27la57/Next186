@@ -329,7 +329,12 @@ module system
 			end
 		end
 	end
-	assign SD_DI = CPU_DOUT[7];
+	// [SD-MOSI] During SoC reset (power-up 5 s window and any button reset) hold MOSI high.
+	//   SD spec: to enter SPI mode the card wants DI held HIGH around power-up / init.
+	//   Previously SD_DI = CPU_DOUT[7] unconditionally, i.e. undefined while the CPU is
+	//   held in reset (typically 0). While BTN_RESET is asserted no 0x3DA access can
+	//   happen, so overriding to 1 here cannot corrupt any SPI transfer.
+	assign SD_DI = BTN_RESET ? 1'b1 : CPU_DOUT[7];
 	
 // GPIO interface
 	reg [7:0]GPIOState = 8'h00;

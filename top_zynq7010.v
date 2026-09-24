@@ -179,6 +179,37 @@ module top_zynq7010 (
     wire next186_reset_trigger = auto_rst_reg | rst_btn_pulse;
 
     // ==========================================
+    // [RST-BTN-PROBE] Make the whole button chain observable in the ILA.
+    //   User reported: BTN_SOUTH is bound to a button in the XDC, but pressing it
+    //   still does not restart the BIOS. These 6 bits tell us exactly where the
+    //   chain breaks:
+    //     dbg_btn_raw   : level actually seen on the physical pin
+    //     dbg_btn_sync  : after the 2-stage synchronizer
+    //     dbg_btn_lvl   : debounced stable level stored by the detector
+    //     dbg_btn_pulse : the ~40 ms reset pulse we inject
+    //     dbg_auto_rst  : the power-on 5 s window (must be 0 in steady state)
+    //     dbg_rst_trig  : final reset into the Next186 SoC (must pulse when pressed)
+    //   Reading: if dbg_btn_raw never changes while pressing -> XDC pin/port problem.
+    //            if raw changes but lvl/pulse never do -> hold the button longer (>25 ms).
+    //            if pulse toggles but the screen does not restart -> reset path problem.
+    // ==========================================
+    (* mark_debug = "true", keep = "true" *) reg dbg_btn_raw   = 1'b1;
+    (* mark_debug = "true", keep = "true" *) reg dbg_btn_sync  = 1'b1;
+    (* mark_debug = "true", keep = "true" *) reg dbg_btn_lvl   = 1'b1;
+    (* mark_debug = "true", keep = "true" *) reg dbg_btn_pulse = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg dbg_auto_rst  = 1'b1;
+    (* mark_debug = "true", keep = "true" *) reg dbg_rst_trig  = 1'b1;
+
+    always @(posedge m_axi_aclk) begin
+        dbg_btn_raw   <= BTN_SOUTH;
+        dbg_btn_sync  <= rst_btn_sync[1];
+        dbg_btn_lvl   <= rst_btn_lvl;
+        dbg_btn_pulse <= rst_btn_pulse;
+        dbg_auto_rst  <= auto_rst_reg;
+        dbg_rst_trig  <= next186_reset_trigger;
+    end
+
+    // ==========================================
     // Next186 SoC 实例化
     // ==========================================
     Next186_SoC u_Next186 (

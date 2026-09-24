@@ -257,7 +257,7 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_di  = 1'b0;  // MOSI（BIOS → 卡）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_do  = 1'b0;  // MISO（卡 → BIOS）
 	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_sd_rx  = 8'd0;  // 最近收到的字节（SDI 镜像）
-	reg [11:0] dbg_sd_ckc = 12'd0; // CS 低期间的时钟数（饱和）
+(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckc = 12'd0; // CS 低期间的时钟数（饱和）
 	reg dbg_sd_ck_d = 1'b0;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs <= SD_n_CS; dbg_sd_ck <= SD_CK;
@@ -268,7 +268,7 @@ module system
 	end
 	// ★ 四十次（SD 探针 v2）：区分“完全没敲 SPI”与“只在片选拉低前敲了初始化时钟”。
 	//   dbg_sd_ckc 只统计 CS 低期间的时钟（初始化的 80 拍是 CS 高时发的，不会被计入）。
-	reg [11:0] dbg_sd_ckall = 12'd0; // SD_CK 上升沿总数（不分 CS，饱和）
+(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckall = 12'd0; // SD_CK 上升沿总数（不分 CS，饱和）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cslow = 1'b0;  // 粘滞：CS 曾拉低过（与 LED 交叉验证）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxnz  = 1'b0;  // 粘滞：SDI 曾非全 1（=卡把 MISO 拉低过）
 	always @(posedge clk_cpu) begin

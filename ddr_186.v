@@ -369,12 +369,14 @@ module system
 	// =================================================================================
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ncs   = 16'd0;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ckrun = 16'd0;
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_shiftreq = 16'd0;  // [67th fix] OLD shift condition, per CS-low window
 	reg dbg_sd_cs_d = 1'b1;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs_d <= SD_n_CS;
 		if(dbg_sd_cs_d && !SD_n_CS) begin
 			if(dbg_sd_ncs != 16'hFFFF) dbg_sd_ncs <= dbg_sd_ncs + 1'b1;
 			dbg_sd_ckrun <= 16'd0;
+			dbg_sd_shiftreq <= 16'd0;
 		end else if(!SD_n_CS) begin
 			if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckrun != 16'hFFFF)
 				dbg_sd_ckrun <= dbg_sd_ckrun + 1'b1;
@@ -923,7 +925,17 @@ module system
 			SD_CK <= IORQ & INPUT_STATUS_OE & WR & ~WORD;
 			if(IORQ & INPUT_STATUS_OE & WR) begin
 				if(WORD) SD_n_CS <= ~CPU_DOUT[8]; 
-				else SDI <= {SDI[6:0], SD_DO};
+				// [67th fix] shift ONLY when this cycle creates the SD_CK rising edge.
+				//   The raw condition can stay asserted across several CPU_CE cycles when
+				//   `ce` stalls mid-`out` (our cache miss / per-frame flush scan), which
+				//   used to shift SDI more times than SD_CK pulsed -> SPI bit drift.
+				else if(!SD_CK) SDI <= {SDI[6:0], SD_DO};
+			end
+			// [67th fix probe] the OLD shift condition, counted per CS-low window.
+			//   Read together with dbg_sd_ckrun: shiftreq > ckrun proves the old code
+			//   shifted SDI more times than it clocked the card (SPI bit drift).
+			if(IORQ & INPUT_STATUS_OE & WR & ~WORD) begin
+				if(dbg_sd_shiftreq != 16'hFFFF) dbg_sd_shiftreq <= dbg_sd_shiftreq + 1'b1;
 			end
 		end
 

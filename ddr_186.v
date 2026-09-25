@@ -661,7 +661,7 @@ module system
 		 .ddr_rd(ddr_rd), 
 		 .ddr_wr(ddr_wr),
 		 .hiaddr(cache_hi_addr),
-		 .cache_write_data(crw && sys_rd_data_valid), 
+		 .cache_write_data(sys_rd_data_valid), // ★★ 82nd fix: mirror the round-31 write-back fix - drop crw (a VGA line read clears it mid-fill -> the refill stops part way and the rest of the line keeps 0). sys_rd_data_valid is only high during R_PUSH_0/R_PUSH_1. 
 		 .cache_read_data(sys_wr_data_valid),  // ★ 三十一次修复：去掉 crw——crw 反映“最近一条 DDR 命令”，VGA 行读会把它清 0 → 写回 beat 丢失、BRAM 未使能→写出旧值。现改用 ram_wr_valid（仅写回 burst 时高）
 		 .flush(auto_flush == 3'b110),
 		 .cache_line_start(cache_line_start),

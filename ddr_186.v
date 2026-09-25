@@ -257,14 +257,12 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_di  = 1'b0;  // MOSI（BIOS → 卡）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_do  = 1'b0;  // MISO（卡 → BIOS）
 	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_sd_rx  = 8'd0;  // 最近收到的字节（SDI 镜像）
-(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckc = 12'd0; // CS 低期间的时钟数（饱和）
 	reg dbg_sd_ck_d = 1'b0;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs <= SD_n_CS; dbg_sd_ck <= SD_CK;
 		dbg_sd_di <= SD_DI;   dbg_sd_do <= SD_DO;
 		dbg_sd_rx <= SDI;
 		dbg_sd_ck_d <= SD_CK;
-		if(!SD_n_CS && SD_CK && !dbg_sd_ck_d && dbg_sd_ckc != 12'hFFF) dbg_sd_ckc <= dbg_sd_ckc + 1'b1;
 	end
 	// ⚠四十六次修正（探针除阱 #4）：
 	//   dbg_sd_ck 与 dbg_sd_ck_d 都在同一 posedge 采样 SD_CK
@@ -273,7 +271,6 @@ module system
 	//   现改为 raw SD_CK + dbg_sd_ck_d（与 dbg_sd_ckc 同源）。
 	// ★ 四十次（SD 探针 v2）：区分“完全没敲 SPI”与“只在片选拉低前敲了初始化时钟”。
 	//   dbg_sd_ckc 只统计 CS 低期间的时钟（初始化的 80 拍是 CS 高时发的，不会被计入）。
-(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_sd_ckall = 12'd0; // SD_CK 上升沿总数（不分 CS，饱和）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cslow = 1'b0;  // 粘滞：CS 曾拉低过（与 LED 交叉验证）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxnz  = 1'b0;  // 粘滞：SDI 曾非全 1（=卡把 MISO 拉低过）
 	// ★★ 四十九次修正（探针除阱 #5/#6，2026-09-24）：
@@ -281,7 +278,6 @@ module system
 	//   ⇒ 旧判据 dbg_sd_rxnz(SDI != 0xFF) 与 dbg_sd_rx01(SDI == 0x01) 都会必然触发 = 假阳性
 	//     （四十七次据此判“卡在应答”是错的）。
 	//   现改：rxnz / dolow 直接看 raw SD_DO（不经移位寄存器）；rx01 移到字节边界处判。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_dolow = 1'b0;  // 粘滞：raw SD_DO 曾为 0（卡驱动过 MISO）
 	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_sd_bcnt  = 10'd0;  // CS 低期字节边界计数（验证 stb 真的在跑）
 	// ★ 四十七次探针：直接判定“SD 初始化走到哪一步”（卡哪怕只回一次也能看出）。
 	//   dbg_sd_rxnz：MISO 曾被拉低（卡至少响应过）——已有。
@@ -289,11 +285,9 @@ module system
 	//   dbg_sd_rxfe：SDI 曾 == 0xFE（数据令牌 ⇒ 已经在读扇区）。
 	//   判读：rxnz=0 ⇒ 卡从未应答（物理/时钟）；rx01=1 ⇒ 越过 CMD0；
 	//         rxfe=1 ⇒ 已到读扇区阶段（那就该查镜像位置/校验和）。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rx01  = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxfe  = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_r00   = 1'b0;
 	always @(posedge clk_cpu) begin
-		if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckall != 12'hFFF) dbg_sd_ckall <= dbg_sd_ckall + 1'b1;
 		if(!SD_n_CS) dbg_sd_cslow <= 1'b1;
 		if(SD_CK && !dbg_sd_ck_d && (SD_DO == 1'b0)) dbg_sd_rxnz <= 1'b1;
 		// [62nd probe fix] Both original lines had NO gating at all, which made them
@@ -306,7 +300,6 @@ module system
 		// dbg_sd_dolow is therefore IDENTICAL to dbg_sd_rxnz now; kept only so old
 		// readings can still be compared. The 0xFE test moved into the byte-aligned
 		// block below (dbg_sd_rxfe is now byte-aligned like dbg_sd_1st).
-		if(SD_CK && !dbg_sd_ck_d && (SD_DO == 1'b0)) dbg_sd_dolow <= 1'b1;
 	end
 	// ★ 四十八次探针：**字节对齐**捕获，直接看"卡回了什么"。
 	//   背景：四十七次读数 rxnz=1 / rx01=1 / rxfe=0 ⇒ 卡确实应答了，
@@ -332,7 +325,6 @@ module system
 		if (dbg_sd_stb && !dbg_sd_cs) begin
 			dbg_sd_byte <= SDI;
 			if (dbg_sd_bcnt != 10'h3FF) dbg_sd_bcnt <= dbg_sd_bcnt + 1'b1;
-			if (SDI == 8'h01) dbg_sd_rx01 <= 1'b1;
 			if (SDI == 8'hAA) dbg_sd_aa <= 1'b1;
 			if (SDI == 8'h00) dbg_sd_r00 <= 1'b1;
 			if (SDI == 8'hFE) dbg_sd_rxfe <= 1'b1;
@@ -346,6 +338,7 @@ module system
 		// + 2 CRC + dummies) is about 523; a read that bails out because the
 		// data token was not 0xFE stops at about 8.
 		if (dbg_sd_cs_d && !SD_n_CS) dbg_sd_bcnt <= 10'd0;
+		if (dbg_sd_cs_d && !SD_n_CS) dbg_sd_rxfe <= 1'b0;  // [68th] per-transaction token flag
 	end
 	// ===== [62nd probe, 2026-09-25] Transaction-level instruments =====================
 	// Context: with the DI/DO wiring fixed the card is now recognised (string 2
@@ -369,18 +362,50 @@ module system
 	// =================================================================================
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ncs   = 16'd0;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ckrun = 16'd0;
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_shiftreq = 16'd0;  // [67th fix] OLD shift condition, per CS-low window
 	reg dbg_sd_cs_d = 1'b1;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs_d <= SD_n_CS;
 		if(dbg_sd_cs_d && !SD_n_CS) begin
 			if(dbg_sd_ncs != 16'hFFFF) dbg_sd_ncs <= dbg_sd_ncs + 1'b1;
 			dbg_sd_ckrun <= 16'd0;
-			dbg_sd_shiftreq <= 16'd0;
 		end else if(!SD_n_CS) begin
 			if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckrun != 16'hFFFF)
 				dbg_sd_ckrun <= dbg_sd_ckrun + 1'b1;
 		end
+	end
+	// ===== [68th probe, 2026-09-25] Hardware debug ports (write-only scratch) =====
+	// WHY: the on-screen row1/row2 readout cannot be trusted any more (the VGA read
+	// path repeats every 7-8 characters), so the BIOS now reports its diagnostics
+	// through four otherwise unused I/O ports instead of the text buffer.
+	// 0x00E0..0x00E3 are decoded nowhere else in this design and are unused by BOTH
+	// the 1 KB bootstrap and the 8 KB card image (checked by scanning every
+	// "mov dx,imm16" in both images).
+	//   0x00E0 (8b)  <- CMD17 R1                 (pr1  @0x374)
+	//   0x00E1 (8b)  <- data token               (pr2  @0x391)
+	//   0x00E2 (16b) <- 8 KB checksum            (only when "Next" was found)
+	//   0x00E3 (16b) <- sector number HIGH 16 b  (the 4 hex digits at row1 col0..3)
+	// In the 68th revision these five probes were deleted as useless/traps:
+	//   dbg_sd_shiftreq (saturates at once), dbg_sd_ckc / dbg_sd_ckall (12-bit
+	//   saturating counters), dbg_sd_dolow (== dbg_sd_rxnz), dbg_sd_rx01 (SDI
+	//   passes through 0x01 on its way to 0xFF, so it fires with no card present).
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_dbg0 = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_dbg1 = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg2 = 16'h0000;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg3 = 16'h0000;
+	always @(posedge clk_cpu) begin
+		if(IORQ & CPU_CE & WR) begin
+			if(PORT_ADDR[15:0] == 16'h00E0) dbg_dbg0 <= CPU_DOUT[7:0];
+			if(PORT_ADDR[15:0] == 16'h00E1) dbg_dbg1 <= CPU_DOUT[7:0];
+			if(PORT_ADDR[15:0] == 16'h00E2) dbg_dbg2 <= CPU_DOUT[15:0];
+			if(PORT_ADDR[15:0] == 16'h00E3) dbg_dbg3 <= CPU_DOUT[15:0];
+		end
+	end
+	// Largest byte count ever seen inside a single CS-low window (sticky since reset).
+	//   ~136  (0x088) => every CMD17 bailed out BEFORE its 512-byte data phase
+	//   ~522  (0x20A) => at least one CMD17 really moved the whole 512-byte block
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_sd_bcntmax = 10'd0;
+	always @(posedge clk_cpu) begin
+		if(dbg_sd_bcnt > dbg_sd_bcntmax) dbg_sd_bcntmax <= dbg_sd_bcnt;
 	end
 	// [SD-MOSI] During SoC reset (power-up 5 s window and any button reset) hold MOSI high.
 	//   SD spec: to enter SPI mode the card wants DI held HIGH around power-up / init.
@@ -935,7 +960,6 @@ module system
 			//   Read together with dbg_sd_ckrun: shiftreq > ckrun proves the old code
 			//   shifted SDI more times than it clocked the card (SPI bit drift).
 			if(IORQ & INPUT_STATUS_OE & WR & ~WORD) begin
-				if(dbg_sd_shiftreq != 16'hFFFF) dbg_sd_shiftreq <= dbg_sd_shiftreq + 1'b1;
 			end
 		end
 

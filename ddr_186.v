@@ -387,6 +387,7 @@ module system
 	//   0x00E2 (16b) <- 8 KB checksum            (only when "Next" was found)
 	//   0x00E3 (16b) <- sector number HIGH 16 b  (the 4 hex digits at row1 col0..3)
 	//   0x00E4 (16b) <- memory round-trip self test result (74th change): fills the
+	//   0x00E5 (8b)  <- memory round-trip self test result (74th change): fills the
 	//                   8 KB buffer with a known pattern, flushes the cache, reads it
 	//                   back and reports the byte sum. Expected = 0xEF55.
 	// In the 68th revision these five probes were deleted as useless/traps:
@@ -398,6 +399,7 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg2 = 16'h0000;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg3 = 16'h0000;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg4 = 16'h0000;
+(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_dbg5 = 8'h00;
 	always @(posedge clk_cpu) begin
 		if(IORQ & CPU_CE & WR) begin
 			if(PORT_ADDR[15:0] == 16'h00E0) dbg_dbg0 <= CPU_DOUT[7:0];
@@ -405,6 +407,7 @@ module system
 			if(PORT_ADDR[15:0] == 16'h00E2) dbg_dbg2 <= CPU_DOUT[15:0];
 			if(PORT_ADDR[15:0] == 16'h00E3) dbg_dbg3 <= CPU_DOUT[15:0];
 			if(PORT_ADDR[15:0] == 16'h00E4) dbg_dbg4 <= CPU_DOUT[15:0];
+			if(PORT_ADDR[15:0] == 16'h00E5) dbg_dbg5 <= CPU_DOUT[7:0];
 		end
 	end
 	// Largest byte count ever seen inside a single CS-low window (sticky since reset).

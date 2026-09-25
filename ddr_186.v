@@ -946,6 +946,43 @@ module system
 		end else s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
 	end
 	
+	// ============================================================================
+	// ★★ [86th probe, 2026-09-26] Does a write-back / fill of an SD-data-buffer line
+	//    (tag 0x1E0 = maddr 0xF0000..0xF1FFF, 186 page 15) ever reach the DDR controller?
+	//    Built ONLY from cache_controller's module-boundary ports (ddr_wr / ddr_rd / hiaddr),
+	//    so nothing is placed inside the CPU core or inside the cache.
+	//      dbg_bufwb_n = cache -> DDR write-back bursts for a buffer line (saturating)
+	//      dbg_bufrd_n = DDR -> cache fill bursts  for a buffer line (saturating)
+	//      dbg_bufwb_a = hiaddr of the LAST buffer-line write-back ({tag,index})
+	//    Self test v3 (change 85) fills 2 KB at F000:0000, waits about 2 VGA frames so the
+	//    per-frame flush can write the dirty lines back, then evicts with scan256 and reads
+	//    offset 0x40 - it comes back 0x00 although the control sum 0xFC00 proves the data was
+	//    correctly in the cache.  So either no write-back ever happened for these lines
+	//    (dbg_bufwb_n == 0) or one did and its address/data is wrong (dbg_bufwb_n != 0).
+	// ============================================================================
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bufwb_n = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bufrd_n = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [14:0] dbg_bufwb_a = 15'h0000;
+	wire dbg_buf_line = (cache_hi_addr[14:5] == 10'h1E0);
+	reg dbg_rst_s1 = 1'b0;
+	reg dbg_rst_s2 = 1'b0;
+	always @(posedge clk_sdr) begin
+		dbg_rst_s1 <= BTN_RESET;
+		dbg_rst_s2 <= dbg_rst_s1;
+		if(dbg_rst_s2) begin               // held at 0 during reset => "this BIOS run only"
+			dbg_bufwb_n <= 8'h00;
+			dbg_bufrd_n <= 8'h00;
+		end else begin
+			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
+				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
+				dbg_bufwb_a <= cache_hi_addr;
+			end
+			if(ddr_rd && !s_ddr_rd && dbg_buf_line) begin
+				if(dbg_bufrd_n != 8'hFF) dbg_bufrd_n <= dbg_bufrd_n + 1'b1;
+			end
+		end
+	end
+
 	always @ (posedge clk_cpu) begin
 		s_RS232_DCE_RXD <= RS232_DCE_RXD;
 		s_RS232_HOST_RXD <= RS232_HOST_RXD;

@@ -340,6 +340,14 @@ module system
 		if (dbg_sd_cs_d && !SD_n_CS) dbg_sd_bcnt <= 10'd0;
 		if (dbg_sd_cs_d && !SD_n_CS) dbg_sd_rxfe <= 1'b0;  // [68th] per-transaction token flag
 	end
+	// [69th probe, 2026-09-25] The probe flops are initialised at FPGA configuration
+	// only - the button reset does NOT clear them. dbg_sd_ncs therefore accumulates
+	// across reset presses, so a saturated 0xFFFF may just mean "many button resets
+	// ago" instead of a runaway loop. Clearing both counters on the RISING edge of
+	// BTN_RESET makes them read "this BIOS run only" after a key reset.
+	reg dbg_rst_d = 1'b0;
+	always @(posedge clk_cpu) dbg_rst_d <= BTN_RESET;
+
 	// ===== [62nd probe, 2026-09-25] Transaction-level instruments =====================
 	// Context: with the DI/DO wiring fixed the card is now recognised (string 2
 	// 'BIOS not found' no longer appears), but the flow stops at
@@ -372,6 +380,7 @@ module system
 			if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckrun != 16'hFFFF)
 				dbg_sd_ckrun <= dbg_sd_ckrun + 1'b1;
 		end
+		if(BTN_RESET && !dbg_rst_d) dbg_sd_ncs <= 16'd0;   // [69th] this-run-only
 	end
 	// ===== [68th probe, 2026-09-25] Hardware debug ports (write-only scratch) =====
 	// WHY: the on-screen row1/row2 readout cannot be trusted any more (the VGA read
@@ -405,7 +414,8 @@ module system
 	//   ~522  (0x20A) => at least one CMD17 really moved the whole 512-byte block
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_sd_bcntmax = 10'd0;
 	always @(posedge clk_cpu) begin
-		if(dbg_sd_bcnt > dbg_sd_bcntmax) dbg_sd_bcntmax <= dbg_sd_bcnt;
+		if(BTN_RESET && !dbg_rst_d) dbg_sd_bcntmax <= 10'd0;   // [69th] this-run-only
+		else if(dbg_sd_bcnt > dbg_sd_bcntmax) dbg_sd_bcntmax <= dbg_sd_bcnt;
 	end
 	// [SD-MOSI] During SoC reset (power-up 5 s window and any button reset) hold MOSI high.
 	//   SD spec: to enter SPI mode the card wants DI held HIGH around power-up / init.

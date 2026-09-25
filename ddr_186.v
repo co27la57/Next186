@@ -282,7 +282,7 @@ module system
 	//     （四十七次据此判“卡在应答”是错的）。
 	//   现改：rxnz / dolow 直接看 raw SD_DO（不经移位寄存器）；rx01 移到字节边界处判。
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_dolow = 1'b0;  // 粘滞：raw SD_DO 曾为 0（卡驱动过 MISO）
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_sd_bcnt  = 8'd0;  // CS 低期字节边界计数（验证 stb 真的在跑）
+	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_sd_bcnt  = 10'd0;  // CS 低期字节边界计数（验证 stb 真的在跑）
 	// ★ 四十七次探针：直接判定“SD 初始化走到哪一步”（卡哪怕只回一次也能看出）。
 	//   dbg_sd_rxnz：MISO 曾被拉低（卡至少响应过）——已有。
 	//   dbg_sd_rx01：SDI 曾 == 0x01（CMD0 的 R1 特征值 ⇒ 卡已进 SPI 模式）。
@@ -331,7 +331,7 @@ module system
 		// 仅在片选拉低期统计（初始化的 80 拍在 CS 高时，不计）
 		if (dbg_sd_stb && !dbg_sd_cs) begin
 			dbg_sd_byte <= SDI;
-			if (dbg_sd_bcnt != 8'hFF) dbg_sd_bcnt <= dbg_sd_bcnt + 1'b1;
+			if (dbg_sd_bcnt != 10'h3FF) dbg_sd_bcnt <= dbg_sd_bcnt + 1'b1;
 			if (SDI == 8'h01) dbg_sd_rx01 <= 1'b1;
 			if (SDI == 8'hAA) dbg_sd_aa <= 1'b1;
 			if (SDI == 8'h00) dbg_sd_r00 <= 1'b1;
@@ -340,6 +340,12 @@ module system
 				dbg_sd_1st <= SDI; dbg_sd_1st_seen <= 1'b1;
 			end
 		end
+		// [65th fix, 2026-09-25] Clear on the SD_n_CS falling edge => dbg_sd_bcnt
+		// now reads as 'bytes transferred in the CURRENT / most recent SPI
+		// transaction'. A complete CMD17 (6-byte command + R1 + token + 512 B
+		// + 2 CRC + dummies) is about 523; a read that bails out because the
+		// data token was not 0xFE stops at about 8.
+		if (dbg_sd_cs_d && !SD_n_CS) dbg_sd_bcnt <= 10'd0;
 	end
 	// ===== [62nd probe, 2026-09-25] Transaction-level instruments =====================
 	// Context: with the DI/DO wiring fixed the card is now recognised (string 2

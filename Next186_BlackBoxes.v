@@ -350,7 +350,7 @@ module cache (
         ram[11'h088] = 32'h80016EE8;
         ram[11'h089] = 32'h0E75FEFC;
         ram[11'h08A] = 32'hFB8B02B5;
-        ram[11'h08B] = 32'hE8FFA7E8;
+        ram[11'h08B] = 32'hE8018DE8;
         ram[11'h08C] = 32'h2BE8012E;
         ram[11'h08D] = 32'hC0334101;
         ram[11'h08E] = 32'h0124E8EF;
@@ -364,7 +364,7 @@ module cache (
         ram[11'h096] = 32'hFEFF84E8;
         ram[11'h097] = 32'hB15B75CC;
         ram[11'h098] = 32'h8BE12B04;
-        ram[11'h099] = 32'hFF6EE8FC;
+        ram[11'h099] = 32'h0154E8FC;
         ram[11'h09A] = 32'hFC805858;
         ram[11'h09B] = 32'hBE4B75AA;
         ram[11'h09C] = 32'h6AE8FF50;
@@ -374,8 +374,8 @@ module cache (
         ram[11'h0A0] = 32'h56BEED74;
         ram[11'h0A1] = 32'hFF57E8FF;
         ram[11'h0A2] = 32'hE12B04B1;
-        ram[11'h0A3] = 32'h45E8FC8B;
-        ram[11'h0A4] = 32'h40A858FF;
+        ram[11'h0A3] = 32'h2BE8FC8B;
+        ram[11'h0A4] = 32'h40A85801;
         ram[11'h0A5] = 32'hBE237458;
         ram[11'h0A6] = 32'h42E8FF44;
         ram[11'h0A7] = 32'h75E40AFF;
@@ -383,7 +383,7 @@ module cache (
         ram[11'h0A9] = 32'h75FEFC80;
         ram[11'h0AA] = 32'h2B12B111;
         ram[11'h0AB] = 32'hE8FC8BE1;
-        ram[11'h0AC] = 32'h4D8BFF24;
+        ram[11'h0AC] = 32'h4D8B010A;
         ram[11'h0AD] = 32'h41CD86F6;
         ram[11'h0AE] = 32'hC033E78B;
         ram[11'h0AF] = 32'h00A0E8EF;
@@ -450,11 +450,11 @@ module cache (
         ram[11'h0EC] = 32'h02720A3C;
         ram[11'h0ED] = 32'h30040704;
         ram[11'h0EE] = 32'hC3FD61E8;
-        ram[11'h0EF] = 32'h00000000;
-        ram[11'h0F0] = 32'h00000000;
-        ram[11'h0F1] = 32'h00000000;
-        ram[11'h0F2] = 32'h00000000;
-        ram[11'h0F3] = 32'h00000000;
+        ram[11'h0EF] = 32'h86FFA1E8;
+        ram[11'h0F0] = 32'hFF9EE8C4;
+        ram[11'h0F1] = 32'hC7830589;
+        ram[11'h0F2] = 32'h02E98302;
+        ram[11'h0F3] = 32'h00C3EE75;
         ram[11'h0F4] = 32'h00000000;
         ram[11'h0F5] = 32'h00000000;
         ram[11'h0F6] = 32'h00000000;

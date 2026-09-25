@@ -344,8 +344,8 @@ module cache (
         ram[11'h082] = 32'hF48B5251;
         ram[11'h083] = 32'hB403DABA;
         ram[11'h084] = 32'h44C6EF01;
-        ram[11'h085] = 32'hC9E8FF05;
-        ram[11'h086] = 32'h0158E8FF;
+        ram[11'h085] = 32'h5BE8FF05;
+        ram[11'h086] = 32'h06C48301;
         ram[11'h087] = 32'h1675E40A;
         ram[11'h088] = 32'h80016EE8;
         ram[11'h089] = 32'h0E75FEFC;
@@ -432,14 +432,14 @@ module cache (
         ram[11'h0DA] = 32'h59FEE200;
         ram[11'h0DB] = 32'hF473C003;
         ram[11'h0DC] = 32'h0000C3ED;
-        ram[11'h0DD] = 32'h5006C483;
+        ram[11'h0DD] = 32'h50FE6BE8;
         ram[11'h0DE] = 32'h00E0BA52;
         ram[11'h0DF] = 32'h5AEEC48A;
         ram[11'h0E0] = 32'h5250C358;
         ram[11'h0E1] = 32'hEF00E3BA;
         ram[11'h0E2] = 32'hA3E9585A;
         ram[11'h0E3] = 32'h909090FD;
-        ram[11'h0E4] = 32'h003FE890;
+        ram[11'h0E4] = 32'hFE54E890;
         ram[11'h0E5] = 32'hE1BA5250;
         ram[11'h0E6] = 32'hEEC48A00;
         ram[11'h0E7] = 32'h90C3585A;

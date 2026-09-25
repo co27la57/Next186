@@ -291,12 +291,22 @@ module system
 	//         rxfe=1 ⇒ 已到读扇区阶段（那就该查镜像位置/校验和）。
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rx01  = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxfe  = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_r00   = 1'b0;
 	always @(posedge clk_cpu) begin
 		if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckall != 12'hFFF) dbg_sd_ckall <= dbg_sd_ckall + 1'b1;
 		if(!SD_n_CS) dbg_sd_cslow <= 1'b1;
 		if(SD_CK && !dbg_sd_ck_d && (SD_DO == 1'b0)) dbg_sd_rxnz <= 1'b1;
-		if(SD_DO == 1'b0) dbg_sd_dolow <= 1'b1;
-		if(SDI == 8'hFE) dbg_sd_rxfe <= 1'b1;
+		// [62nd probe fix] Both original lines had NO gating at all, which made them
+		// useless (or actively misleading):
+		//   if(SD_DO == 0)    -> card insertion contact bounce alone sets it.
+		//                        Proved to be an insertion detector, NOT a card response.
+		//   if(SDI == 8'hFE)  -> a free-running shift register passes through 0xFE anyway.
+		// Now gated by the SD_CK rising edge (same source as dbg_sd_rxnz), so the value
+		// means 'the card actually drove the bus low on a clock edge'.
+		// dbg_sd_dolow is therefore IDENTICAL to dbg_sd_rxnz now; kept only so old
+		// readings can still be compared. The 0xFE test moved into the byte-aligned
+		// block below (dbg_sd_rxfe is now byte-aligned like dbg_sd_1st).
+		if(SD_CK && !dbg_sd_ck_d && (SD_DO == 1'b0)) dbg_sd_dolow <= 1'b1;
 	end
 	// ★ 四十八次探针：**字节对齐**捕获，直接看"卡回了什么"。
 	//   背景：四十七次读数 rxnz=1 / rx01=1 / rxfe=0 ⇒ 卡确实应答了，
@@ -324,9 +334,44 @@ module system
 			if (dbg_sd_bcnt != 8'hFF) dbg_sd_bcnt <= dbg_sd_bcnt + 1'b1;
 			if (SDI == 8'h01) dbg_sd_rx01 <= 1'b1;
 			if (SDI == 8'hAA) dbg_sd_aa <= 1'b1;
+			if (SDI == 8'h00) dbg_sd_r00 <= 1'b1;
+			if (SDI == 8'hFE) dbg_sd_rxfe <= 1'b1;
 			if (!dbg_sd_1st_seen && (SDI != 8'hFF)) begin
 				dbg_sd_1st <= SDI; dbg_sd_1st_seen <= 1'b1;
 			end
+		end
+	end
+	// ===== [62nd probe, 2026-09-25] Transaction-level instruments =====================
+	// Context: with the DI/DO wiring fixed the card is now recognised (string 2
+	// 'BIOS not found' no longer appears), but the flow stops at
+	// 'Searching BIOS on SDCard ...' and never advances.
+	// Only one question is left: WHICH stage is it stuck in?
+	//   (a) inside ONE SPI transaction, waiting for R1 or the data token
+	//   (b) cycling through the 16-sector read retries
+	//   (c) already jumped into the BIOS image loaded from the SD card
+	// The slowed SPI (~100 clk_cpu per bit, commit 62f2b9d) means a 1024-deep ILA
+	// covers about ONE byte, so the protocol cannot be watched as a waveform.
+	// Everything below is therefore sticky counters/flags and needs NO capture depth.
+	//   dbg_sd_ncs   : SD_n_CS falling edges = number of SPI transactions started.
+	//                  Still growing => it is retrying, not hung.
+	//   dbg_sd_ckrun : SD_CK rising edges inside the CURRENT CS-low window
+	//                  (cleared when CS goes high, saturating). A normal CMD17 is
+	//                  ~520 bytes ~ 4200 clocks. Saturated at 0xFFFF while
+	//                  dbg_sd_cs == 0 => stuck inside this single transaction.
+	//   dbg_sd_r00   : byte-aligned 0x00 seen => CMD17 R1 == 0 (command accepted).
+	//   dbg_sd_rxfe  : byte-aligned 0xFE seen => data token (card is sending data).
+	// =================================================================================
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ncs   = 16'd0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ckrun = 16'd0;
+	reg dbg_sd_cs_d = 1'b1;
+	always @(posedge clk_cpu) begin
+		dbg_sd_cs_d <= SD_n_CS;
+		if(dbg_sd_cs_d && !SD_n_CS) begin
+			if(dbg_sd_ncs != 16'hFFFF) dbg_sd_ncs <= dbg_sd_ncs + 1'b1;
+			dbg_sd_ckrun <= 16'd0;
+		end else if(!SD_n_CS) begin
+			if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckrun != 16'hFFFF)
+				dbg_sd_ckrun <= dbg_sd_ckrun + 1'b1;
 		end
 	end
 	// [SD-MOSI] During SoC reset (power-up 5 s window and any button reset) hold MOSI high.
@@ -975,5 +1020,41 @@ module system
         dbg_cache_hiaddr  <= cache_hi_addr;
         dbg_cache_ddr_wr  <= ddr_wr;
         dbg_sdraddr       <= sdraddr;
+    end
+
+    // ===== [62nd probe, 2026-09-25] CPU-side instruments =============================
+    //   ADDR is unit186's 21-bit address bus (it drives cache_controller.addr), so it
+    //   is asserted on EVERY memory cycle, instruction fetches included. Bits [20:6]
+    //   give the 64-byte line address, the same granularity as cache_hiaddr.
+    //   dbg_cpu_addr   : most recent CPU bus line address. Does it still move?
+    //   dbg_cpu_halt   : CPU HALT (core ran off into garbage / executed HLT).
+    //   dbg_cpu_idle   : cleared whenever the bus address changes, saturating at
+    //                    0x3FFFF (= ~5 ms at 50 MHz). If it saturates, the core is
+    //                    NOT executing: halted, or stalled forever on a memory cycle.
+    //   dbg_cpu_imgrun : saw an INSTRUCTION FETCH (not a write) from F000:E000..FBFF
+    //                    => the core is executing the BIOS image loaded from SD.
+    //                    DECISIVE: if 1, the SD path is finished and the hang is
+    //                    inside the loaded image.
+    //   dbg_cpu_pgseen : sticky 'region ever addressed' mask
+    //                    bit0 = F000:0000-1FFF  (the 8 KB SD data buffer)
+    //                    bit1 = F000:FC00-FFFF  (the built-in 1 KB BIOS itself)
+    //                    bit2 = 0xB8000-0xB8F9F  (VGA text buffer)
+    // =================================================================================
+    wire [14:0] dbg_cpu_ha = ADDR[20:6];
+    (* mark_debug = "true", keep = "true" *) reg [14:0] dbg_cpu_addr   = 15'd0;
+    (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_halt   = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg [17:0] dbg_cpu_idle   = 18'd0;
+    (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_imgrun = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg [2:0]  dbg_cpu_pgseen = 3'd0;
+    always @(posedge clk_cpu) begin
+        dbg_cpu_addr <= dbg_cpu_ha;
+        dbg_cpu_halt <= HALT;
+        if(dbg_cpu_addr != dbg_cpu_ha) dbg_cpu_idle <= 18'd0;
+        else if(dbg_cpu_idle != 18'h3FFFF) dbg_cpu_idle <= dbg_cpu_idle + 1'b1;
+        if(!IORQ && !WR && (dbg_cpu_ha >= 15'h3F80) && (dbg_cpu_ha <= 15'h3FEF))
+            dbg_cpu_imgrun <= 1'b1;
+        if((dbg_cpu_ha >= 15'h3C00) && (dbg_cpu_ha <= 15'h3C7F)) dbg_cpu_pgseen[0] <= 1'b1;
+        if(dbg_cpu_ha >= 15'h3FF0)                                dbg_cpu_pgseen[1] <= 1'b1;
+        if((dbg_cpu_ha >= 15'h2E00) && (dbg_cpu_ha <= 15'h2E03)) dbg_cpu_pgseen[2] <= 1'b1;
     end
 endmodule

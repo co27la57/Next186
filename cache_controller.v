@@ -2,11 +2,11 @@
 // Next186 cache_controller.v
 // 基于原作者版本（neptuno-fpga/Next186_SoC，Nicolae Dumitrache）+ 本项目的 4-way begin
 // 冗余（cache_addr 四个 way 的 index16-31 保持 tag=511，保证复位取指命中预填 BIOS）。
-//
+
 // 保留改动：
 //   1) seg_map map[11] = 6  —— 文本 VRAM 窗 0x08068000，与 VGA(scraddr=0x6000)/PS 1:1 对齐
 //   2) 保留 ILA 探针（mark_debug：lowaddr / s_lowaddr5 / dbg_ctl_* / isvwr），原版无这些探针
-//
+
 // ★ 本次修复（回退 af6f44b 后的"开倒车"）：
 //   - 恢复 cache_line_start 单周期脉冲：每个 cache 行事务(读填充/写回)起始把 lowaddr 强
 //     制归零，避免上一行残留的非 0 行内偏移污染下一行，造成半行(0x20)错位 / CPU 跑垃圾
@@ -336,14 +336,14 @@ module cache_controller(
 	// ★★ 三十三次修复（2026-09-23）：写回读地址改用"本次写回内独立的字序号计数"，
 	//   与共享的 lowaddr 彻底解耦 —— 修 index0 整行 +1 word（dump: cell0-1=0，cell2 起才
 	//   出现字符串 'S','e'…；而同一次运行的 index1 完全对齐）。
-	//
+	
 	//   机理：写回时 BRAM 端口 A 的读地址此前取 `lowaddr[LINE-2:1]`。`lowaddr` 是**填充与
 	//   写回共用**的计数器，只由外部单周期脉冲 `cache_line_start` 复位。只要该脉冲与本次
 	//   写回的相位不齐（或上一行残留未清），整行读出的字序号就整体偏移 1 个字 ——
 	//   而"整行偏移"正是所有 dump 里 index0 的形状；index1 恰好相位对齐故正常。
 	//   （此前测到的 dbg_i0wb_crd=0 / cache_QA 值不像本行内容，也是同一相位问题的副作用：
 	//     STATE 011 的可见窗口只有几个 clk_sdr 周期，探针按 ddr_dr 采样极易漏掉。）
-	//
+	
 	//   修法：写回 burst 内自建计数器 wb_pcnt，只在**本次写回**内累加：
 	//     - 复位：`cache_line_start` 脉冲 或 `ddr_wr` 上升沿（写回开始事件，先于 burst 若干拍）；
 	//     - 递增：每个 `cache_read_data` 脉冲（= top 的 W_L/W_H，每字恰好 2 拍，与 AXI
@@ -641,23 +641,23 @@ module cache_controller(
 		bios_rom[8'hE5] = 32'hE1BA5250;
 		bios_rom[8'hE6] = 32'hEEC48A00;
 		bios_rom[8'hE7] = 32'hFCC3585A;
-		bios_rom[8'hE8] = 32'h40BEFF33;
-		bios_rom[8'hE9] = 32'h0800B900;
-		bios_rom[8'hEA] = 32'hE2AAC18A;
-		bios_rom[8'hEB] = 32'h00E4BAFB;
-		bios_rom[8'hEC] = 32'h8AFD5CE8;
-		bios_rom[8'hED] = 32'h01648A04;
-		bios_rom[8'hEE] = 32'h9090C3EF;
+		bios_rom[8'hE8] = 32'hBA1234B8;
+		bios_rom[8'hE9] = 32'h33EF00E4;
+		bios_rom[8'hEA] = 32'h0800B9FF;
+		bios_rom[8'hEB] = 32'hE2AAC18A;
+		bios_rom[8'hEC] = 32'h001FE8FB;
+		bios_rom[8'hED] = 32'hA1FD58E8;
+		bios_rom[8'hEE] = 32'hC3EF0040;
 		bios_rom[8'hEF] = 32'hFFA0E853;
 		bios_rom[8'hF0] = 32'h9BE8DC8A;
 		bios_rom[8'hF1] = 32'h89C38AFF;
 		bios_rom[8'hF2] = 32'h02C78305;
 		bios_rom[8'hF3] = 32'h7502E983;
-		bios_rom[8'hF4] = 32'h52C35BEC;
-		bios_rom[8'hF5] = 32'hEEB9F633;
-		bios_rom[8'hF6] = 32'hFD6CE807;
-		bios_rom[8'hF7] = 32'hEF5AC28B;
-		bios_rom[8'hF8] = 32'h8B5290C3;
+		bios_rom[8'hF4] = 32'hB9C35BEC;
+		bios_rom[8'hF5] = 32'hFFBB0008;
+		bios_rom[8'hF6] = 32'hFD754BFF;
+		bios_rom[8'hF7] = 32'h90C3F8E2;
+		bios_rom[8'hF8] = 32'h8B529090;
 		bios_rom[8'hF9] = 32'h00E2BAC2;
 		bios_rom[8'hFA] = 32'h90C35AEF;
 		bios_rom[8'hFB] = 32'h90909090;

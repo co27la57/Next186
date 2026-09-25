@@ -690,7 +690,7 @@ module cache_controller(
 		//   32 个 `cache_write_data` 脉冲才产生 fall ⇒ **所有合法填充写都落在 STATE==111 内**，
 		//   门控只会挡住"迟到的泄漏写"，不会丢任何合法数据。
 		.wren_a(cache_write_data && (STATE == 3'b111)), // input [0 : 0] wea
-		.address_a({blk, ~index[`SETS-1:10-`LINE], index[10-`LINE-1:0], word_a}), // input [10 : 0] addra
+		.address_a({wb_way, ~wb_hiaddr[`SETS-1:10-`LINE], wb_hiaddr[10-`LINE-1:0], word_a}), // input [10 : 0] addra  ★★ 77th fix: FROZEN wb_way/wb_hiaddr (kills the 24.4ns CPU(25MHz)->A-port(50MHz) combinational path)
 		.data_a(fill_data), // input [31 : 0] dina  // ★ 四十一次：BIOS 区取 ROM，其余取 DDR
 		.q_a(cache_QA), // output [31 : 0] douta
 		.clock_b(clk), // input clkb

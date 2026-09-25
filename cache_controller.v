@@ -81,9 +81,9 @@ module cache_controller(
 		  '{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511,511}};
 
 	reg [2:0]STATE = 0;
-	(* mark_debug = "true", keep = "true" *) reg [`LINE-2:0]lowaddr = 0; //cache mem address
-	(* mark_debug = "true", keep = "true" *) reg s_lowaddr5 = 0;
-	(* mark_debug = "true", keep = "true" *) reg s_lowaddr5_d1 = 0;
+	reg [`LINE-2:0]lowaddr = 0; //cache mem address
+	reg s_lowaddr5 = 0;
+	reg s_lowaddr5_d1 = 0;
 	wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0，标志整行 64B burst 完成
 	// ★ 三十三次修复引入的写回内自持计数（声明提前，供 flush_wb_done 使用）
 	reg  [5:0] wb_pcnt    = 6'd0;   // 本次写回内 cache_read_data 脉冲数（每字 2 拍）
@@ -118,19 +118,19 @@ module cache_controller(
 	// ILA 探针寄存器（保留，原版无；不参加主逻辑）
 	reg        dbg_ctl_mreq_r;
 	reg [3:0]  dbg_ctl_wmask_r;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_mmreq_r;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_hit_r;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_ce_r;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_isvwr_r;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_rflush_r;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_ddr_wr_r;
-	(* mark_debug = "true", keep = "true" *) reg [2:0]  dbg_ctl_STATE_r;
+	reg        dbg_ctl_mmreq_r;
+	reg        dbg_ctl_hit_r;
+	reg        dbg_ctl_ce_r;
+	reg        dbg_ctl_isvwr_r;
+	reg        dbg_ctl_rflush_r;
+	reg        dbg_ctl_ddr_wr_r;
+	reg [2:0]  dbg_ctl_STATE_r;
 	reg [`WAYS+`SETS:0] dbg_ctl_flushcount_r;
 	reg [3:0]  dbg_ctl_dirty_r;      // cache_dirty[index] 当前 index 的 4 way
 	reg [3:0]  dbg_ctl_fit_r;        // 当前访问的 way 命中向量
 	reg [4:0]  dbg_ctl_index_r;       // 当前 cache index
 	reg [9:0]  dbg_ctl_tag_r;         // 当前 cache tag = maddr[20:11]
-	(* mark_debug = "true", keep = "true" *) reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
+	reg        dbg_ctl_s_lowaddr5_fall_r; // 整行 burst 完成标志（下降沿判活）
 	// ---- Task #8 八次诊断探针：flush 扫描判脏链路（2026-09-19）----
 	reg        dbg_ctl_flushreq_r;   // flush 脉冲锁存
 	reg        dbg_ctl_dirtywire_r;  // dirty 组合线本体（flush 分支实际判据）
@@ -292,7 +292,7 @@ module cache_controller(
 	wire [1:0]vblk_lru = (vkmin01 <= vkmin23) ? vmin01 : vmin23;
 	wire [`WAYS-1:0]fblk = r_flush ? flushcount[`WAYS+`SETS-1:`SETS] : vblk_lru;
 	// 探针："栈行被逐出"的次数（修复后应恒 0；非 0 说明退回了 LRU 兜底）。
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_stk_evict_n = 4'd0;
+	reg [3:0] dbg_stk_evict_n = 4'd0;
 	always @(posedge clk) begin
 		if(st0 && mmreq && !hit && !r_flush && stk_pin[fblk] && (dbg_stk_evict_n != 4'hF))
 			dbg_stk_evict_n <= dbg_stk_evict_n + 1'b1;
@@ -1065,8 +1065,8 @@ module cache_controller(
 	//   ② dbg_stk_wb_seen：tag 0x1FF 且 index<16（= BIOS 映像正下方的 1KB 栈区）是否被写回过。
 	//      若栈区返回地址在逐出时丢失（脏位/写回问题）→ 后续 ret 弹出 0 → 跳 IP=0x0000 →
 	//      在段内空内存里逐 +2 跑飞（与本轮新读数吻合）。此位是判据之一。
-	(* mark_debug = "true", keep = "true" *) reg dbg_biosfill_seen = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg dbg_stk_wb_seen   = 1'b0;
+	reg dbg_biosfill_seen = 1'b0;
+	reg dbg_stk_wb_seen   = 1'b0;
 	always @(posedge ddr_clk) begin
 		if(bios_fill) dbg_biosfill_seen <= 1'b1;
 		if((STATE == 3'b011) && ddr_wr && (wb_hiaddr[14:5] == 10'h1FF) && !wb_hiaddr[4])

@@ -256,12 +256,10 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_ck  = 1'b0;  // SPI 时钟（SCLK）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_di  = 1'b0;  // MOSI（BIOS → 卡）
 	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_do  = 1'b0;  // MISO（卡 → BIOS）
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_sd_rx  = 8'd0;  // 最近收到的字节（SDI 镜像）
 	reg dbg_sd_ck_d = 1'b0;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs <= SD_n_CS; dbg_sd_ck <= SD_CK;
 		dbg_sd_di <= SD_DI;   dbg_sd_do <= SD_DO;
-		dbg_sd_rx <= SDI;
 		dbg_sd_ck_d <= SD_CK;
 	end
 	// ⚠四十六次修正（探针除阱 #4）：
@@ -369,16 +367,11 @@ module system
 	//   dbg_sd_rxfe  : byte-aligned 0xFE seen => data token (card is sending data).
 	// =================================================================================
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ncs   = 16'd0;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ckrun = 16'd0;
 	reg dbg_sd_cs_d = 1'b1;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs_d <= SD_n_CS;
 		if(dbg_sd_cs_d && !SD_n_CS) begin
 			if(dbg_sd_ncs != 16'hFFFF) dbg_sd_ncs <= dbg_sd_ncs + 1'b1;
-			dbg_sd_ckrun <= 16'd0;
-		end else if(!SD_n_CS) begin
-			if(SD_CK && !dbg_sd_ck_d && dbg_sd_ckrun != 16'hFFFF)
-				dbg_sd_ckrun <= dbg_sd_ckrun + 1'b1;
 		end
 		if(BTN_RESET && !dbg_rst_d) dbg_sd_ncs <= 16'd0;   // [69th] this-run-only
 	end
@@ -1092,21 +1085,4 @@ module system
     //                    bit1 = F000:FC00-FFFF  (the built-in 1 KB BIOS itself)
     //                    bit2 = 0xB8000-0xB8F9F  (VGA text buffer)
     // =================================================================================
-    wire [14:0] dbg_cpu_ha = ADDR[20:6];
-    (* mark_debug = "true", keep = "true" *) reg [14:0] dbg_cpu_addr   = 15'd0;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_halt   = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg [17:0] dbg_cpu_idle   = 18'd0;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_imgrun = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg [2:0]  dbg_cpu_pgseen = 3'd0;
-    always @(posedge clk_cpu) begin
-        dbg_cpu_addr <= dbg_cpu_ha;
-        dbg_cpu_halt <= HALT;
-        if(dbg_cpu_addr != dbg_cpu_ha) dbg_cpu_idle <= 18'd0;
-        else if(dbg_cpu_idle != 18'h3FFFF) dbg_cpu_idle <= dbg_cpu_idle + 1'b1;
-        if(!IORQ && !WR && (dbg_cpu_ha >= 15'h3F80) && (dbg_cpu_ha <= 15'h3FEF))
-            dbg_cpu_imgrun <= 1'b1;
-        if((dbg_cpu_ha >= 15'h3C00) && (dbg_cpu_ha <= 15'h3C7F)) dbg_cpu_pgseen[0] <= 1'b1;
-        if(dbg_cpu_ha >= 15'h3FF0)                                dbg_cpu_pgseen[1] <= 1'b1;
-        if((dbg_cpu_ha >= 15'h2E00) && (dbg_cpu_ha <= 15'h2E03)) dbg_cpu_pgseen[2] <= 1'b1;
-    end
 endmodule

@@ -1834,15 +1834,15 @@ endfunction
 // 流水线状态
 //(* mark_debug = "true", keep = "true" *) wire [6:0]  dbg_STAGE     = STAGE;
 //(* mark_debug = "true", keep = "true" *) wire        dbg_IFETCH    = IFETCH;
-(* mark_debug = "true", keep = "true" *) reg        dbg_HALT;
+reg        dbg_HALT;
 //
 //// 当前执行的指令
 //(* mark_debug = "true", keep = "true" *) wire [7:0]  dbg_FETCH0    = FETCH[0];
 //(* mark_debug = "true", keep = "true" *) wire [5:0]  dbg_ICODE1    = ICODE1;
 //
 //// 指令指针
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_CS;
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_IP;
+reg [15:0] dbg_CS;
+reg [15:0] dbg_IP;
 reg [20:0] dbg_IADDR;
 //
 //// 复位/中断状态
@@ -1852,7 +1852,7 @@ reg [20:0] dbg_IADDR;
 //(* mark_debug = "true", keep = "true" *) wire        dbg_IRQ       = IRQ;
 //
 //// 内存/端口请求
-(* mark_debug = "true", keep = "true" *) reg        dbg_MREQ;
+reg        dbg_MREQ;
 reg        dbg_IORQ;
 
     // ★ CPU 内部诊断探针：reg+always 采样（非 top 模块禁止用 wire，否则被布线优化掉）
@@ -1868,14 +1868,14 @@ reg        dbg_IORQ;
     //   ★★ 四十二次诊断（2026-09-24）：直接抓**第一次离开 BIOS 代码窗**的那一拍
     //     （CS=0xF000 且 IP<0xFC00）= 崩点本身；并附"最后一次在代码窗内的 IP + 当时译码的 opcode"
     //     = 肇事指令。开头用 okcnt>=32 做门限，避免上电瞬间的瞬态误触发。
-    (* mark_debug = "true", keep = "true" *) reg        dbg_boot_seen = 1'b0;
+    reg        dbg_boot_seen = 1'b0;
     reg        dbg_esc_seen  = 1'b0;
     reg [15:0] dbg_esc_ip    = 16'd0;
     reg [15:0] dbg_esc_cs    = 16'd0;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
-    (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
+    reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
+    reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
+    reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
+    reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
     reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
     reg [15:0] dbg_wild_bx   = 16'd0; // 崩点时的 BX
     reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN

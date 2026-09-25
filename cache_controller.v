@@ -392,6 +392,21 @@ module cache_controller(
 	//   所以只把 `ddr_din` 换成 ROM 的对应半字，地址/时序/word_a 全不动 ⇒ 对其它区域零影响。
 	//   ROM 地址 = { index[3:0], word_a } = { maddr[9:6], lowaddr[4:1] }（= 映像第 N 个 32-bit 字，与 BlackBox 同序）。
 	// ====================================================================
+	// ====================================================================
+	// ★★ 六十三次修复（2026-09-25）：**bios_rom 必须与 BlackBox 预置逐字一致**。
+	//   起因（第 63 节）：本 ROM 是"回填源"，BlackBox（Next186_BlackBoxes.v 的
+	//   cache 模块 ram[0..0xFF]）是"上电预置源"。两者是同一个 1KB BIOS 的两份拷贝。
+	//   五十次修复 `62f2b9d`（把 SPI 降到 <=400kHz）**只改了 BlackBox**，本 ROM 漏改
+	//   ⇒ 两表有 17 个字不一致（0x74/75/76/78/7A/7B/8C/8D/8E/91/9D/AF/D8-DC）。
+	//   而 BIOS 主流程在 SD 例程**之前**就 `call 0x10F`(scan256)，其作用正是横扫
+	//   tag 4~7 × index 0~31 ⇒ **把 BIOS 的 4 份副本全部逐出** ⇒ 之后取指全部从
+	//   **本 ROM** 回填 ⇒ **真正执行的是"没降速"的那份 BIOS**，`spi_byte` 退回
+	//   每条位只占 3~4 个 CPU_CE 的原始版本 ⇒ **0x23D 期间 SPI 跑在几 MHz，
+	//   远超规范允许的 400kHz** ⇒ 卡只能零星解码（CMD0/CMD8 过），ACMD41 永远
+	//   等不到 R1=0 ⇒ 死在 `0x26F` 的**无上限轮询循环**里（底行永远没有扇区号）。
+	//   ⇒ 教训：`scan256` 之后的每一个字节都来自本 ROM，**改 BIOS 必须两处同改**。
+	//   本次把本 ROM 的 17 个字同步为 BlackBox 的值（= 带降速补丁的版本）。
+	// ====================================================================
 	reg [31:0] bios_rom [0:255];
 	initial begin
 		bios_rom[8'h00] = 32'hC88CFCFA;
@@ -510,14 +525,14 @@ module cache_controller(
 		bios_rom[8'h71] = 32'h01B4FFB0;
 		bios_rom[8'h72] = 32'h73C003EE;
 		bios_rom[8'h73] = 32'hACC3EDFB;
-		bios_rom[8'h74] = 32'hE2FFF3E8;
-		bios_rom[8'h75] = 32'hEBE8C3FA;
-		bios_rom[8'h76] = 32'h472588FF;
+		bios_rom[8'h74] = 32'hE2018FE8;
+		bios_rom[8'h75] = 32'h87E8C3FA;
+		bios_rom[8'h76] = 32'h47258801;
 		bios_rom[8'h77] = 32'hE8C3F8E2;
-		bios_rom[8'h78] = 32'h06B9FFE2;
+		bios_rom[8'h78] = 32'h06B9017E;
 		bios_rom[8'h79] = 32'hFFE7E800;
-		bios_rom[8'h7A] = 32'hD7E8F633;
-		bios_rom[8'h7B] = 32'h057446FF;
+		bios_rom[8'h7A] = 32'h73E8F633;
+		bios_rom[8'h7B] = 32'h05744601;
 		bios_rom[8'h7C] = 32'h74FFFC80;
 		bios_rom[8'h7D] = 32'h5250C3F5;
 		bios_rom[8'h7E] = 32'h0007E851;
@@ -534,12 +549,12 @@ module cache_controller(
 		bios_rom[8'h89] = 32'h0E75FEFC;
 		bios_rom[8'h8A] = 32'hFB8B02B5;
 		bios_rom[8'h8B] = 32'hE8FFA7E8;
-		bios_rom[8'h8C] = 32'h8FE8FF92;
-		bios_rom[8'h8D] = 32'hC03341FF;
-		bios_rom[8'h8E] = 32'hFF88E8EF;
+		bios_rom[8'h8C] = 32'h2BE8012E;
+		bios_rom[8'h8D] = 32'hC0334101;
+		bios_rom[8'h8E] = 32'h0124E8EF;
 		bios_rom[8'h8F] = 32'h03DABAC3;
 		bios_rom[8'h90] = 32'hE8000AB9;
-		bios_rom[8'h91] = 32'hFBE2FF7E;
+		bios_rom[8'h91] = 32'hFBE2011A;
 		bios_rom[8'h92] = 32'hBEEF01B4;
 		bios_rom[8'h93] = 32'h91E8FF38;
 		bios_rom[8'h94] = 32'h75CCFEFF;
@@ -551,7 +566,7 @@ module cache_controller(
 		bios_rom[8'h9A] = 32'hFC805858;
 		bios_rom[8'h9B] = 32'hBE4B75AA;
 		bios_rom[8'h9C] = 32'h6AE8FF50;
-		bios_rom[8'h9D] = 32'hFF4CE8FF;
+		bios_rom[8'h9D] = 32'h00E8E8FF;
 		bios_rom[8'h9E] = 32'hE8FF4ABE;
 		bios_rom[8'h9F] = 32'hCCFEFF64;
 		bios_rom[8'hA0] = 32'h56BEED74;
@@ -569,7 +584,7 @@ module cache_controller(
 		bios_rom[8'hAC] = 32'h4D8BFF24;
 		bios_rom[8'hAD] = 32'h41CD86F6;
 		bios_rom[8'hAE] = 32'hC033E78B;
-		bios_rom[8'hAF] = 32'hFF04E8EF;
+		bios_rom[8'hAF] = 32'h00A0E8EF;
 		bios_rom[8'hB0] = 32'h53C3C18B;
 		bios_rom[8'hB1] = 32'h63726165;
 		bios_rom[8'hB2] = 32'h676E6968;
@@ -610,11 +625,11 @@ module cache_controller(
 		bios_rom[8'hD5] = 32'h007AFF00;
 		bios_rom[8'hD6] = 32'hFF000000;
 		bios_rom[8'hD7] = 32'h00000000;
-		bios_rom[8'hD8] = 32'h00000000;
-		bios_rom[8'hD9] = 32'h00000000;
-		bios_rom[8'hDA] = 32'h00000000;
-		bios_rom[8'hDB] = 32'h00000000;
-		bios_rom[8'hDC] = 32'h00000000;
+		bios_rom[8'hD8] = 32'h01B4FFB0;
+		bios_rom[8'hD9] = 32'h40B951EE;
+		bios_rom[8'hDA] = 32'h59FEE200;
+		bios_rom[8'hDB] = 32'hF473C003;
+		bios_rom[8'hDC] = 32'h0000C3ED;
 		bios_rom[8'hDD] = 32'h00000000;
 		bios_rom[8'hDE] = 32'h00000000;
 		bios_rom[8'hDF] = 32'h00000000;

@@ -645,7 +645,7 @@ module cache_controller(
 		bios_rom[8'hE9] = 32'hAAC18A20;
 		bios_rom[8'hEA] = 32'h40BEFBE2;
 		bios_rom[8'hEB] = 32'hBA048A00;
-		bios_rom[8'hEC] = 32'hE8EE00E5;
+		bios_rom[8'hEC] = 32'hE8EE00E4;
 		bios_rom[8'hED] = 32'h1AE8FD59;
 		bios_rom[8'hEE] = 32'h9090C300;
 		bios_rom[8'hEF] = 32'hFFA0E853;
@@ -656,7 +656,7 @@ module cache_controller(
 		bios_rom[8'hF4] = 32'h33C35BEC;
 		bios_rom[8'hF5] = 32'h1FEEB9F6;
 		bios_rom[8'hF6] = 32'h92FD6DE8;
-		bios_rom[8'hF7] = 32'hEF00E4BA;
+		bios_rom[8'hF7] = 32'hEF00E5BA;
 		bios_rom[8'hF8] = 32'h8B5290C3;
 		bios_rom[8'hF9] = 32'h00E2BAC2;
 		bios_rom[8'hFA] = 32'h90C35AEF;

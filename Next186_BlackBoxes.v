@@ -236,10 +236,10 @@ module cache (
         ram[11'h018] = 32'hF8834001;
         ram[11'h019] = 32'hE9F27640;
         ram[11'h01A] = 32'h525000E8;
-        ram[11'h01B] = 32'hBF605351;
-        ram[11'h01C] = 32'hE89200A0;
-        ram[11'h01D] = 32'hE892030C;
-        ram[11'h01E] = 32'h92E800B6;
+        ram[11'h01B] = 32'h90605351;
+        ram[11'h01C] = 32'hE8929090;
+        ram[11'h01D] = 32'h9092030C;
+        ram[11'h01E] = 32'h92E89090;
         ram[11'h01F] = 32'h75E86100;
         ram[11'h020] = 32'h81467201;
         ram[11'h021] = 32'h75654E3F;
@@ -252,8 +252,8 @@ module cache (
         ram[11'h028] = 32'hC381EFE2;
         ram[11'h029] = 32'hF6330200;
         ram[11'h02A] = 32'hE81FEEB9;
-        ram[11'h02B] = 32'h48BF009A;
-        ram[11'h02C] = 32'hE8C28B01;
+        ram[11'h02B] = 32'h9090009A;
+        ram[11'h02C] = 32'hE8C28B90;
         ram[11'h02D] = 32'h56E8032C;
         ram[11'h02E] = 32'hEE478B00;
         ram[11'h02F] = 32'h7400F883;
@@ -437,8 +437,8 @@ module cache (
         ram[11'h0DF] = 32'h5AEEC48A;
         ram[11'h0E0] = 32'h5250C358;
         ram[11'h0E1] = 32'hEF00E3BA;
-        ram[11'h0E2] = 32'hA3E9585A;
-        ram[11'h0E3] = 32'h909090FD;
+        ram[11'h0E2] = 32'h90C3585A;
+        ram[11'h0E3] = 32'h90909090;
         ram[11'h0E4] = 32'hFE54E890;
         ram[11'h0E5] = 32'hE1BA5250;
         ram[11'h0E6] = 32'hEEC48A00;
@@ -461,8 +461,8 @@ module cache (
         ram[11'h0F7] = 32'h754E0374;
         ram[11'h0F8] = 32'h8B52C3F5;
         ram[11'h0F9] = 32'h00E2BAC2;
-        ram[11'h0FA] = 32'h43E95AEF;
-        ram[11'h0FB] = 32'h909090FD;
+        ram[11'h0FA] = 32'h90C35AEF;
+        ram[11'h0FB] = 32'h90909090;
         // 改回：
         ram[11'h0FC] = 32'h00FC00EA;   // EA 00 FC 00 = JMP F000:FC00
         ram[11'h0FD] = 32'h000000F0;   // F0

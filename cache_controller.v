@@ -755,10 +755,21 @@ module cache_controller(
 				for(w=0; w<(1<<`WAYS); w=w+1)
 					cache_lru[w][index] <= (w == fblk) ? {`WAYS{1'b1}}
 						: (cache_lru[w][index] - ((cache_lru[w][index] >= cache_lru[fblk][index]) && (cache_lru[w][index] != {`WAYS{1'b0}})));
-				// ★ 十次修复：只清被替换 way(fblk) 的 dirty。
-				//   原 &~free 在 free 多 hot（LRU 退化）时会静默清掉其他脏 way 的 dirty
-				//   而不写回 → 显存行 dirty 就是这样丢的（用户波形：isvwr 置 1 后被清 0）。
-				cache_dirty[index] <= cache_dirty[index] & ~(4'b0001 << fblk);
+				// ★★ 83rd fix (2026-09-26): the victim's dirty bit must NOT be cleared here.
+				//   Earlier rounds cleared it at the miss decision (STATE 000), i.e. BEFORE the
+				//   write-back (STATE 011) had proven it actually ran. That defeats the round-35
+				//   `wb_full` guard: the dirty bit vanished even when the burst was starved
+				//   (np=0 - the exact failure recorded in the round-35 comment above), so the
+				//   line never reached DDR; and the per-frame flush could not retry it either
+				//   (it reads dirty=0 and skips the line) -> the data was silently lost, and the
+				//   next read refilled the slot with DDR zeros.
+				//   The dirty bit is now cleared ONLY by `flush_wb_done` (STATE 011 + ddr_wr +
+				//   s_lowaddr5_fall + wb_full). Round 21 already made that event universal for
+				//   BOTH the flush path and the read-miss eviction path, and it uses the frozen
+				//   wb_hiaddr/wb_way latched at STATE 000, so it hits exactly the right
+				//   index/way in both cases.
+				//   Worst case is one redundant write-back, never lost data - the same argument
+				//   the round-35 fix is built on.
 			end
 		end
 	end

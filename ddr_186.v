@@ -1040,6 +1040,11 @@ module system
 	reg        dbg_wb_pcnt  = 1'b0;
 	reg [4:0]  dbg_fill_idx = 5'd0;
 	reg [4:0]  dbg_wb_idx   = 5'd0;
+	reg [8:0]  dbg_v4_wb_live = 9'd0;
+	reg [8:0]  dbg_v4_rd_live = 9'd0;
+	// 0x00E5 write detect + 2-FF sync into clk_sdr (see the freeze comment below)
+	reg        e5_wr = 1'b0, e5_s1 = 1'b0, e5_s2 = 1'b0;
+	always @(posedge clk_cpu) e5_wr <= IORQ & CPU_CE & WR & (PORT_ADDR[15:0] == 16'h00E5);
 	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_wb_n = 8'h00;
 	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_rd_n = 8'h00;
 	// ★ [90th probe, 2026-09-26] The 89th run showed dbg_rd_addr = 0x000 - CORRECT
@@ -1136,7 +1141,7 @@ module system
 				dbg_rdr_seen <= 1'b1;
 			end else if(dbg_fill_arm && sys_rd_data_valid) begin
 				dbg_fill_arm <= 1'b0;
-				dbg_wb_reg   <= {1'b0, dbg_fill_idx, ram_rdata[7:4]};
+				dbg_v4_wb_live <= {dbg_fill_idx, ram_rdata[7:4]};
 			end
 			if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
 				dbg_wb_arm  <= 1'b1;
@@ -1147,8 +1152,16 @@ module system
 				else begin
 					dbg_wb_pcnt <= 1'b0;
 					dbg_wb_arm  <= 1'b0;
-					dbg_rd_reg  <= {1'b0, dbg_wb_idx, cntrl0_user_input_data[7:4]};
+					dbg_v4_rd_live <= {dbg_wb_idx, cntrl0_user_input_data[7:4]};
 				end
+			end
+			// ★★ 冻结：CPU 写端口 0x00E5（自测上报那一刻）时快照。
+			//   自测在启动早期跑，而 SD 阶段会写**同一个**缓冲区（tag 0x1E0）⇒
+			//   不冻结就会拿到 SD 阶段的事件（v4 板上读数 0x021/0x020 就是这个原因）。
+			e5_s1 <= e5_wr; e5_s2 <= e5_s1;
+			if(e5_s1 && !e5_s2) begin
+				dbg_rd_reg <= {1'b0, dbg_v4_rd_live};
+				dbg_wb_reg <= {1'b0, dbg_v4_wb_live};
 			end
 		end
 	end

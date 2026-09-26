@@ -656,13 +656,15 @@ module cache_controller(
 		bios_rom[8'hF3] = 32'h7502E983;
 		bios_rom[8'hF4] = 32'h52C35BEC;
 		bios_rom[8'hF5] = 32'hEF00E4BA;
-		// ★ [95th self-test probe, 2026-09-26] 自测额外上报 offset 0x84 的回读字节到
-		//   空闲端口 0x00E5 (dbg_dbg5)。用来区分“整行被换成 line 6 的内容”(0x61)
-		//   / “line 6 的 word0 重复”(0x60) / “只有首字节错”(0x21)。
-		//   机器码：03D8 8A 45 04 / 03DB BA E5 00 / 03DE EE / 03DF 5A / 03E0 C3
-		bios_rom[8'hF6] = 32'hBA04458A;
-		bios_rom[8'hF7] = 32'h5AEE00E5;
-		bios_rom[8'hF8] = 32'h8B5290C3;
+		// ★ [95th self-test probe v2, 2026-09-26] 自测额外上报 offset 0x180
+		//   （line 6 自己的槽位）的回读字节到空闲端口 0x00E5。
+		//   v1 已经证实 [0x80]=0x60 且 [0x84]=0x61 —— 自测图案整体右移 0x100 字节（+4 行）。
+		//   本轮判据：[0x180]==0x60 ⇒ DDR 完好、是**填充读错地址**；
+		//             否则 ⇒ line 6 的**写回落到了别处**。
+		//   机器码：03D8 8A 85 00 01 / 03DC BA E5 00 / 03DF EE / 03E0 5A / 03E1 C3
+		bios_rom[8'hF6] = 32'h0100858A;
+		bios_rom[8'hF7] = 32'hEE00E5BA;
+		bios_rom[8'hF8] = 32'h8B52C35A;
 		bios_rom[8'hF9] = 32'h00E2BAC2;
 		bios_rom[8'hFA] = 32'hB9C35AEF;
 		bios_rom[8'hFB] = 32'hFEE2FFFF;

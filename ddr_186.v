@@ -397,10 +397,12 @@ module system
 	//                   AL = 对照（填 1KB 后读 offset 0x40，期望 0x10）
 	//                   AH = 测量（scan256 逐出全部后读 offset 0x80，期望 0x20）
 	//                   ⇒ 整体期望 0x2010
-	//   0x00E5 (8b)  <- ★ 95th self-test probe：scan256 后再读 offset 0x84 的字节
-	//                   用来区分“整行被换成另一行的内容”(0x61)
-	//                   / “另一行的 word0 重复”(0x60) / “只有首字节错”(0x21)。
-	//                   字节 0x84 属于第 1 个字，所以它能直接分辨这三种形态。
+	//   0x00E5 (8b)  <- ★ 95th self-test probe v2：scan256 后再读 offset 0x180
+	//                   （line 6 自己的槽位）的字节。
+	//                   v1 已经证实 [0x80]=0x60 且 [0x84]=0x61 ⇒ 自测图案
+	//                   整体右移 0x100 字节（+4 行），line 2 槽位装的是 line 6 的整行内容。
+	//                   本轮判据：[0x180]==0x60 ⇒ DDR 完好、是填充读错地址（读侧）；
+	//                             否则 ⇒ line 6 的写回落到了别处（写侧）。
 	// In the 68th revision these five probes were deleted as useless/traps:
 	//   dbg_sd_shiftreq (saturates at once), dbg_sd_ckc / dbg_sd_ckall (12-bit
 	//   saturating counters), dbg_sd_dolow (== dbg_sd_rxnz), dbg_sd_rx01 (SDI

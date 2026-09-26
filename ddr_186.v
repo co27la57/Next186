@@ -661,7 +661,7 @@ module system
 		 .ddr_rd(ddr_rd), 
 		 .ddr_wr(ddr_wr),
 		 .hiaddr(cache_hi_addr),
-		 .cache_write_data(sys_rd_data_valid), // ★★ 82nd fix: mirror the round-31 write-back fix - drop crw (a VGA line read clears it mid-fill -> the refill stops part way and the rest of the line keeps 0). sys_rd_data_valid is only high during R_PUSH_0/R_PUSH_1. 
+		 .cache_write_data((sys_cmd_ack == 2'b11) && sys_rd_data_valid), // 91st fix: gate the fill on the burst the DDR FSM actually took. ram_rd_valid is shared by BOTH read commands (2'b10 = VGA scan-out, 2'b11 = cache fill), so the ungated form let a VGA burst drive the fill's lowaddr AND write VGA data straight into the cache line. The write-back side was never affected: ram_wr_valid is only high for cmd 2'b01.
 		 .cache_read_data(sys_wr_data_valid),  // ★ 三十一次修复：去掉 crw——crw 反映“最近一条 DDR 命令”，VGA 行读会把它清 0 → 写回 beat 丢失、BRAM 未使能→写出旧值。现改用 ram_wr_valid（仅写回 burst 时高）
 		 .flush(auto_flush == 3'b110),
 		 .cache_line_start(cache_line_start),
@@ -967,6 +967,12 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_rd_or   = 16'h0000;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_or  = 16'h0000;
 
+	// ** [91st probe, 2026-09-26] Mechanism check for the 91st fix: did a NON-cache read burst
+	//    (VGA scan-out, cmd 2'b10) ever deliver data while the cache's fill read was pending
+	//    (ddr_rd = 1)?  Before the fix such a burst drove the fill's lowaddr and wrote VGA
+	//    pixels straight into the cache line.  Built only from ddr_186.v's own clk_sdr signals.
+	(* mark_debug = "true", keep = "true" *) reg dbg_fill_foreign = 1'b0;
+
 	// ★★ [89th probe, 2026-09-26] Which LINE does the DDR actually receive for the fill,
 	//    and which one for the write-back of the same eviction?  Latch the line-in-page of the
 	//    FIRST cache READ ack whose tag is 0x1E0 (= an SD-buffer line fill) and of the FIRST
@@ -1022,6 +1028,7 @@ module system
 			dbg_wb_or      <= 32'h00000000;
 			dbg_rd_or      <= 16'h0000;
 			dbg_vga_or     <= 16'h0000;
+			dbg_fill_foreign <= 1'b0;
 			dbg_rd_seen    <= 1'b0;
 			dbg_wb_seen    <= 1'b0;
 			dbg_wbr_seen   <= 1'b0;
@@ -1039,6 +1046,7 @@ module system
 			if(ddr_rd && dbg_buf_line) dbg_bufrd_seen <= 1'b1;
 			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
 			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
+			if(ddr_rd && sys_rd_data_valid && (sys_cmd_ack != 2'b11)) dbg_fill_foreign <= 1'b1;
 			// [89th] the real DDR address of the FIRST buffer-line fill and of the FIRST
 			//   buffer-line eviction, sampled AT THE ACK.  Kept for comparison against the
 			//   skew-free [90th fix] block below - a mismatch between the two proves that the

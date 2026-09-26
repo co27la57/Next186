@@ -979,6 +979,20 @@ module system
 	//    dbg_rd_seen / dbg_wb_seen exist because 0x000 is a LEGAL address (buffer line 0).
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_addr = 10'h000;
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_addr = 10'h000;
+	// ★ [90th probe, 2026-09-26] The 89th run showed dbg_rd_addr = 0x000 - CORRECT
+	//   (the self test's 1 KB fill starts with WRITE misses, and a write-allocate also
+	//    performs a fill, so the first buffer-line fill is line 0, not line 2 as I had
+	//    wrongly predicted).  dbg_wb_addr = 0x00F cannot be trusted yet, because it
+	//   samples cache_hi_addr AT THE ACK: if the DDR master delays the burst (the VGA
+	//   read has priority) the ack can land after hiaddr has moved on to another line.
+	//   Add the registers that CANNOT move - hiaddr is maddr all through STATE 111 and
+	//   wb_hiaddr is frozen all through STATE 011 - and gate the write sample on
+	//   wb_hiaddr[14:5] so the gate itself is skew-free.
+	//   dbg_rd_reg / dbg_wb_reg are those registers; dbg_wbr_seen distinguishes a
+	//   legitimate 0x000 (buffer line 0) from "never latched".
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_reg = 10'h000;
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_reg = 10'h000;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_wbr_seen = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_rd_seen = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_wb_seen = 1'b0;
 	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
@@ -1009,6 +1023,7 @@ module system
 			dbg_vga_or     <= 16'h0000;
 			dbg_rd_seen    <= 1'b0;
 			dbg_wb_seen    <= 1'b0;
+			dbg_wbr_seen   <= 1'b0;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
 				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
@@ -1026,10 +1041,16 @@ module system
 				if(sys_cmd_ack == 2'b11 && !dbg_rd_seen) begin
 					dbg_rd_seen <= 1'b1;
 					dbg_rd_addr <= cache_hi_addr[9:0];
+					dbg_rd_reg <= hiaddr[9:0];
 				end
 				if(sys_cmd_ack == 2'b01 && !dbg_wb_seen) begin
 					dbg_wb_seen <= 1'b1;
 					dbg_wb_addr <= cache_hi_addr[9:0];
+				end
+				// [90th] skew-free version: gate on wb_hiaddr and latch wb_hiaddr itself
+				if(sys_cmd_ack == 2'b01 && (wb_hiaddr[14:5] == 10'h1E0) && !dbg_wbr_seen) begin
+					dbg_wbr_seen <= 1'b1;
+					dbg_wb_reg   <= wb_hiaddr[9:0];
 				end
 			end
 		end

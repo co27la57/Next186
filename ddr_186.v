@@ -1040,6 +1040,8 @@ module system
 	reg        dbg_wb_pcnt  = 1'b0;
 	reg [4:0]  dbg_fill_idx = 5'd0;
 	reg [4:0]  dbg_wb_idx   = 5'd0;
+	reg [14:0] dbg_bufwb_a_live = 15'd0;
+	reg [7:0]  dbg_bufwb_n_live = 8'd0;
 	reg [8:0]  dbg_v4_wb_live = 9'd0;
 	reg [8:0]  dbg_v4_rd_live = 9'd0;
 	// 0x00E5 write detect + 2-FF sync into clk_sdr (see the freeze comment below)
@@ -1097,8 +1099,8 @@ module system
 			dbg_spur_rd_n  <= 8'h00;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
-				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
-				dbg_bufwb_a <= cache_hi_addr;
+				if(dbg_bufwb_n_live != 8'hFF) dbg_bufwb_n_live <= dbg_bufwb_n_live + 1'b1;
+				dbg_bufwb_a_live <= cache_hi_addr;
 			end
 			if(ddr_wr && dbg_buf_line) dbg_wb_or <= dbg_wb_or | cntrl0_user_input_data;
 			if(ddr_rd && dbg_buf_line) dbg_bufrd_seen <= 1'b1;
@@ -1162,6 +1164,10 @@ module system
 			if(e5_s1 && !e5_s2) begin
 				dbg_rd_reg <= {1'b0, dbg_v4_rd_live};
 				dbg_wb_reg <= {1'b0, dbg_v4_wb_live};
+				// ★ 同一事件下同步冻结这两个（它们也是“最新覆盖”型，
+				//   SD 阶段会覆盖）。dbg_bufwb_a = 自测期间最后一次缓冲行写回的 hiaddr。
+				dbg_bufwb_a <= dbg_bufwb_a_live;
+				dbg_bufwb_n <= dbg_bufwb_n_live;
 			end
 		end
 	end

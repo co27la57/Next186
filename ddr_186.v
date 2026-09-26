@@ -1112,16 +1112,23 @@ module system
 			//   in ddr_186.v - that is what broke synthesis with [Synth 8-36].  No extra port
 			//   is needed: cache_hi_addr already carries both of them out here (hiaddr = maddr
 			//   all through STATE 111, wb_hiaddr frozen all through STATE 011).
-			if(!s_prog_empty && dbg_buf_line) begin
-				if(s_ddr_wr && !dbg_wbr_seen) begin
-					dbg_wbr_seen <= 1'b1;
-					dbg_wb_reg   <= cache_hi_addr[9:0];
-				end
-				if(!s_ddr_wr && s_ddr_rd && !dbg_rdr_seen) begin
-					dbg_rdr_seen <= 1'b1;
-					dbg_rd_reg   <= cache_hi_addr[9:0];
-				end
+			// ★★ [95th probe v3] 直接量 hiaddr -> sdraddr 的错位。
+			//   板上已知：CPU 读缓冲行 k 返回 W(k+4)（确定性 +0x100 字节 = 4 行），
+			//   而 AL=[0x40]=0x10 正确 ⇒ 错位在 DDR 往返。
+			//   sdraddr[14:5] 恒等于 cache_hi_addr[9:0]，所以 +4 只能是
+			//   “sdraddr 锁存到的 hiaddr 不是被填充的那一行”。
+			//   在每个缓冲行 FILL 的 ack 上升沿同时锁两者：
+			//     dbg_rd_reg = sdraddr[14:5]      （FSM 实际拿到的地址）
+			//     dbg_wb_reg = cache_hi_addr[9:0] （cache 呈现的地址）
+			//   两者应相等；若 dbg_rd_reg == dbg_wb_reg + 4 则错位得证。
+			//   （未新增探针信号 ⇒ 不用重建 Set Up Debug。旧的“首个”锁存已知 0x000/0x00f，已废。）
+			if(dbg_buf_line && (sys_cmd_ack == 2'b11) && (sys_cmd_ack_d1 != 2'b11)) begin
+				dbg_rd_reg   <= sdraddr[14:5];
+				dbg_wb_reg   <= cache_hi_addr[9:0];
+				dbg_rdr_seen <= 1'b1;
 			end
+			if(dbg_buf_line && (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01))
+				dbg_wbr_seen <= 1'b1;
 		end
 	end
 

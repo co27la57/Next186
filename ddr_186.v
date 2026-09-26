@@ -960,9 +960,26 @@ module system
 	//    correctly in the cache.  So either no write-back ever happened for these lines
 	//    (dbg_bufwb_n == 0) or one did and its address/data is wrong (dbg_bufwb_n != 0).
 	// ============================================================================
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bufwb_n = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bufrd_n = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [14:0] dbg_bufwb_a = 15'h0000;
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bufwb_n  = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [14:0] dbg_bufwb_a  = 15'h0000;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_bufrd_seen = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg [31:0] dbg_wb_or   = 32'h00000000;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_rd_or   = 16'h0000;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_or  = 16'h0000;
+	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
+	//   address (0x3C0F = tag 0x1E0 / index 15), so buffer-line write-backs DO reach the DDR
+	//   controller - and dbg_bufrd_n read 0, but that probe was WRONG: it used ddr_rd's
+	//   rising edge, and ddr_rd rises at STATE 000 while hiaddr still holds the VICTIM's
+	//   address, not the address of the line about to be filled.  Replaced by a level-tested
+	//   sticky flag.  Now measure the two DATA paths directly:
+	//     dbg_wb_or  = OR of the 32-bit write data (ddr_dout / ram_wdata) over every cycle a
+	//                  buffer-line write-back is active  -> 0 means the write-back carried
+	//                  nothing but zeros (wrong BRAM way/word in the write-back read)
+	//     dbg_rd_or  = OR of ram_rdata while the CACHE owns the read (ddr_rd high) for a buffer
+	//                  line -> 0 means the DDR never returned any data for a buffer fill, so
+	//                  the cache would be filled with zeros
+	//     dbg_vga_or = OR of ram_rdata for reads NOT owned by the cache (the VGA scan-out) -
+	//                  the known-good control: non-zero proves the DDR read path itself works
 	wire dbg_buf_line = (cache_hi_addr[14:5] == 10'h1E0);
 	reg dbg_rst_s1 = 1'b0;
 	reg dbg_rst_s2 = 1'b0;
@@ -970,16 +987,20 @@ module system
 		dbg_rst_s1 <= BTN_RESET;
 		dbg_rst_s2 <= dbg_rst_s1;
 		if(dbg_rst_s2) begin               // held at 0 during reset => "this BIOS run only"
-			dbg_bufwb_n <= 8'h00;
-			dbg_bufrd_n <= 8'h00;
+			dbg_bufwb_n    <= 8'h00;
+			dbg_bufrd_seen <= 1'b0;
+			dbg_wb_or      <= 32'h00000000;
+			dbg_rd_or      <= 16'h0000;
+			dbg_vga_or     <= 16'h0000;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
 				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
 				dbg_bufwb_a <= cache_hi_addr;
 			end
-			if(ddr_rd && !s_ddr_rd && dbg_buf_line) begin
-				if(dbg_bufrd_n != 8'hFF) dbg_bufrd_n <= dbg_bufrd_n + 1'b1;
-			end
+			if(ddr_wr && dbg_buf_line) dbg_wb_or <= dbg_wb_or | cntrl0_user_input_data;
+			if(ddr_rd && dbg_buf_line) dbg_bufrd_seen <= 1'b1;
+			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
+			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
 		end
 	end
 

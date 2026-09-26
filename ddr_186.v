@@ -138,6 +138,13 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg s_prog_empty;
 	reg s_ddr_rd = 1'b0;
 	reg s_ddr_wr = 1'b0;
+	// ★★ 95th 修复（2026-09-26）：一条 cache 事务只允许一次 AXI burst
+	//   —— cache_cmd_done 标记“当前呈现的 cache 请求已经被服务过一次 burst”，
+	//   当 cache 完全无请求时自动复位，下一条事务自然重新使能。
+	//   cache_owns = 本拍 cache 是否拥有 DDR 总线（用于命令寄存器与 sdraddr 同源）。
+	//   详见下方 cntrl0_user_command_register 处的 95th 修复注释。
+	reg cache_cmd_done = 1'b0;
+	wire cache_owns = (s_ddr_wr || s_ddr_rd) && !cache_cmd_done;
 	reg crw = 0;	
 	(* mark_debug = "true", keep = "true" *) reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
 	reg s_RS232_DCE_RXD;
@@ -898,15 +905,50 @@ module system
 		s_ddr_wr <= ddr_wr;
 		s_vga_endline <= vga_repln_count == vga_repln;
 		s_vga_endframe <= vga_end_frame;
-		sdraddr <= s_prog_empty || !(s_ddr_wr || s_ddr_rd) ? 
+		// ★★ 95th 修复：请求被服务后立即释放命令线。
+		//   cache_line_start 正是“FSM 确认了 cache 行读(2'b11)/写(2'b01)”的那个单周期脉冲
+		//   （见上方 885 行），所以它天然就是“已服务”事件。
+		//   清零条件取“cache 完全无请求”：只有此时才能确定上一条事务已结束。
+		//   （cache 在 STATE 011/111 里只能靠 ram_wr_valid/ram_rd_valid 推进，
+		//    所以 ddr_wr/ddr_rd 不可能在 FSM 服务之前自行拉低；不会丢事务。）
+		if(!ddr_wr && !ddr_rd)    cache_cmd_done <= 1'b0;
+		else if(cache_line_start) cache_cmd_done <= 1'b1;
+		
+		// ★★ 95th 修复：地址使能与命令同源（cache_owns），
+		//   保证 FSM 采样瞬间“命令”与“地址”不会错配
+		//   （原来两者分别取自 s_ddr_wr||s_ddr_rd 和实时 cache_hi_addr，存在错配窗口）。
+		sdraddr <= s_prog_empty || !cache_owns ? 
 		    {6'b000001, vga_ddr_row_col + vga_lnbytecount} : 
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 		
 		
+		// ★★★ 95th 修复（2026-09-26）：一条 cache 事务只允许一次 AXI burst。
+		//
+		//   根因（sim/tb/ddr_pipe.v 逐拍日志实测，gate_fill=1）：
+		//     ddr_wr / ddr_rd 是**电平**，覆盖整条 cache 事务（实测 144 个 clk_sdr），
+		//     而 top_zynq7010 的一次 16 拍 burst 只要 ~80 个 clk_sdr，之后还有 6 拍 IDLE 采样窗口。
+		//     于是 FSM 在**同一条事务内**就回到 IDLE，重新采样本寄存器
+		//     （此时 s_ddr_wr 仍为 1）⇒ 再发一次完整的 16 拍 burst。
+		//   对写回是致命的：ram_wdata 取自 cache 的 ddr_dout，而 wb_pcnt 在 ddr_wr=0 时被清零
+		//     （cache_controller.v:358）。此时 cache 已离开 STATE 011 ⇒ wb_pcnt==0 ⇒
+		//     16 拍全发 word0，把刚写回正确的那一行覆盖成“word0 重复”。
+		//   实测证据（cyc 36717 → 36804，SD 缓冲行 0）：
+		//     36717 AW cmd=01 byte=08150000 cst=3 ddrwr=1  ← 正确写回
+		//     36803 IDLE ic=5 ack=00 cmd=01 dwr=0          ← FSM 采样到残留命令
+		//     36804 AW cmd=10 byte=08150000 cst=7 ddrwr=0  ← 多发的伪 burst，16 拍全 word0
+		//   16 个缓冲行**行行如此**：48 次 AW 中 16 次是伪 burst。
+		//   端到端判据：自测读回整个 1KB 缓冲区，
+		//     旧逻辑 960/1024 字节错，95th 修复后 0/1024。
+		//
+		//   修法：cache 一条事务只需要一次 burst。cache_cmd_done 在 FSM 确认（cache_line_start）
+		//   后置位，使 cache_owns 拉低⇒命令线立即释放；此时 FSM 还在 burst 中，
+		//   到它下一个 IDLE 采样窗口时 cmd 已经是 2'b10（或 2'b00）。
+		//   命令类型与地址仍取**实时** s_ddr_wr/s_ddr_rd 与 cache_hi_addr（不锁存）：
+		//   若锁存，则 VGA 抢占把 FSM 拖过请求尾巴后会把写回当成填充发，
+		//   cache 会在 STATE 011 等一个永远不会来的 ram_wr_valid → 死锁。
 		if(s_prog_empty) cntrl0_user_command_register <= 2'b10;
-		else if(s_ddr_wr) cntrl0_user_command_register <= 2'b01;
-		else if(s_ddr_rd) cntrl0_user_command_register <= 2'b11;
+		else if(cache_owns) cntrl0_user_command_register <= s_ddr_wr ? 2'b01 : 2'b11;
 		else if(~s_prog_full) cntrl0_user_command_register <= 2'b10;
 		else cntrl0_user_command_register <= 2'b00;
 					
@@ -973,18 +1015,32 @@ module system
 	//    pixels straight into the cache line.  Built only from ddr_186.v's own clk_sdr signals.
 	(* mark_debug = "true", keep = "true" *) reg dbg_fill_foreign = 1'b0;
 
-	// ★★ [89th probe, 2026-09-26] Which LINE does the DDR actually receive for the fill,
-	//    and which one for the write-back of the same eviction?  Latch the line-in-page of the
-	//    FIRST cache READ ack whose tag is 0x1E0 (= an SD-buffer line fill) and of the FIRST
-	//    cache WRITE ack whose tag is 0x1E0 (= the eviction of a buffer line).
-	//    The 87th self test reads offset 0x80 right after scan256, i.e. its refill of tag 0x1E0 /
-	//    index 2 is the FIRST buffer-line fill of the whole run, so the expected value is
-	//    dbg_rd_addr = 0x002 (buffer line i sits at line-in-page 0x000+i because tag 0x1E0 has
-	//    tag[4:0] = 0).  If dbg_rd_addr equals the line that was just evicted (the value in
-	//    dbg_wb_addr) then the fill re-fetched the line it had just written back.
-	//    dbg_rd_seen / dbg_wb_seen exist because 0x000 is a LEGAL address (buffer line 0).
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_addr = 10'h000;
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_addr = 10'h000;
+	// ** [94th probe, 2026-09-26] Name the SOURCE LINE of the buffer-line-2 data, with a
+	//   statistic that a single stray word cannot saturate.  The 93rd OR pair failed: one
+	//   0xFF word drives a 32-bit OR to 0xFF, and 0xFF is not in the self-test pattern at
+	//   all (line 2 = 0x20..0x2F, line 5 = 0x50..0x5F), so it could not say which side or
+	//   which line the data came from.  Every byte of buffer line k shares the HIGH NIBBLE
+	//   (k >> 4), so the OR of just the high nibble names the source line and is immune to
+	//   both word phase and single-word saturation:
+	//     dbg_cpu_w2[3:0] = OR of DOUT[7:4] on every CPU store to tag 0x1E0 / index 2
+	//                       -> what the CPU actually wrote        (expected 4'h2)
+	//     dbg_wb2_hi[3:0] = OR of cntrl0_user_input_data[7:4] over the line-2 write-back
+	//                       -> what the write-back presented       (expected 4'h2)
+	//     dbg_rd2_hi[3:0] = OR of ram_rdata[7:4] while the cache owns the read, line 2
+	//                       -> what the fill returned              (expected 4'h2)
+	//     dbg_wb2_cnt / dbg_rd2_cnt = event counts (prove the capture happened)
+	//   Reading: 4'h5 = the data of line+3 ; 4'hF = 0xFF / erased (never written)
+	//     cpu=2 wb=2 rd=2 -> data path is clean throughout; the fault is elsewhere
+	//     cpu=2 wb=5      -> the WRITE-BACK read the wrong line (BRAM port-A way/word)
+	//     cpu=2 wb=2 rd=5 -> the FILL returned the wrong line
+	//     cpu!=2          -> the CPU store to line 2 never landed
+	//   Gate note: MREQ is only an implicit net in this file, so the CPU store is gated on
+	//   WR && CPU_CE (both explicitly declared) plus ADDR being tag 0x1E0 / index 2.
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_cpu_w2  = 4'h0;
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_wb2_hi  = 4'h0;
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_rd2_hi  = 4'h0;
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_wb2_cnt = 4'd0;
+	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_rd2_cnt = 4'd0;
 	// ★ [90th probe, 2026-09-26] The 89th run showed dbg_rd_addr = 0x000 - CORRECT
 	//   (the self test's 1 KB fill starts with WRITE misses, and a write-allocate also
 	//    performs a fill, so the first buffer-line fill is line 0, not line 2 as I had
@@ -1000,8 +1056,6 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_reg = 10'h000;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_wbr_seen = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_rdr_seen = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_rd_seen = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_wb_seen = 1'b0;
 	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
 	//   address (0x3C0F = tag 0x1E0 / index 15), so buffer-line write-backs DO reach the DDR
 	//   controller - and dbg_bufrd_n read 0, but that probe was WRONG: it used ddr_rd's
@@ -1017,6 +1071,11 @@ module system
 	//     dbg_vga_or = OR of ram_rdata for reads NOT owned by the cache (the VGA scan-out) -
 	//                  the known-good control: non-zero proves the DDR read path itself works
 	wire dbg_buf_line = (cache_hi_addr[14:5] == 10'h1E0);
+	// [93rd probe] tag 0x1E0 (SD buffer) AND index 2 - the line the self test reads back
+	wire dbg_l2 = (cache_hi_addr[14:5] == 10'h1E0) && (cache_hi_addr[4:0] == 5'd2);
+	// [94th probe] the same line, but on the CPU address bus (unit186's ADDR), for the
+	//   "did the CPU store to line 2 actually happen" capture
+	wire dbg_cpu_l2 = (ADDR[20:11] == 10'h1E0) && (ADDR[10:6] == 5'd2);
 	reg dbg_rst_s1 = 1'b0;
 	reg dbg_rst_s2 = 1'b0;
 	always @(posedge clk_sdr) begin
@@ -1029,14 +1088,15 @@ module system
 			dbg_rd_or      <= 16'h0000;
 			dbg_vga_or     <= 16'h0000;
 			dbg_fill_foreign <= 1'b0;
-			dbg_rd_seen    <= 1'b0;
-			dbg_wb_seen    <= 1'b0;
 			dbg_wbr_seen   <= 1'b0;
-			dbg_rd_addr    <= 10'h000;
-			dbg_wb_addr    <= 10'h000;
 			dbg_rd_reg     <= 10'h000;
 			dbg_wb_reg     <= 10'h000;
 			dbg_rdr_seen   <= 1'b0;
+			dbg_cpu_w2     <= 4'h0;
+			dbg_wb2_hi     <= 4'h0;
+			dbg_rd2_hi     <= 4'h0;
+			dbg_wb2_cnt    <= 4'd0;
+			dbg_rd2_cnt    <= 4'd0;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
 				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
@@ -1047,22 +1107,17 @@ module system
 			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
 			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
 			if(ddr_rd && sys_rd_data_valid && (sys_cmd_ack != 2'b11)) dbg_fill_foreign <= 1'b1;
-			// [89th] the real DDR address of the FIRST buffer-line fill and of the FIRST
-			//   buffer-line eviction, sampled AT THE ACK.  Kept for comparison against the
-			//   skew-free [90th fix] block below - a mismatch between the two proves that the
-			//   ack-based sample is skewed (the DDR master can delay the burst), it does NOT
-			//   by itself prove a wrong address.
-			if(sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00 && dbg_buf_line) begin
-				if(sys_cmd_ack == 2'b11 && !dbg_rd_seen) begin
-					dbg_rd_seen <= 1'b1;
-					dbg_rd_addr <= cache_hi_addr[9:0];
-				end
-				if(sys_cmd_ack == 2'b01 && !dbg_wb_seen) begin
-					dbg_wb_seen <= 1'b1;
-					dbg_wb_addr <= cache_hi_addr[9:0];
-				end
+			// ** [94th probe] high-nibble source-line captures for buffer line 2
+			if(WR && CPU_CE && dbg_cpu_l2) dbg_cpu_w2 <= dbg_cpu_w2 | DOUT[7:4];
+			if(ddr_wr && dbg_l2) dbg_wb2_hi <= dbg_wb2_hi | cntrl0_user_input_data[7:4];
+			if(ddr_rd && dbg_l2 && sys_rd_data_valid) dbg_rd2_hi <= dbg_rd2_hi | ram_rdata[7:4];
+			if(ddr_wr && !s_ddr_wr && dbg_l2) begin
+				if(dbg_wb2_cnt != 4'hF) dbg_wb2_cnt <= dbg_wb2_cnt + 1'b1;
 			end
-			// [90th fix, 2026-09-26] SKEW-FREE: sample at the COMMAND / ADDRESS LOAD edge,
+			if(ddr_rd && !s_ddr_rd && dbg_l2) begin
+				if(dbg_rd2_cnt != 4'hF) dbg_rd2_cnt <= dbg_rd2_cnt + 1'b1;
+			end
+			// [90th fix, 2026-09-26] SKEW-FREE: sample at the COMMAND
 			//   not at the ack.  Lines 901-911 load both sdraddr (the DDR address) and
 			//   cntrl0_user_command_register (01 = write, 11 = read) on the SAME edge, from
 			//   s_prog_empty / s_ddr_wr / s_ddr_rd.  Gating on exactly that condition and

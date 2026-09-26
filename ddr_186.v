@@ -1034,6 +1034,12 @@ module system
 	//     （含 0xF? 字节）写进**同一个** F000:0000 缓冲区，所以 cpu/wb/rd
 	//     三个 OR 一律饱和到 4'hF，零信息量（板上实测 cpu=f wb=f rd=f）。
 	//     腾出的 20 bit 预算给本探针（16 bit）。
+	// 95th probe v4 scratch (not probes themselves)
+	reg        dbg_fill_arm = 1'b0;
+	reg        dbg_wb_arm   = 1'b0;
+	reg        dbg_wb_pcnt  = 1'b0;
+	reg [4:0]  dbg_fill_idx = 5'd0;
+	reg [4:0]  dbg_wb_idx   = 5'd0;
 	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_wb_n = 8'h00;
 	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_rd_n = 8'h00;
 	// ★ [90th probe, 2026-09-26] The 89th run showed dbg_rd_addr = 0x000 - CORRECT
@@ -1112,23 +1118,38 @@ module system
 			//   in ddr_186.v - that is what broke synthesis with [Synth 8-36].  No extra port
 			//   is needed: cache_hi_addr already carries both of them out here (hiaddr = maddr
 			//   all through STATE 111, wb_hiaddr frozen all through STATE 011).
-			// ★★ [95th probe v3] 直接量 hiaddr -> sdraddr 的错位。
-			//   板上已知：CPU 读缓冲行 k 返回 W(k+4)（确定性 +0x100 字节 = 4 行），
-			//   而 AL=[0x40]=0x10 正确 ⇒ 错位在 DDR 往返。
-			//   sdraddr[14:5] 恒等于 cache_hi_addr[9:0]，所以 +4 只能是
-			//   “sdraddr 锁存到的 hiaddr 不是被填充的那一行”。
-			//   在每个缓冲行 FILL 的 ack 上升沿同时锁两者：
-			//     dbg_rd_reg = sdraddr[14:5]      （FSM 实际拿到的地址）
-			//     dbg_wb_reg = cache_hi_addr[9:0] （cache 呈现的地址）
-			//   两者应相等；若 dbg_rd_reg == dbg_wb_reg + 4 则错位得证。
-			//   （未新增探针信号 ⇒ 不用重建 Set Up Debug。旧的“首个”锁存已知 0x000/0x00f，已废。）
-			if(dbg_buf_line && (sys_cmd_ack == 2'b11) && (sys_cmd_ack_d1 != 2'b11)) begin
-				dbg_rd_reg   <= sdraddr[14:5];
-				dbg_wb_reg   <= cache_hi_addr[9:0];
+			// ★★★ [95th probe v4] 给“写回 / 填充送出的数据”指认它属于哪一行。
+			//   v3 已经证明地址通路干净（板上 dbg_rd_reg == dbg_wb_reg）
+			//   ⇒ 那个 +0x100 字节（+4 行）位移在**数据侧**。
+			//   自测图案 byte@m=(m>>2)&0xFF ⇒ 缓冲行 k 的**任何字**高半字节都 = (k & 0xF)
+			//   ⇒ 用高半字节就能直接指认数据来自哪一行。
+			//   锁最近一次缓冲行写回 / 填充：
+			//     dbg_rd_reg[3:0] = 写回第 2 拍数据的高半字节；[8:4] = 该写回**属于**的行
+			//     dbg_wb_reg[3:0] = 填充第 1 拍数据的高半字节；[8:4] = 该填充**属于**的行
+			//   判读：低半字节 == (行号 & 0xF) ⇒ 自己的数据；
+			//         不等 ⇒ 拿到了**别的行**的数据。
+			//   （未新增探针信号 ⇒ 不用重建 Set Up Debug。）
+			// 只针对 line 2（自测在 offset 0x80 读的就是这一行）
+			if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b11) && (sys_cmd_ack_d1 != 2'b11)) begin
+				dbg_fill_arm <= 1'b1;
+				dbg_fill_idx <= cache_hi_addr[4:0];
 				dbg_rdr_seen <= 1'b1;
+			end else if(dbg_fill_arm && sys_rd_data_valid) begin
+				dbg_fill_arm <= 1'b0;
+				dbg_wb_reg   <= {1'b0, dbg_fill_idx, ram_rdata[7:4]};
 			end
-			if(dbg_buf_line && (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01))
+			if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
+				dbg_wb_arm  <= 1'b1;
+				dbg_wb_idx  <= cache_hi_addr[4:0];
 				dbg_wbr_seen <= 1'b1;
+			end else if(dbg_wb_arm && sys_wr_data_valid) begin
+				if(dbg_wb_pcnt == 1'b0) dbg_wb_pcnt <= 1'b1;
+				else begin
+					dbg_wb_pcnt <= 1'b0;
+					dbg_wb_arm  <= 1'b0;
+					dbg_rd_reg  <= {1'b0, dbg_wb_idx, cntrl0_user_input_data[7:4]};
+				end
+			end
 		end
 	end
 

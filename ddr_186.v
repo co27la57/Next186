@@ -966,6 +966,21 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg [31:0] dbg_wb_or   = 32'h00000000;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_rd_or   = 16'h0000;
 	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_or  = 16'h0000;
+
+	// ★★ [89th probe, 2026-09-26] Which LINE does the DDR actually receive for the fill,
+	//    and which one for the write-back of the same eviction?  Latch the line-in-page of the
+	//    FIRST cache READ ack whose tag is 0x1E0 (= an SD-buffer line fill) and of the FIRST
+	//    cache WRITE ack whose tag is 0x1E0 (= the eviction of a buffer line).
+	//    The 87th self test reads offset 0x80 right after scan256, i.e. its refill of tag 0x1E0 /
+	//    index 2 is the FIRST buffer-line fill of the whole run, so the expected value is
+	//    dbg_rd_addr = 0x002 (buffer line i sits at line-in-page 0x000+i because tag 0x1E0 has
+	//    tag[4:0] = 0).  If dbg_rd_addr equals the line that was just evicted (the value in
+	//    dbg_wb_addr) then the fill re-fetched the line it had just written back.
+	//    dbg_rd_seen / dbg_wb_seen exist because 0x000 is a LEGAL address (buffer line 0).
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_addr = 10'h000;
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_addr = 10'h000;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_rd_seen = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_wb_seen = 1'b0;
 	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
 	//   address (0x3C0F = tag 0x1E0 / index 15), so buffer-line write-backs DO reach the DDR
 	//   controller - and dbg_bufrd_n read 0, but that probe was WRONG: it used ddr_rd's
@@ -992,6 +1007,8 @@ module system
 			dbg_wb_or      <= 32'h00000000;
 			dbg_rd_or      <= 16'h0000;
 			dbg_vga_or     <= 16'h0000;
+			dbg_rd_seen    <= 1'b0;
+			dbg_wb_seen    <= 1'b0;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
 				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
@@ -1001,6 +1018,20 @@ module system
 			if(ddr_rd && dbg_buf_line) dbg_bufrd_seen <= 1'b1;
 			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
 			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
+			// [89th] the real DDR address of the FIRST buffer-line fill and of the FIRST
+			//   buffer-line eviction.  cache_hi_addr is stable for the whole burst
+			//   (hiaddr = maddr all through STATE 111, wb_hiaddr all through STATE 011),
+			//   so sampling it one cycle late at the ack is harmless.
+			if(sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00 && dbg_buf_line) begin
+				if(sys_cmd_ack == 2'b11 && !dbg_rd_seen) begin
+					dbg_rd_seen <= 1'b1;
+					dbg_rd_addr <= cache_hi_addr[9:0];
+				end
+				if(sys_cmd_ack == 2'b01 && !dbg_wb_seen) begin
+					dbg_wb_seen <= 1'b1;
+					dbg_wb_addr <= cache_hi_addr[9:0];
+				end
+			end
 		end
 	end
 

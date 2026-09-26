@@ -393,10 +393,14 @@ module system
 	//   0x00E1 (8b)  <- data token               (pr2  @0x391)
 	//   0x00E2 (16b) <- 8 KB checksum            (only when "Next" was found)
 	//   0x00E3 (16b) <- sector number HIGH 16 b  (the 4 hex digits at row1 col0..3)
-	//   0x00E4 (16b) <- memory round-trip self test result (74th change): fills the
-	//   0x00E5 (8b)  <- memory round-trip self test result (74th change): fills the
-	//                   8 KB buffer with a known pattern, flushes the cache, reads it
-	//                   back and reports the byte sum. Expected = 0xEF55.
+	//   0x00E4 (16b) <- 内存自测上报（capstone 核对）：
+	//                   AL = 对照（填 1KB 后读 offset 0x40，期望 0x10）
+	//                   AH = 测量（scan256 逐出全部后读 offset 0x80，期望 0x20）
+	//                   ⇒ 整体期望 0x2010
+	//   0x00E5 (8b)  <- ★ 95th self-test probe：scan256 后再读 offset 0x84 的字节
+	//                   用来区分“整行被换成另一行的内容”(0x61)
+	//                   / “另一行的 word0 重复”(0x60) / “只有首字节错”(0x21)。
+	//                   字节 0x84 属于第 1 个字，所以它能直接分辨这三种形态。
 	// In the 68th revision these five probes were deleted as useless/traps:
 	//   dbg_sd_shiftreq (saturates at once), dbg_sd_ckc / dbg_sd_ckall (12-bit
 	//   saturating counters), dbg_sd_dolow (== dbg_sd_rxnz), dbg_sd_rx01 (SDI
@@ -1015,32 +1019,21 @@ module system
 	//    pixels straight into the cache line.  Built only from ddr_186.v's own clk_sdr signals.
 	(* mark_debug = "true", keep = "true" *) reg dbg_fill_foreign = 1'b0;
 
-	// ** [94th probe, 2026-09-26] Name the SOURCE LINE of the buffer-line-2 data, with a
-	//   statistic that a single stray word cannot saturate.  The 93rd OR pair failed: one
-	//   0xFF word drives a 32-bit OR to 0xFF, and 0xFF is not in the self-test pattern at
-	//   all (line 2 = 0x20..0x2F, line 5 = 0x50..0x5F), so it could not say which side or
-	//   which line the data came from.  Every byte of buffer line k shares the HIGH NIBBLE
-	//   (k >> 4), so the OR of just the high nibble names the source line and is immune to
-	//   both word phase and single-word saturation:
-	//     dbg_cpu_w2[3:0] = OR of DOUT[7:4] on every CPU store to tag 0x1E0 / index 2
-	//                       -> what the CPU actually wrote        (expected 4'h2)
-	//     dbg_wb2_hi[3:0] = OR of cntrl0_user_input_data[7:4] over the line-2 write-back
-	//                       -> what the write-back presented       (expected 4'h2)
-	//     dbg_rd2_hi[3:0] = OR of ram_rdata[7:4] while the cache owns the read, line 2
-	//                       -> what the fill returned              (expected 4'h2)
-	//     dbg_wb2_cnt / dbg_rd2_cnt = event counts (prove the capture happened)
-	//   Reading: 4'h5 = the data of line+3 ; 4'hF = 0xFF / erased (never written)
-	//     cpu=2 wb=2 rd=2 -> data path is clean throughout; the fault is elsewhere
-	//     cpu=2 wb=5      -> the WRITE-BACK read the wrong line (BRAM port-A way/word)
-	//     cpu=2 wb=2 rd=5 -> the FILL returned the wrong line
-	//     cpu!=2          -> the CPU store to line 2 never landed
-	//   Gate note: MREQ is only an implicit net in this file, so the CPU store is gated on
-	//   WR && CPU_CE (both explicitly declared) plus ADDR being tag 0x1E0 / index 2.
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_cpu_w2  = 4'h0;
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_wb2_hi  = 4'h0;
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_rd2_hi  = 4'h0;
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_wb2_cnt = 4'd0;
-	(* mark_debug = "true", keep = "true" *) reg [3:0] dbg_rd2_cnt = 4'd0;
+	// ★★★ [95th probe, 2026-09-26] 直接数“FSM 接受了 cache 并没在请求的 burst”。
+	//   判据取 sys_cmd_ack 的**上升沿**（= FSM 刚接受一条命令的那一刻），问一句
+	//   “cache 这一拍到底在请求什么？”：
+	//     dbg_spur_wb_n : ack 升到 2'b01（写 burst）但 ddr_wr==0  → 伪写回 burst
+	//     dbg_spur_rd_n : ack 升到 2'b11（填充 burst）但 ddr_rd==0 → 伪填充 burst
+	//   95th 修复前：每条 cache 事务各多一次（台架实测 WB=16 / RD=92）；
+	//   95th 修复后必须**恒 0**（台架实测 WB=0 / RD=0）。
+	//   只用 cache_controller 的**模块边界端口**（sys_cmd_ack / ddr_wr / ddr_rd），
+	//   不往 cache 或 CPU 内部放任何东西。
+	//   ★ 94th 的 5 个高位半字节 OR 探针已删除：SD 驱动会把真实 SD 数据
+	//     （含 0xF? 字节）写进**同一个** F000:0000 缓冲区，所以 cpu/wb/rd
+	//     三个 OR 一律饱和到 4'hF，零信息量（板上实测 cpu=f wb=f rd=f）。
+	//     腾出的 20 bit 预算给本探针（16 bit）。
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_wb_n = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_rd_n = 8'h00;
 	// ★ [90th probe, 2026-09-26] The 89th run showed dbg_rd_addr = 0x000 - CORRECT
 	//   (the self test's 1 KB fill starts with WRITE misses, and a write-allocate also
 	//    performs a fill, so the first buffer-line fill is line 0, not line 2 as I had
@@ -1071,11 +1064,6 @@ module system
 	//     dbg_vga_or = OR of ram_rdata for reads NOT owned by the cache (the VGA scan-out) -
 	//                  the known-good control: non-zero proves the DDR read path itself works
 	wire dbg_buf_line = (cache_hi_addr[14:5] == 10'h1E0);
-	// [93rd probe] tag 0x1E0 (SD buffer) AND index 2 - the line the self test reads back
-	wire dbg_l2 = (cache_hi_addr[14:5] == 10'h1E0) && (cache_hi_addr[4:0] == 5'd2);
-	// [94th probe] the same line, but on the CPU address bus (unit186's ADDR), for the
-	//   "did the CPU store to line 2 actually happen" capture
-	wire dbg_cpu_l2 = (ADDR[20:11] == 10'h1E0) && (ADDR[10:6] == 5'd2);
 	reg dbg_rst_s1 = 1'b0;
 	reg dbg_rst_s2 = 1'b0;
 	always @(posedge clk_sdr) begin
@@ -1092,11 +1080,8 @@ module system
 			dbg_rd_reg     <= 10'h000;
 			dbg_wb_reg     <= 10'h000;
 			dbg_rdr_seen   <= 1'b0;
-			dbg_cpu_w2     <= 4'h0;
-			dbg_wb2_hi     <= 4'h0;
-			dbg_rd2_hi     <= 4'h0;
-			dbg_wb2_cnt    <= 4'd0;
-			dbg_rd2_cnt    <= 4'd0;
+			dbg_spur_wb_n  <= 8'h00;
+			dbg_spur_rd_n  <= 8'h00;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
 				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
@@ -1107,15 +1092,13 @@ module system
 			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
 			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
 			if(ddr_rd && sys_rd_data_valid && (sys_cmd_ack != 2'b11)) dbg_fill_foreign <= 1'b1;
-			// ** [94th probe] high-nibble source-line captures for buffer line 2
-			if(WR && CPU_CE && dbg_cpu_l2) dbg_cpu_w2 <= dbg_cpu_w2 | DOUT[7:4];
-			if(ddr_wr && dbg_l2) dbg_wb2_hi <= dbg_wb2_hi | cntrl0_user_input_data[7:4];
-			if(ddr_rd && dbg_l2 && sys_rd_data_valid) dbg_rd2_hi <= dbg_rd2_hi | ram_rdata[7:4];
-			if(ddr_wr && !s_ddr_wr && dbg_l2) begin
-				if(dbg_wb2_cnt != 4'hF) dbg_wb2_cnt <= dbg_wb2_cnt + 1'b1;
-			end
-			if(ddr_rd && !s_ddr_rd && dbg_l2) begin
-				if(dbg_rd2_cnt != 4'hF) dbg_rd2_cnt <= dbg_rd2_cnt + 1'b1;
+			// ★★★ [95th probe] 伪 burst 计数（判据：ack 上升沿 + cache 当时没在请求）
+			//   95th 修复前 WB=16 / RD=92；修复后必须恒 0。
+			if((sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00)) begin
+				if(sys_cmd_ack == 2'b01 && !ddr_wr)
+					if(dbg_spur_wb_n != 8'hFF) dbg_spur_wb_n <= dbg_spur_wb_n + 1'b1;
+				if(sys_cmd_ack == 2'b11 && !ddr_rd)
+					if(dbg_spur_rd_n != 8'hFF) dbg_spur_rd_n <= dbg_spur_rd_n + 1'b1;
 			end
 			// [90th fix, 2026-09-26] SKEW-FREE: sample at the COMMAND
 			//   not at the ack.  Lines 901-911 load both sdraddr (the DDR address) and

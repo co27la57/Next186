@@ -656,9 +656,13 @@ module cache_controller(
 		bios_rom[8'hF3] = 32'h7502E983;
 		bios_rom[8'hF4] = 32'h52C35BEC;
 		bios_rom[8'hF5] = 32'hEF00E4BA;
-		bios_rom[8'hF6] = 32'h9090C35A;
-		bios_rom[8'hF7] = 32'h90909090;
-		bios_rom[8'hF8] = 32'h8B529090;
+		// ★ [95th self-test probe, 2026-09-26] 自测额外上报 offset 0x84 的回读字节到
+		//   空闲端口 0x00E5 (dbg_dbg5)。用来区分“整行被换成 line 6 的内容”(0x61)
+		//   / “line 6 的 word0 重复”(0x60) / “只有首字节错”(0x21)。
+		//   机器码：03D8 8A 45 04 / 03DB BA E5 00 / 03DE EE / 03DF 5A / 03E0 C3
+		bios_rom[8'hF6] = 32'hBA04458A;
+		bios_rom[8'hF7] = 32'h5AEE00E5;
+		bios_rom[8'hF8] = 32'h8B5290C3;
 		bios_rom[8'hF9] = 32'h00E2BAC2;
 		bios_rom[8'hFA] = 32'hB9C35AEF;
 		bios_rom[8'hFB] = 32'hFEE2FFFF;

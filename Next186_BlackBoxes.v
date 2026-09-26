@@ -457,9 +457,13 @@ module cache (
         ram[11'h0F3] = 32'h7502E983;
         ram[11'h0F4] = 32'h52C35BEC;
         ram[11'h0F5] = 32'hEF00E4BA;
-        ram[11'h0F6] = 32'h9090C35A;
-        ram[11'h0F7] = 32'h90909090;
-        ram[11'h0F8] = 32'h8B529090;
+		// ★ [95th self-test probe, 2026-09-26] 自测额外上报 offset 0x84 的回读字节到
+		//   空闲端口 0x00E5 (dbg_dbg5)。用来区分“整行被换成 line 6 的内容”(0x61)
+		//   / “line 6 的 word0 重复”(0x60) / “只有首字节错”(0x21)。
+		//   机器码：03D8 8A 45 04 / 03DB BA E5 00 / 03DE EE / 03DF 5A / 03E0 C3
+        ram[11'h0F6] = 32'hBA04458A;
+        ram[11'h0F7] = 32'h5AEE00E5;
+        ram[11'h0F8] = 32'h8B5290C3;
         ram[11'h0F9] = 32'h00E2BAC2;
         ram[11'h0FA] = 32'hB9C35AEF;
         ram[11'h0FB] = 32'hFEE2FFFF;

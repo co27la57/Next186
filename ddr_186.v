@@ -993,6 +993,7 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_reg = 10'h000;
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_reg = 10'h000;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_wbr_seen = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_rdr_seen = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_rd_seen = 1'b0;
 	(* mark_debug = "true", keep = "true" *) reg       dbg_wb_seen = 1'b0;
 	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
@@ -1024,6 +1025,11 @@ module system
 			dbg_rd_seen    <= 1'b0;
 			dbg_wb_seen    <= 1'b0;
 			dbg_wbr_seen   <= 1'b0;
+			dbg_rd_addr    <= 10'h000;
+			dbg_wb_addr    <= 10'h000;
+			dbg_rd_reg     <= 10'h000;
+			dbg_wb_reg     <= 10'h000;
+			dbg_rdr_seen   <= 1'b0;
 		end else begin
 			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
 				if(dbg_bufwb_n != 8'hFF) dbg_bufwb_n <= dbg_bufwb_n + 1'b1;
@@ -1034,23 +1040,38 @@ module system
 			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
 			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
 			// [89th] the real DDR address of the FIRST buffer-line fill and of the FIRST
-			//   buffer-line eviction.  cache_hi_addr is stable for the whole burst
-			//   (hiaddr = maddr all through STATE 111, wb_hiaddr all through STATE 011),
-			//   so sampling it one cycle late at the ack is harmless.
+			//   buffer-line eviction, sampled AT THE ACK.  Kept for comparison against the
+			//   skew-free [90th fix] block below - a mismatch between the two proves that the
+			//   ack-based sample is skewed (the DDR master can delay the burst), it does NOT
+			//   by itself prove a wrong address.
 			if(sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00 && dbg_buf_line) begin
 				if(sys_cmd_ack == 2'b11 && !dbg_rd_seen) begin
 					dbg_rd_seen <= 1'b1;
 					dbg_rd_addr <= cache_hi_addr[9:0];
-					dbg_rd_reg <= hiaddr[9:0];
 				end
 				if(sys_cmd_ack == 2'b01 && !dbg_wb_seen) begin
 					dbg_wb_seen <= 1'b1;
 					dbg_wb_addr <= cache_hi_addr[9:0];
 				end
-				// [90th] skew-free version: gate on wb_hiaddr and latch wb_hiaddr itself
-				if(sys_cmd_ack == 2'b01 && (wb_hiaddr[14:5] == 10'h1E0) && !dbg_wbr_seen) begin
+			end
+			// [90th fix, 2026-09-26] SKEW-FREE: sample at the COMMAND / ADDRESS LOAD edge,
+			//   not at the ack.  Lines 901-911 load both sdraddr (the DDR address) and
+			//   cntrl0_user_command_register (01 = write, 11 = read) on the SAME edge, from
+			//   s_prog_empty / s_ddr_wr / s_ddr_rd.  Gating on exactly that condition and
+			//   latching cache_hi_addr - the .hiaddr() port, i.e. the very signal being muxed
+			//   into sdraddr - gives by construction the address the DDR was handed.
+			//   NOTE: hiaddr / wb_hiaddr are cache_controller INTERNALS and are NOT visible
+			//   in ddr_186.v - that is what broke synthesis with [Synth 8-36].  No extra port
+			//   is needed: cache_hi_addr already carries both of them out here (hiaddr = maddr
+			//   all through STATE 111, wb_hiaddr frozen all through STATE 011).
+			if(!s_prog_empty && dbg_buf_line) begin
+				if(s_ddr_wr && !dbg_wbr_seen) begin
 					dbg_wbr_seen <= 1'b1;
-					dbg_wb_reg   <= wb_hiaddr[9:0];
+					dbg_wb_reg   <= cache_hi_addr[9:0];
+				end
+				if(!s_ddr_wr && s_ddr_rd && !dbg_rdr_seen) begin
+					dbg_rdr_seen <= 1'b1;
+					dbg_rd_reg   <= cache_hi_addr[9:0];
 				end
 			end
 		end

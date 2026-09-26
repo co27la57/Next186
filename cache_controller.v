@@ -83,6 +83,7 @@ module cache_controller(
 	reg [2:0]STATE = 0;
 	reg [`LINE-2:0]lowaddr = 0; //cache mem address
 	reg s_lowaddr5 = 0;
+	reg        s111_d = 1'b0;
 	reg s_lowaddr5_d1 = 0;
 	wire s_lowaddr5_fall = s_lowaddr5_d1 & ~s_lowaddr5; // lowaddr 从 31 回绕到 0，标志整行 64B burst 完成
 	// ★ 三十三次修复引入的写回内自持计数（声明提前，供 flush_wb_done 使用）
@@ -778,6 +779,7 @@ module cache_controller(
 	always @(posedge clk) begin
 		s_lowaddr5 <= lowaddr[`LINE-2];
 		s_lowaddr5_d1 <= s_lowaddr5;
+		s111_d <= (STATE == 3'b111); // ★★ 88th fix: one-cycle delay before the fill read is requested
 		flushreq <= ~flushcount[`WAYS+`SETS] & (flushreq | flush);
 		if(ce) begin
 			raddr <= addr;
@@ -811,7 +813,7 @@ module cache_controller(
 				wb_way <= fblk; // ★ 十三次修复：地址/数据路径共用同一冻结 way（无论是否 r_flush 都=本拍 fblk，与 wb_hiaddr 同源）
 				wb_hiaddr <= {cache_addr[fblk][index], index}; // ★ 十三次修复：锁定 victim 旧地址
 				hiaddr <= {cache_addr[fblk][index], index};    // 非阻塞，取旧 cache_addr（victim 写回地址）
-				ddr_rd <= ~dirty & ~r_flush;
+				ddr_rd <= 1'b0; // ★★ 88th fix: was ~dirty & ~r_flush - the fill read must NOT be requested here, hiaddr still carries the VICTIM's address (line 813)
 				ddr_wr <= dirty;
 				// ★ 整行修复：脏行先写回(011)，再直接进读填充(111)；干净行直接读填充(111)。
 				STATE <= dirty ? 3'b011 : 3'b111;
@@ -844,7 +846,7 @@ module cache_controller(
 		end
 		3'b011: begin	// write cache to ddr
 			hiaddr <= wb_hiaddr;  // ★ 十三次修复：冻结写回地址，杜绝 thrashing 下被后续重算覆盖
-			ddr_rd <= ~r_flush; //1'b1;
+			ddr_rd <= 1'b0; // ★★ 88th fix: was ~r_flush - during the write-back hiaddr = wb_hiaddr (the victim), so a read requested now would fetch the VICTIM's line
 			// ★ 整行修复：必须等 lowaddr 从 31 回绕到 0（s_lowaddr5_fall）才退出。
 			//   原代码在 s_lowaddr5 高电平（lowaddr=16）就退出，此时 AXI burst 还在传后半行，
 			//   状态机若提前进入 111 会更新 hiaddr，导致后半行写错地址（0x20/0x40 偏移）。
@@ -859,6 +861,7 @@ module cache_controller(
 		end
 		3'b111: begin // read cache from ddr
 			if(~r_flush) hiaddr <= maddr[`ADDR-1:`LINE]; // flush 期间不改 hiaddr（写回地址已在 STATE 000 锁定）
+			ddr_rd <= s111_d; // ★★ 88th fix: raise the read one cycle after entering 111, i.e. only once hiaddr == maddr[`ADDR-1:`LINE] (the line we actually want to fetch)
 			// ★ 整行修复：同样等整行读填充完成（lowaddr 回绕）再返回 IDLE。
 			if(s_lowaddr5_fall) begin
 				ddr_rd <= 1'b0;

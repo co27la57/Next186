@@ -144,7 +144,7 @@ module system
 	//   cache_owns = 本拍 cache 是否拥有 DDR 总线（用于命令寄存器与 sdraddr 同源）。
 	//   详见下方 cntrl0_user_command_register 处的 95th 修复注释。
 	reg cache_cmd_done = 1'b0;
-	wire cache_owns = (s_ddr_wr || s_ddr_rd) && !cache_cmd_done;
+	wire cache_owns = (ddr_wr || ddr_rd) && !cache_cmd_done;   // 96th: real-time request, so cmd/type/address are same-cycle
 	reg crw = 0;	
 	(* mark_debug = "true", keep = "true" *) reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
 	reg s_RS232_DCE_RXD;
@@ -283,15 +283,15 @@ module system
 	//   ⇒ 旧判据 dbg_sd_rxnz(SDI != 0xFF) 与 dbg_sd_rx01(SDI == 0x01) 都会必然触发 = 假阳性
 	//     （四十七次据此判“卡在应答”是错的）。
 	//   现改：rxnz / dolow 直接看 raw SD_DO（不经移位寄存器）；rx01 移到字节边界处判。
-	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_sd_bcnt  = 10'd0;  // CS 低期字节边界计数（验证 stb 真的在跑）
+	reg [9:0]  dbg_sd_bcnt  = 10'd0;  // CS 低期字节边界计数（验证 stb 真的在跑）
 	// ★ 四十七次探针：直接判定“SD 初始化走到哪一步”（卡哪怕只回一次也能看出）。
 	//   dbg_sd_rxnz：MISO 曾被拉低（卡至少响应过）——已有。
 	//   dbg_sd_rx01：SDI 曾 == 0x01（CMD0 的 R1 特征值 ⇒ 卡已进 SPI 模式）。
 	//   dbg_sd_rxfe：SDI 曾 == 0xFE（数据令牌 ⇒ 已经在读扇区）。
 	//   判读：rxnz=0 ⇒ 卡从未应答（物理/时钟）；rx01=1 ⇒ 越过 CMD0；
 	//         rxfe=1 ⇒ 已到读扇区阶段（那就该查镜像位置/校验和）。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxfe  = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_r00   = 1'b0;
+	reg        dbg_sd_rxfe  = 1'b0;
+	reg        dbg_sd_r00   = 1'b0;
 	always @(posedge clk_cpu) begin
 		if(!SD_n_CS) dbg_sd_cslow <= 1'b1;
 		if(SD_CK && !dbg_sd_ck_d && (SD_DO == 1'b0)) dbg_sd_rxnz <= 1'b1;
@@ -314,10 +314,10 @@ module system
 	//   判读：dbg_sd_1st = 卡的第一条响应（CMD0 的 R1，期望 0x01；若为 0x05 则 CMD0 被拒）；
 	//         dbg_sd_aa  = 1 ⇒ 字节对齐地出现过 0xAA ⇒ **CMD8 的 R7 校验回显成功**（卡是 v2）；
 	//         dbg_sd_byte = 最后一个完成的字节（看总线当前状态）。
-	(* mark_debug = "true", keep = "true" *) reg [2:0] dbg_sd_sht  = 3'd0;   // 移位计数 mod 8
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_sd_byte = 8'hFF;  // 最后完成的字节（字节对齐）
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_sd_1st  = 8'hFF;  // 首个非 0xFF 字节（卡的第一条响应）
-	(* mark_debug = "true", keep = "true" *) reg       dbg_sd_aa   = 1'b0;   // 字节对齐值曾 == 0xAA（CMD8 R7 回显）
+	reg [2:0] dbg_sd_sht  = 3'd0;   // 移位计数 mod 8
+	reg [7:0] dbg_sd_byte = 8'hFF;  // 最后完成的字节（字节对齐）
+	reg [7:0] dbg_sd_1st  = 8'hFF;  // 首个非 0xFF 字节（卡的第一条响应）
+	reg       dbg_sd_aa   = 1'b0;   // 字节对齐值曾 == 0xAA（CMD8 R7 回显）
 	reg dbg_sd_ck_e = 1'b0;
 	reg dbg_sd_1st_seen = 1'b0;
 	reg dbg_sd_stb = 1'b0;
@@ -426,7 +426,7 @@ module system
 	// Largest byte count ever seen inside a single CS-low window (sticky since reset).
 	//   ~136  (0x088) => every CMD17 bailed out BEFORE its 512-byte data phase
 	//   ~522  (0x20A) => at least one CMD17 really moved the whole 512-byte block
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_sd_bcntmax = 10'd0;
+	reg [9:0] dbg_sd_bcntmax = 10'd0;
 	always @(posedge clk_cpu) begin
 		if(BTN_RESET && !dbg_rst_d) dbg_sd_bcntmax <= 10'd0;   // [69th] this-run-only
 		else if(dbg_sd_bcnt > dbg_sd_bcntmax) dbg_sd_bcntmax <= dbg_sd_bcnt;
@@ -721,6 +721,64 @@ module system
 
 	wire [3:0]seg_addr;
 	wire vga_planar_seg;
+
+	// ★★★ 98th CPU-side probes（2026-09-27）：定位"CPU 跑飞"卡在哪。
+	//   全部在 clk_cpu 域**边沿锁存**（事件后值长期稳定 ⇒ clk_sdr 域采样安全，
+	//   规避多比特跨域采样失真；符合"加探针前先确认采样无缺陷"的规矩）。
+	//   · dbg_cpu_laddr = 最近一次 MREQ 的地址（取指/取数）—— 等价于"卡住的 IADDR"证据
+	//   · dbg_cpu_lport = 最近一次 IORQ 的端口 —— "卡在哪个 Port"
+	//   · dbg_cpu_lwr / dbg_cpu_pwr = 该次访问是读还是写
+	//   · dbg_cpu_halt / dbg_cpu_ce = CPU 是否 HALT / 是否在跑
+	//   · dbg_cpu_ios = IORQ 上升沿计数（饱和）—— 判断"在空转等 I/O"还是"真的死了"
+	(* mark_debug = "true", keep = "true" *) reg [20:0] dbg_cpu_laddr = 21'h0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_lwr   = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_cpu_lport = 16'h0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_pwr   = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_halt  = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_ce    = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_cpu_ios   = 8'h00;
+	reg iorq_d98 = 1'b0;
+
+	// ★★★ 98th-FONT probes（2026-09-27）：回答"字模 RAM 是否被重写、写成了什么"。
+	//   事实基础：sr_font 由 font8x16.mem 预初始化（标准 8x16 字库）；
+	//   BIOS 写端口 0x3CB 才可能改动它（字写=设地址{vga_font_counter}、字节写=顺序填+写使能）。
+	//   全部在 clk_cpu 域**事件锁存/计数**（写事件后长期稳定 ⇒ clk_sdr 采样安全）。
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_font_wr_n = 6'd0;
+	(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_font_addr = 12'h000;
+	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_font_data = 8'h00;
+	always @(posedge clk_cpu) begin
+		if (IORQ & CPU_CE & VGA_FONT_OE) begin
+			if (WR & ~WORD && !dbg_font_wr_n[5]) dbg_font_wr_n <= dbg_font_wr_n + 1'b1;
+			dbg_font_addr <= vga_font_counter;
+			dbg_font_data <= CPU_DOUT[7:0];
+		end
+	end
+
+	// ★★★ 98th VGA-mode probes（2026-09-27）：回答"是不是切了显示模式 / 改了显存起始地址"。
+	//   现象：屏幕先显示 "Searching BIOS..." 后变乱码，而**文本 VRAM 原封未动**
+	//   ⇒ 典型"显示侧模式/起点被改"的签名（显示内容与 VRAM 内容脱钩）。
+	//   scraddr = CRT 起始地址；vgatext/vga13/planar/half = 文本/图形/平面/半行 模式位
+	//   （[0]=当前生效，[1]=待生效）。全部准静态（只在切模式时变）⇒ clk_sdr 采样安全。
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_scraddr = 16'h0;
+	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_text    = 2'b00;
+	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_13      = 2'b00;
+	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_planar  = 2'b00;
+	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_half    = 2'b00;
+	always @(posedge clk_sdr) begin
+		dbg_vga_scraddr <= scraddr;
+		dbg_vga_text    <= vgatext[1:0];
+		dbg_vga_13      <= vga13[1:0];
+		dbg_vga_planar  <= planar[1:0];
+		dbg_vga_half    <= half[1:0];
+	end
+	always @(posedge clk_cpu) begin
+		if (MREQ) begin dbg_cpu_laddr <= ADDR; dbg_cpu_lwr <= WR; end
+		if (IORQ) begin dbg_cpu_lport <= PORT_ADDR; dbg_cpu_pwr <= WR; end
+		iorq_d98 <= IORQ;
+		if (IORQ && !iorq_d98 && !dbg_cpu_ios[7]) dbg_cpu_ios <= dbg_cpu_ios + 1'b1;
+		dbg_cpu_halt <= HALT;
+		dbg_cpu_ce   <= CPU_CE;
+	end
 	
     // 【核心修复】：彻底移除所有的 is_bios 拦截逻辑，恢复纯净的原作者连线
 	unit186 CPUUnit
@@ -892,6 +950,11 @@ module system
 	always @ (posedge clk_sdr) begin
         sys_cmd_ack_d1 <= sys_cmd_ack;
 
+// v6: page the DDR FSM actually consumed (sdraddr delayed 2 clk_sdr).
+//   sdraddr(k) = f(hiaddr(k-1)); the FSM samples sdraddr(k-1) at edge k.
+dbg_pg_d1 <= sdraddr[23:15];
+dbg_ad_d1 <= sdraddr[14:5];
+
 		// ★ Task #8 修复：当 DDR 命令确认跳变为 cache 行读(2'b11 填充)/写(2'b01 写回)时，产生单周期脉冲。
 		//   该脉冲送入 cache_controller，在开始一行 cache 事务时把 lowaddr 强制归零，
 		//   避免残留行内偏移造成半行(0x20)错位。VGA 读(2'b10)与空闲不产生脉冲。
@@ -954,7 +1017,7 @@ module system
 		//   若锁存，则 VGA 抢占把 FSM 拖过请求尾巴后会把写回当成填充发，
 		//   cache 会在 STATE 011 等一个永远不会来的 ram_wr_valid → 死锁。
 		if(s_prog_empty) cntrl0_user_command_register <= 2'b10;
-		else if(cache_owns) cntrl0_user_command_register <= s_ddr_wr ? 2'b01 : 2'b11;
+		else if(cache_owns) cntrl0_user_command_register <= ddr_wr ? 2'b01 : 2'b11;  // 96th: real-time (was s_ddr_wr, 1 cycle stale)
 		else if(~s_prog_full) cntrl0_user_command_register <= 2'b10;
 		else cntrl0_user_command_register <= 2'b00;
 					
@@ -965,6 +1028,12 @@ module system
                 2'b10: begin
                     crw <= 1'b0;	
                     col_counter <= {1'b0, max_read, 1'b1};
+                    // ★ 已回退（2026-09-27）：曾把步进改成 2*(max_read+1)，但 `vga_lnbytecount`
+                    //   同时是「扫描行长度判据」的计数器（见 :1064 `s_vga_endscanline <=
+                    //   (vga_lnbytecount[7:3] == vga_lnend)`，文本模式 vga_lnend=6）。步进翻倍后
+                    //   [7:3] 跳着走（偶数）⇒ 行结束判据提前一半触发
+                    //   ⇒ 行/帧指针跑得比实际扫描快 ⇒ **画面全黑**。
+                    //   正确方向：保持本行语义不变，改为限制 FIFO 每事务接受量 = max_read+1 个半字（待验证）。
                     vga_lnbytecount <= vga_lnbytecount + max_read + 1'b1;
                 end					
                 2'b01, 2'b11: crw <= 1'b1;		
@@ -1008,18 +1077,38 @@ module system
 	//    correctly in the cache.  So either no write-back ever happened for these lines
 	//    (dbg_bufwb_n == 0) or one did and its address/data is wrong (dbg_bufwb_n != 0).
 	// ============================================================================
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_bufwb_n  = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [14:0] dbg_bufwb_a  = 15'h0000;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_bufrd_seen = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [31:0] dbg_wb_or   = 32'h00000000;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_rd_or   = 16'h0000;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_or  = 16'h0000;
+	// ★ 97b：写回"数据↔地址"一致性计数 —— 自测图案里缓冲行 k 的首字高半字节 = k&0xF，
+	//   而 cq_addr[3:0] = victim 的 index[3:0] —— 两者不等 ⇒ 有写回把别行的数据写进了本地址
+	//   （错位写回的直接实锤）。仅统计缓冲行（dbg_buf_line），全速累计不冻结（同 pmis）。
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wmis  = 6'h00;
+	// v7: the FULL line address ({tag[4:0], index}) the DDR FSM consumed.
+	//   v6 proved the PAGE is never stale (pmis=0), but pmis only sees bits [23:15].
+	//   A hiaddr change inside the sampling window that stays within the SAME page
+	//   (buffer lines thrashing among themselves) is invisible to pmis yet makes the
+	//   fill read another buffer line's address = the observed "+N lines" shift.
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_fill_addr = 10'h000;
+	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_addr   = 10'h000;
+	// ★★★ [v5 probe, 2026-09-27] fill integrity (line 2).
+	//   v4b captured fill data with `dbg_fill_arm && sys_rd_data_valid`, which
+	//   also fires for VGA reads -> the board reading nib=0 was not usable.
+	//   These five are gated on the fill's OWN burst (sys_cmd_ack == 2'b11).
+	//   Expect (pattern byte@m=(m>>2)&0xFF): w0=0x2020 wl=0x2F2F n=32 x=0 full=1
+	// v5 window scratch (not probes)
+	// v6 (rework): write-back integrity + the page the DDR FSM actually used.
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wb_wl    = 16'h0000;
+	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_fill_page = 9'h000;
+	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_wb_page   = 9'h000;
+	reg [8:0]  dbg_pg_d1 = 9'h000;   // sdraddr[23:15] delayed 1 clk_sdr
+	reg [8:0]  dbg_fill_page_live = 9'h000;
+	reg [8:0]  dbg_wb_page_live   = 9'h000;
+	reg        dbg_bw_act = 1'b0;
+	reg [5:0]  dbg_bw_n   = 6'd0;
+	reg [15:0] dbg_bw_wl  = 16'd0;
 
 	// ** [91st probe, 2026-09-26] Mechanism check for the 91st fix: did a NON-cache read burst
 	//    (VGA scan-out, cmd 2'b10) ever deliver data while the cache's fill read was pending
 	//    (ddr_rd = 1)?  Before the fix such a burst drove the fill's lowaddr and wrote VGA
 	//    pixels straight into the cache line.  Built only from ddr_186.v's own clk_sdr signals.
-	(* mark_debug = "true", keep = "true" *) reg dbg_fill_foreign = 1'b0;
 
 	// ★★★ [95th probe, 2026-09-26] 直接数“FSM 接受了 cache 并没在请求的 burst”。
 	//   判据取 sys_cmd_ack 的**上升沿**（= FSM 刚接受一条命令的那一刻），问一句
@@ -1041,14 +1130,17 @@ module system
 	reg [4:0]  dbg_fill_idx = 5'd0;
 	reg [4:0]  dbg_wb_idx   = 5'd0;
 	reg [14:0] dbg_bufwb_a_live = 15'd0;
-	reg [7:0]  dbg_bufwb_n_live = 8'd0;
+	reg [9:0]  dbg_ad_d1 = 10'd0;   // sdraddr[14:5] delayed 1 clk_sdr
+	reg [9:0]  dbg_fill_addr_live = 10'd0;
+	reg [9:0]  dbg_wb_addr_live   = 10'd0;
+	reg        dbg_wm_act  = 1'b0;
+	reg        dbg_wm_first = 1'b0;
+	reg        dbg_wm_run  = 1'b1;   // 97c: 1=e5 之前（自测窗口，不变量成立）
 	reg [8:0]  dbg_v4_wb_live = 9'd0;
 	reg [8:0]  dbg_v4_rd_live = 9'd0;
 	// 0x00E5 write detect + 2-FF sync into clk_sdr (see the freeze comment below)
 	reg        e5_wr = 1'b0, e5_s1 = 1'b0, e5_s2 = 1'b0;
 	always @(posedge clk_cpu) e5_wr <= IORQ & CPU_CE & WR & (PORT_ADDR[15:0] == 16'h00E5);
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_wb_n = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_spur_rd_n = 8'h00;
 	// ★ [90th probe, 2026-09-26] The 89th run showed dbg_rd_addr = 0x000 - CORRECT
 	//   (the self test's 1 KB fill starts with WRITE misses, and a write-allocate also
 	//    performs a fill, so the first buffer-line fill is line 0, not line 2 as I had
@@ -1062,8 +1154,6 @@ module system
 	//   legitimate 0x000 (buffer line 0) from "never latched".
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_reg = 10'h000;
 	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_reg = 10'h000;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_wbr_seen = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_rdr_seen = 1'b0;
 	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
 	//   address (0x3C0F = tag 0x1E0 / index 15), so buffer-line write-backs DO reach the DDR
 	//   controller - and dbg_bufrd_n read 0, but that probe was WRONG: it used ddr_rd's
@@ -1085,36 +1175,35 @@ module system
 		dbg_rst_s1 <= BTN_RESET;
 		dbg_rst_s2 <= dbg_rst_s1;
 		if(dbg_rst_s2) begin               // held at 0 during reset => "this BIOS run only"
-			dbg_bufwb_n    <= 8'h00;
-			dbg_bufrd_seen <= 1'b0;
-			dbg_wb_or      <= 32'h00000000;
-			dbg_rd_or      <= 16'h0000;
-			dbg_vga_or     <= 16'h0000;
-			dbg_fill_foreign <= 1'b0;
-			dbg_wbr_seen   <= 1'b0;
+			dbg_wmis    <= 6'h00;
+			dbg_wb_wl    <= 16'h0000;
+			dbg_fill_page <= 9'h000;
+			dbg_wb_page   <= 9'h000;
+			dbg_bw_act    <= 1'b0;
+			dbg_bw_n      <= 6'd0;
+			dbg_bw_wl     <= 16'd0;
 			dbg_rd_reg     <= 10'h000;
 			dbg_wb_reg     <= 10'h000;
-			dbg_rdr_seen   <= 1'b0;
-			dbg_spur_wb_n  <= 8'h00;
-			dbg_spur_rd_n  <= 8'h00;
 		end else begin
-			if(ddr_wr && !s_ddr_wr && dbg_buf_line) begin
-				if(dbg_bufwb_n_live != 8'hFF) dbg_bufwb_n_live <= dbg_bufwb_n_live + 1'b1;
-				dbg_bufwb_a_live <= cache_hi_addr;
+			// ★ 97c：wmis 只在 e5 之前计数 —— SD 阶段缓冲区是映像数据，"高半字节==index"
+			//   不变量不成立，不门控会把计数器污染到饱和（97b 板上 0x3F 即此，作废）。
+			if(e5_s1 && !e5_s2) dbg_wm_run <= 1'b0;
+			// ★ 97b：每笔写回的首个数据拍，比对"数据高半字节 vs cq_addr index 低半字节"
+			if((sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
+				dbg_wm_act  <= 1'b1;
+				dbg_wm_first <= 1'b1;
+			end else if (dbg_wm_act) begin
+				if (sys_wr_data_valid && (sys_cmd_ack == 2'b01)) begin
+					if (dbg_wm_first) begin
+						dbg_wm_first <= 1'b0;
+						if (dbg_buf_line && (cntrl0_user_input_data[7:4] != cq_addr[3:0]) &&
+						    (dbg_wmis != 6'h3F))
+							dbg_wmis <= dbg_wmis + 1'b1;
+					end
+				end
+				if ((sys_cmd_ack != 2'b01) && !ddr_wr) dbg_wm_act <= 1'b0;
 			end
-			if(ddr_wr && dbg_buf_line) dbg_wb_or <= dbg_wb_or | cntrl0_user_input_data;
-			if(ddr_rd && dbg_buf_line) dbg_bufrd_seen <= 1'b1;
-			if(ddr_rd && dbg_buf_line && sys_rd_data_valid) dbg_rd_or <= dbg_rd_or | ram_rdata;
-			if(!ddr_rd && sys_rd_data_valid) dbg_vga_or <= dbg_vga_or | ram_rdata;
-			if(ddr_rd && sys_rd_data_valid && (sys_cmd_ack != 2'b11)) dbg_fill_foreign <= 1'b1;
-			// ★★★ [95th probe] 伪 burst 计数（判据：ack 上升沿 + cache 当时没在请求）
-			//   95th 修复前 WB=16 / RD=92；修复后必须恒 0。
-			if((sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00)) begin
-				if(sys_cmd_ack == 2'b01 && !ddr_wr)
-					if(dbg_spur_wb_n != 8'hFF) dbg_spur_wb_n <= dbg_spur_wb_n + 1'b1;
-				if(sys_cmd_ack == 2'b11 && !ddr_rd)
-					if(dbg_spur_rd_n != 8'hFF) dbg_spur_rd_n <= dbg_spur_rd_n + 1'b1;
-			end
+			// （98th：95th 伪 burst 计数器已删除 —— 已验证恒 0，探针预算回收）
 			// [90th fix, 2026-09-26] SKEW-FREE: sample at the COMMAND
 			//   not at the ack.  Lines 901-911 load both sdraddr (the DDR address) and
 			//   cntrl0_user_command_register (01 = write, 11 = read) on the SAME edge, from
@@ -1140,21 +1229,61 @@ module system
 			if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b11) && (sys_cmd_ack_d1 != 2'b11)) begin
 				dbg_fill_arm <= 1'b1;
 				dbg_fill_idx <= cache_hi_addr[4:0];
-				dbg_rdr_seen <= 1'b1;
-			end else if(dbg_fill_arm && sys_rd_data_valid) begin
+			end else if(dbg_fill_arm && sys_rd_data_valid && (sys_cmd_ack == 2'b11)) begin
 				dbg_fill_arm <= 1'b0;
 				dbg_v4_wb_live <= {dbg_fill_idx, ram_rdata[7:4]};
 			end
 			if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
 				dbg_wb_arm  <= 1'b1;
 				dbg_wb_idx  <= cache_hi_addr[4:0];
-				dbg_wbr_seen <= 1'b1;
-			end else if(dbg_wb_arm && sys_wr_data_valid) begin
+			end else if(dbg_wb_arm && sys_wr_data_valid && (sys_cmd_ack == 2'b01)) begin
 				if(dbg_wb_pcnt == 1'b0) dbg_wb_pcnt <= 1'b1;
 				else begin
 					dbg_wb_pcnt <= 1'b0;
 					dbg_wb_arm  <= 1'b0;
 					dbg_v4_rd_live <= {dbg_wb_idx, cntrl0_user_input_data[7:4]};
+				end
+			end
+			// （98th：v5 fill-integrity 窗口已删除 —— 其结论已被 8KB 100% 一致取代，探针预算回收）
+			// ★★★ [v6, 2026-09-27] write-back integrity + the page the DDR FSM used.
+			//   v5: the line-2 fill's own burst is complete (n=32, full=1) and unpolluted (x=0),
+			//   yet it returns w0=0x0000 / wl=0x0C00 - not the self-test pattern, not the BIOS.
+			//   dbg_rd_reg=0x022 proves a real line-2 AXI write burst carrying line-2 data also
+			//   happened.  So either that write landed elsewhere, or the fill read DDR before it
+			//   landed.  Both show up in the PAGE the FSM actually consumed (dbg_pg_d1).
+			//   dbg_pmis_* counts acks where the used page disagrees with the page implied by the
+			//   CURRENT hiaddr (memmap_mux): non-zero => hiaddr was moving when the FSM sampled.
+			//   8-bit timestamps were tried first and abandoned: the self-test spans ~84k clk_sdr
+			//   cycles, so an 8-bit counter wraps and carries no ordering information.
+			if(dbg_bw_act) begin
+				if(sys_wr_data_valid && (sys_cmd_ack == 2'b01)) begin
+					dbg_bw_wl <= cntrl0_user_input_data;
+					if(dbg_bw_n < 6'd63) dbg_bw_n <= dbg_bw_n + 1'b1;
+				end
+				if((sys_cmd_ack != 2'b01) && !ddr_wr) dbg_bw_act <= 1'b0;
+			end else if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2) &&
+			            (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
+				dbg_bw_act <= 1'b1;
+				dbg_bw_n   <= 6'd0;
+			end
+			if((sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00)) begin
+			if(sys_cmd_ack == 2'b11) begin
+				// ★ v7b 修复：addr 采集必须与 page 同门控（原来裸放在门外，
+				//   捕到的是"冻结前最后一条任意行的填充"—— 板上 0x3FF 就是
+				//   最后一次 BIOS 取指行 (tag 0x1FF,index 31)，不是 line 2 的地址！）
+				// ★ 97b：探针改接 cq_addr —— 97th 之下 sdraddr 不再是 FSM 消费的地址！
+				if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2)) begin
+					dbg_fill_page_live <= cq_addr[23:15];
+					dbg_fill_addr_live <= cq_addr[14:5];
+				end
+				end
+			if(sys_cmd_ack == 2'b01) begin
+				// ★ v7b：wb 侧同样补门控（板上 0x001 = scan256 最后 victim index 1，
+				//   与 dbg_bufwb_a=0x3C01 一致 —— 是"最后一笔任意写回"，不是 line 2 的）
+				if(dbg_buf_line && (cache_hi_addr[4:0] == 5'd2)) begin
+					dbg_wb_page_live <= cq_addr[23:15];
+					dbg_wb_addr_live <= cq_addr[14:5];
+				end
 				end
 			end
 			// ★★ 冻结：CPU 写端口 0x00E5（自测上报那一刻）时快照。
@@ -1164,10 +1293,13 @@ module system
 			if(e5_s1 && !e5_s2) begin
 				dbg_rd_reg <= {1'b0, dbg_v4_rd_live};
 				dbg_wb_reg <= {1'b0, dbg_v4_wb_live};
-				// ★ 同一事件下同步冻结这两个（它们也是“最新覆盖”型，
-				//   SD 阶段会覆盖）。dbg_bufwb_a = 自测期间最后一次缓冲行写回的 hiaddr。
-				dbg_bufwb_a <= dbg_bufwb_a_live;
-				dbg_bufwb_n <= dbg_bufwb_n_live;
+				dbg_wb_wl    <= dbg_bw_wl;
+				dbg_fill_page <= dbg_fill_page_live;
+				dbg_fill_addr <= dbg_fill_addr_live;
+				dbg_wb_page   <= dbg_wb_page_live;
+				dbg_wb_addr   <= dbg_wb_addr_live;
+				// （dbg_bufwb_n 已在 97b 删除：其值 16 已解释为正常且无判别力；
+				//   写回一致性改由 dbg_wmis 全速计数器承担。）
 			end
 		end
 	end
@@ -1283,8 +1415,51 @@ module system
 		{VGA_B, VGA_G, VGA_R} <= DAC_COLOR & {18{sdon}};
 	end
 	
-    assign ram_cmd   = cntrl0_user_command_register;
-    assign ram_addr  = sdraddr;
+	// ★★★ 97th 修复（2026-09-27）：cache 请求的"命令+地址"跨时钟域一致性呈现。
+	//   AXI FSM（m_axi_aclk，与 clk_sdr 异步）在任意 m 沿采样 ram_cmd/ram_addr。
+	//   填充请求恰好在写回 burst 结束 ~6 个 m 周后被采样，而 clk_sdr 域里
+	//   cntrl0_user_command_register 翻转 10→11 与 sdraddr 翻转 VGA→cache 发生在
+	//   同一个 clk_sdr 沿 —— FSM 的采样沿结构性撞上这个翻转沿：输掉竞态就在
+	//   cmd=11（新事务）下锁存旧地址 = victim 行 ⇒ 填充读了 victim 的槽。
+	//   板上证据：line 2 的填充 araddr=0x002（探针实测，门控后）而数据= line 7 图案
+	//   （7070/7F7F）—— +5 恰为 4 路组相联的 LRU victim 距离；写回侧采样时机不同
+	//   故大多幸免 ⇒ 拔卡 dump 仍完好、台架（无 CDC 相位抖动）永不复现。
+	//   修法：请求起点一次性锁存 (addr,cmd)，先呈现 2 拍 2'b00（FSM 对 00 不动作），
+	//   再稳定呈现整个请求期 ⇒ FSM 任何非 00 采样看到的都是 ≥2 个 clk_sdr 稳定的配套值。
+	reg        cq_act  = 1'b0;   // 正在呈现 cache 请求
+	reg        cq_seen = 1'b0;   // 本笔 cache 请求已锁存（防同笔重复锁存）
+	reg        cq_req_d = 1'b0;  // ★ 97b：请求延迟 1 拍 —— cache_hi_addr 与 ddr_wr/ddr_rd 的
+	                          //   可见沿相差 1 个 clk_sdr（hiaddr 在状态进入后一拍才更新），
+	                          //   请求上升沿直接锁存会抓到上一笔事务的 hiaddr（板上 +6 实证）。
+	reg        cq_on   = 1'b0;   // 呈现通道被选中（延迟 1 拍跟踪 cq_want）
+	reg  [1:0] cq_sp   = 2'd0;   // 00 间隔计数
+	reg  [1:0] cq_cmd  = 2'b00;
+	reg [23:0] cq_addr = 24'h0;
+	wire       cq_req  = ddr_wr || ddr_rd;
+	wire       cq_want = cq_act && cache_owns && !s_prog_empty;
+	always @(posedge clk_sdr) begin
+		cq_req_d <= cq_req;
+		if (!cq_req) begin
+			cq_seen <= 1'b0;
+			cq_act  <= 1'b0;
+			cq_on   <= 1'b0;
+			cq_sp   <= 2'd0;
+		end else begin
+			if (cq_req_d && !cq_seen) begin
+				cq_seen <= 1'b1;
+				cq_act  <= 1'b1;
+				cq_addr <= {memmap_mux[8:0], cache_hi_addr[9:0], 5'b0};
+				cq_cmd  <= ddr_wr ? 2'b01 : 2'b11;
+			end else if (cache_line_start) begin
+				cq_act <= 1'b0;    // 已被 FSM 接管：释放呈现（95th 单 burst 抑制仍在）
+			end
+			cq_on <= cq_want;
+			if (cq_want && !cq_on)   cq_sp <= 2'd2;
+			else if (cq_sp != 2'd0)  cq_sp <= cq_sp - 2'd1;
+		end
+	end
+    assign ram_cmd   = (cq_act && cq_on) ? (cq_sp != 2'd0 ? 2'b00 : cq_cmd) : cntrl0_user_command_register;
+    assign ram_addr  = (cq_act && cq_on) ? cq_addr : sdraddr;
     assign ram_wdata = cntrl0_user_input_data; 
     assign sys_DOUT  = ram_rdata;             
     reg [14:0] dbg_cache_hiaddr;

@@ -1,7 +1,9 @@
-# Next186 — NeptUNO FPGA Port
+# Next186 — EBAZ4205 (Zynq-7010) FPGA Port
 
 A Zynq-7000 FPGA port of the **Next186** processor core, targeting the
-**NeptUNO** development board (Xilinx Artix-7 XC7A200T + Zynq-7000 system-on-chip).
+**EBAZ4205** development board (Xilinx Zynq-7010, XC7Z010-CLG400-1) — a
+repurposed, resource-constrained board quite different from the upstream
+target, which is precisely why the port required substantial rework.
 
 The design runs a **two-processor heterogeneous system**: a legacy 80186-class
 CPU in the programmable logic, and an ARM Cortex-A9 running Linux in the
@@ -32,12 +34,20 @@ project targets the **NeptUNO** FPGA board and is organised around a
 `neptuno-fpga` integration branch that maps the core onto that board's
 peripherals.
 
-This repository is a **port of that work onto the Zynq-7000 in the NeptUNO
-SoC**, re-hosting the 80186 core in the PL and wiring its system bus to DDR3
-through the PS/PL AXI path. The port keeps the original core sources
-(`Next186_*`, `NextZ80*`) intact and concentrates board-, bus- and
-peripheral-level changes in the surrounding modules, so that re-syncing with
-upstream core updates stays tractable.
+This repository is a **port of that work onto a different board entirely**:
+the **EBAZ4205** (Zynq-7010, XC7Z010-CLG400-1) — re-hosting the 80186 core in
+the PL and wiring its system bus to the PS-side DDR3 through the PS/PL AXI
+path. The port keeps the original core sources (`Next186_*`, `NextZ80*`)
+intact and concentrates board-, bus- and peripheral-level changes in the
+surrounding modules, so that re-syncing with upstream core updates stays
+tractable.
+
+Re-targeting to the EBAZ4205 is the main source of the work in this
+repository: the XC7Z010's fabric is far smaller than the upstream target, the
+board's DDR3 sits behind the PS (so every memory access crosses the PS/PL AXI
+path), and none of the upstream board-level infrastructure applies. The
+memory interface, write-back cache and top-level AXI protocol were therefore
+rewritten for this board rather than adapted.
 
 The port exists because the Zynq-7000's PS is comparatively weak for legacy
 software: the 80186 core in the PL provides a real 8086-class machine with
@@ -50,10 +60,11 @@ expects.
 
 | Item | Detail |
 |---|---|
-| FPGA | Xilinx Zynq-7000 (XC7A200T) on the NeptUNO board |
+| FPGA | Xilinx Zynq-7010 (XC7Z010-CLG400-1) on the EBAZ4205 board |
 | PL fabric | Hosts the Next186 CPU core, DDR3 controller arbitration, VGA, PS/2, SD, UART, audio |
-| PS | Zynq ARM Cortex-A9, runs PetaLinux (Linux) |
-| System memory | DDR3 (device tree: `SEG_processing_system7_0_HP0_DDR_LOWOCM`, 32 MB usable window) |
+| PS | Zynq dual-core ARM Cortex-A9, runs PetaLinux (Linux) |
+| System memory | 256 MB DDR3 on the PS (device tree: `SEG_processing_system7_0_HP0_DDR_LOWOCM`, 32 MB usable window) |
+| PL clock | FCLK0 = 50 MHz |
 | Toolchain | Vivado 2025.2 |
 
 ---
@@ -177,7 +188,8 @@ core sources work across memory sizes.
 
 ## Building
 
-1. Open the enclosing Vivado project (`Network.xpr`) targeting the NeptUNO.
+1. Open the enclosing Vivado project (`Network.xpr`) targeting the EBAZ4205
+   (XC7Z010).
 2. The PL design instantiates `top_zynq7010` as an out-of-context module
    reference; add this repository to the project's sources.
 3. The PS configuration provides `FCLK_CLK0`, DDR3, and `S_AXI_HP0`; the PL

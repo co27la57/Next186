@@ -668,7 +668,8 @@ module cache_controller(
 		bios_rom[8'hF9] = 32'h00E2BAC2;
 		bios_rom[8'hFA] = 32'hB9C35AEF;
 		bios_rom[8'hFB] = 32'hFEE2FFFF;
-		bios_rom[8'hFC] = 32'h00FC00EA;
+		// 原：bios_rom[8'hFC] = 32'h00FC00EA;   // JMP FAR F000:FC00（落在垃圾）
+		bios_rom[8'hFC] = 32'h00E05BEA;
 		bios_rom[8'hFD] = 32'h000000F0;
 		bios_rom[8'hFE] = 32'h00000000;
 		bios_rom[8'hFF] = 32'h00000000;
@@ -753,9 +754,22 @@ module cache_controller(
 					cache_lru[w][index] <= (w == fit_enc) ? {`WAYS{1'b1}}
 						: (cache_lru[w][index] - ((cache_lru[w][index] >= cache_lru[fit_enc][index]) && (cache_lru[w][index] != {`WAYS{1'b0}})));
 				end
-				// 写命中：整字把命中 way 的 dirty 置 1
+				// 写命中：只把**数据实际落入的那个 way**（fit_enc；多 hot 时 = 统一选定的 way）置脏，
+				// 并把同一 tag 的**兄弟 way 清干净**；同一 index 上**别的 tag** 的 way 的脏位必须原样保留。
+				// ★★ 多hot置脏修复（2026-09-27，台架 A/B 已复现+验证）：
+				//   原写法 `| fit` 在多 hot 情形（复位初值 index16-31 四 way 同 tag=511，而 BIOS 栈
+				//   SS:SP=F000:FC00 ⇒ maddr 0xFFC00 ⇒ index16 正在其中）下，把**四个 way 全标脏**，
+				//   但数据只写进 fit_enc 那一个 way ⇒ 兄弟 way 保留陈旧数据（= 预置 bootstrap 内容）
+				//   却 dirty=1 ⇒ 被选为 victim 时**把陈旧数据写回到本行地址** ⇒ DDR 里这行被 bootstrap
+				//   内容覆盖 ⇒ 栈行一旦逐出回填，CPU 弹垃圾、跑飞（"屏幕冻在第一串"）。
+				//   ✗ 第一版修复写成 `cache_dirty[index] <= (4'b0001 << fit_enc)`：台架 A/B 对照立刻暴露
+				//     它**整字覆盖**了该 index 的 4 位脏位 —— 只要此后同一 index 上另一个 tag 发生写命中
+				//     （逐出-填充后紧接着的写就是这样），那条 way 的脏位会被抹掉 ⇒ 正确数据永不写回。
+				//   ✔ 正解：`(dirty & ~fit) | (1<<fit_enc)` —— 只清"与本次访问同 tag 的兄弟 way"，
+				//     同 index 上别的 tag 的脏位原样保留。单 way 命中时 fit==1<<fit_enc ⇒ 与原
+				//     `dirty | fit` 完全等价（零回归）。
 				if(|mwmask)
-					cache_dirty[index] <= cache_dirty[index] | fit;
+					cache_dirty[index] <= (cache_dirty[index] & ~fit) | (4'b0001 << fit_enc);
 			end else begin
 				// ★ 十次修复：miss 时 victim(fblk) 将被填充 → 设为 MRU。
 				// ★ 十五次修复：同样改 `>=` 递减 + clamp，保证 victim 在 4 way 间轮转。

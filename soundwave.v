@@ -77,7 +77,7 @@ module soundwave(
 	 reg [2:0]write = 3'b000;
 	 wire qempty;
 	 wire [31:0]sample;
-	 wire [31:0]sample1 = qempty ? 32'hc000c000 : sample;
+	 wire [31:0]sample1 = qempty ? 32'h00000000 : sample; // idle = true zero (silence), was 32'hc000c000 (-16384 DC -> PDM idle tone)
 	 reg [31:0]lval = 0; 
 	 reg [31:0]rval = 0;
 	 reg [8:0]clkdiv = 0;

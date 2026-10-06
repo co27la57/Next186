@@ -114,7 +114,7 @@ module top_zynq7010 (
             auto_rst_cnt <= 0;
             auto_rst_reg <= 1'b1;
         end else begin
-            if (auto_rst_cnt < 30'd250_000_000) begin
+            if (auto_rst_cnt < 30'd150_000_000) begin
                 auto_rst_cnt <= auto_rst_cnt + 1'b1;
                 auto_rst_reg <= 1'b1;
             end else begin

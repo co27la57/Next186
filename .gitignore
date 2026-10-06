@@ -1,1 +1,24 @@
 .DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---- Local backup snapshots (kept on disk, never committed) ----
+*.bak_*
+
+# ---- Vendored copy of the upstream Next186 tree (see README) ----
+Next186_SoC-master/
+
+# ---- AI assistant working memory ----
+.workbuddy/
+.workbuddy-ai/
+
+# ---- Build output ----
+*.log
+*.jou
+.Xil/
+*.str
+*.bit
+*.bin
+*.elf
+*.o

@@ -133,9 +133,38 @@ module system
 	wire cpu32_halt;
 	
 	reg [1:0]cntrl0_user_command_register = 0;
-	reg [16:0]vga_ddr_row_col = 17'h14000; 
+	// ★★ 112th VGA 帧缓冲基址单一真源（2026-09-27）：作者代码在 3 处硬编码文本基址(0xe000)，
+	//   端口改为 0x14000 时漏改 endframe 那处 → VGA 每帧复位读错页(0x0805C000)→ 花屏。
+	//   现收敛为两个 localparam，端口化时只改这两行，杜绝"改 N 处漏一处"类回归。
+	localparam [16:0] VGA_TEXT_ROWCOL  = 17'h0E000; // ★128th 恢复(B)：作者原值/作者单位；×2 只在行998 输出处统一做
+//   （★128th 恢复 (B) 修法，上面两点一并解决：
+//    ① 加法器留在作者单位：最大 0xE000+0xFFFF=0x1DFFF<0x20000，且 7+7=14≤15 ⇒ 不再溢出
+//       （ILA 实测 scraddr=0x6000 也安全；121st 时 14+3=17 会回绕）
+//    ② 每行步进 +40 在输出处被 ×2 ⇒ 等效 80 移植单位=160B=一整行 ⇒ 修掉"每 8 字符重复"
+//    ★ 重要教训：换 bitstream 必须"断电重上电再烧录"，否则 DDR 残留脏数据会让 VGA 读到垃圾页）
+//   （★129th 上板实测再补一刀：步进已对、字符连续，但整体偏移 16 字符
+//    —— 每显示行 = 帧缓冲[16+80k, 96+80k)，即"前64字符 + 后16字符"拼接（三处样本精确对上：
+//    r0[16]='n'→"n redistribute..."、r16[16]='F'→"FreeDOS]"、r17[16]='t'→"t found"）。
+//    16 字符 = 16 移植单位 = 8 作者单位 = 恰好一个 burst(8字)。
+//    故在输出处再 -8 作者单位：sdraddr = 0x40000 + 2*(row_col+lnbytecount-8)
+//    → scraddr=0 时 0x5C000-0x10 = 0x5BFF0，显示从帧缓冲 char 0 开始。
+//    注意：不能把 -8 加进 VGA_TEXT_ROWCOL —— 行1065 endframe 公式只取 ROWCOL[16:13]、丢低13位。
+//    宽度安全：A(17b)+B(8b)-5'd8 → 17bit，A>=0xE000 无下溢；concat 仍 5+17+1=23bit。）
+//   （★130th 上板实测：16 字符偏移已消、字符连续可读 ✓。残差 = 水平 1 字符
+//    （r3[78]='s'（"values"的s）折到下一行行首 ⇒ 原始偏移实为 15 而非 16，-8 多修了 1 个）。
+//    1 字符 = 0.5 作者单位，无法用 -k 表达 ⇒ 把 concat 末位 1'b0 → 1'b1（= +1 移植单位 = +1 字符）。
+//    注意：sdraddr 变为奇数 —— 作者原版 {6'b000001, row_col+lnbytecount} 本就可奇可偶，故支持；
+//    若综合后 burst/FIFO 出问题，把这一位改回 1'b0 即可。
+//    垂直方向：**不是** scraddr 滚屏（ILA 实测 scraddr=0000，131st 已更正 130th 的误判）——
+//    显示起点比帧缓冲早 11 行 = 880 字符 = 880 移植单位 = 440 作者单位（= 11×40）。
+//    故再 -440 作者单位，与之前的 -8 合并为 **-448**：
+//    sdraddr = 0x5C000 + 2*(scraddr+lnbytecount) - 2*448 + 1 = 0x5C000 + 2*(...) - 895
+//    （相对上一版的 -15，正好再减 880 = 11 整行 ⇒ 纯垂直平移，水平对齐不受影响。
+//     宽度安全：9'd448 为 9bit，A(17b)+B(8b)-9'd448 → 17bit；A>=0xE000 故 0xDE40>0 无下溢。）
+	localparam [16:0] VGA_GRAPH_ROWCOL = 17'h08000; // ★128th 恢复(B)：作者原值，同上
+	reg [16:0]vga_ddr_row_col = VGA_TEXT_ROWCOL; 
 	reg s_prog_full;
-	(* mark_debug = "true", keep = "true" *) reg s_prog_empty;
+	 reg s_prog_empty;
 	reg s_ddr_rd = 1'b0;
 	reg s_ddr_wr = 1'b0;
 	// ★★ 95th 修复（2026-09-26）：一条 cache 事务只允许一次 AXI burst
@@ -146,7 +175,7 @@ module system
 	reg cache_cmd_done = 1'b0;
 	wire cache_owns = (ddr_wr || ddr_rd) && !cache_cmd_done;   // 96th: real-time request, so cmd/type/address are same-cycle
 	reg crw = 0;	
-	(* mark_debug = "true", keep = "true" *) reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
+	 reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
 	reg s_RS232_DCE_RXD;
 	reg s_RS232_HOST_RXD;
 	reg [18:0]rstcount = 0;
@@ -169,6 +198,8 @@ module system
 	reg [8:0]vga_ddr_row_count = 0;
 	reg [2:0]max_read;
 	reg [4:0]col_counter;
+	// ★★ 146th 三处配套修复**实测仍未解决**（水平偏移 + 首行顶部被截）⇒ 已回退，回到"上下颠倒"基线。
+	//    根因未定，改用 Verilator 台架离线复现定位（见 sim/tb），不再上板盲试。
 	wire vga_end_frame = vga_ddr_row_count == (v240[0] ? 479 : 399);
 	reg [3:0]vga_repln_count = 0; 
 	wire [3:0]vga_repln = vgatext[0] ? (half[0] ? 7 : 15) : {3'b000, repln_graph[0]};
@@ -238,6 +269,9 @@ module system
 	wire ppm; 			
 	wire [9:0]lcr; 		
 	wire [9:0]vde;		
+	// ★139th 已撤回：曾在这里给文本分支加 "vcount < 400" 的可见区截断。
+	//   用户确认**底部那 7 行是有真实数据的**（C:\> 盘符和光标就在那里），
+	//   ⇒ 截断会把真实内容藏掉，**不可接受**。乱码是基址读偏导致的，应从基址/取址修，不能靠裁剪显示区。
 	wire sdon = s_displ_on[17+vgatext[1]] & (vcount <= vde);
 
    wire clk_sys_locked;
@@ -259,10 +293,10 @@ module system
 	//   SD_DI = CPU_DOUT[7]；写 16-bit → SD_n_CS <= ~CPU_DOUT[8]；读 0x3DA → 高字节 = SDI。
 	//   判读：上电后 dbg_sd_cs 有下拉 + dbg_sd_ckc > 0 ⇒ BIOS 确实在跑 SD 例程（即使没插卡）；
 	//         dbg_sd_rx 若恒 0xFF ⇒ 卡无响应（物理/初始化时序/卡类型）；若出现 0x01 ⇒ CMD0 成功进 SPI 模式。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cs  = 1'b1;  // SD 片选（低 = 在通信）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_ck  = 1'b0;  // SPI 时钟（SCLK）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_di  = 1'b0;  // MOSI（BIOS → 卡）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_do  = 1'b0;  // MISO（卡 → BIOS）
+	 reg        dbg_sd_cs  = 1'b1;  // SD 片选（低 = 在通信）
+	 reg        dbg_sd_ck  = 1'b0;  // SPI 时钟（SCLK）
+	 reg        dbg_sd_di  = 1'b0;  // MOSI（BIOS → 卡）
+	 reg        dbg_sd_do  = 1'b0;  // MISO（卡 → BIOS）
 	reg dbg_sd_ck_d = 1'b0;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs <= SD_n_CS; dbg_sd_ck <= SD_CK;
@@ -276,8 +310,8 @@ module system
 	//   现改为 raw SD_CK + dbg_sd_ck_d（与 dbg_sd_ckc 同源）。
 	// ★ 四十次（SD 探针 v2）：区分“完全没敲 SPI”与“只在片选拉低前敲了初始化时钟”。
 	//   dbg_sd_ckc 只统计 CS 低期间的时钟（初始化的 80 拍是 CS 高时发的，不会被计入）。
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_cslow = 1'b0;  // 粘滞：CS 曾拉低过（与 LED 交叉验证）
-	(* mark_debug = "true", keep = "true" *) reg        dbg_sd_rxnz  = 1'b0;  // 粘滞：SDI 曾非全 1（=卡把 MISO 拉低过）
+	 reg        dbg_sd_cslow = 1'b0;  // 粘滞：CS 曾拉低过（与 LED 交叉验证）
+	 reg        dbg_sd_rxnz  = 1'b0;  // 粘滞：SDI 曾非全 1（=卡把 MISO 拉低过）
 	// ★★ 四十九次修正（探针除阱 #5/#6，2026-09-24）：
 	//   reg [7:0] SDI; 无初值 ⇒ 上电为 0x00；在 MISO 恒高时移位序列为 0x00→0x01→0x03→…→0xFF，
 	//   ⇒ 旧判据 dbg_sd_rxnz(SDI != 0xFF) 与 dbg_sd_rx01(SDI == 0x01) 都会必然触发 = 假阳性
@@ -373,7 +407,7 @@ module system
 	//   dbg_sd_r00   : byte-aligned 0x00 seen => CMD17 R1 == 0 (command accepted).
 	//   dbg_sd_rxfe  : byte-aligned 0xFE seen => data token (card is sending data).
 	// =================================================================================
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_sd_ncs   = 16'd0;
+	 reg [15:0] dbg_sd_ncs   = 16'd0;
 	reg dbg_sd_cs_d = 1'b1;
 	always @(posedge clk_cpu) begin
 		dbg_sd_cs_d <= SD_n_CS;
@@ -407,12 +441,12 @@ module system
 	//   dbg_sd_shiftreq (saturates at once), dbg_sd_ckc / dbg_sd_ckall (12-bit
 	//   saturating counters), dbg_sd_dolow (== dbg_sd_rxnz), dbg_sd_rx01 (SDI
 	//   passes through 0x01 on its way to 0xFF, so it fires with no card present).
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_dbg0 = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_dbg1 = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg2 = 16'h0000;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg3 = 16'h0000;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_dbg4 = 16'h0000;
-(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_dbg5 = 8'h00;
+	 reg [7:0]  dbg_dbg0 = 8'h00;
+	 reg [7:0]  dbg_dbg1 = 8'h00;
+	 reg [15:0] dbg_dbg2 = 16'h0000;
+	 reg [15:0] dbg_dbg3 = 16'h0000;
+	 reg [15:0] dbg_dbg4 = 16'h0000;
+ reg [7:0] dbg_dbg5 = 8'h00;
 	always @(posedge clk_cpu) begin
 		if(IORQ & CPU_CE & WR) begin
 			if(PORT_ADDR[15:0] == 16'h00E0) dbg_dbg0 <= CPU_DOUT[7:0];
@@ -730,22 +764,22 @@ module system
 	//   · dbg_cpu_lwr / dbg_cpu_pwr = 该次访问是读还是写
 	//   · dbg_cpu_halt / dbg_cpu_ce = CPU 是否 HALT / 是否在跑
 	//   · dbg_cpu_ios = IORQ 上升沿计数（饱和）—— 判断"在空转等 I/O"还是"真的死了"
-	(* mark_debug = "true", keep = "true" *) reg [20:0] dbg_cpu_laddr = 21'h0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_lwr   = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_cpu_lport = 16'h0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_pwr   = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_halt  = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_cpu_ce    = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_cpu_ios   = 8'h00;
+	 reg [20:0] dbg_cpu_laddr = 21'h0;
+	 reg        dbg_cpu_lwr   = 1'b0;
+	 reg [15:0] dbg_cpu_lport = 16'h0;
+	 reg        dbg_cpu_pwr   = 1'b0;
+	 reg        dbg_cpu_halt  = 1'b0;
+	 reg        dbg_cpu_ce    = 1'b0;
+	 reg [7:0]  dbg_cpu_ios   = 8'h00;
 	reg iorq_d98 = 1'b0;
 
 	// ★★★ 98th-FONT probes（2026-09-27）：回答"字模 RAM 是否被重写、写成了什么"。
 	//   事实基础：sr_font 由 font8x16.mem 预初始化（标准 8x16 字库）；
 	//   BIOS 写端口 0x3CB 才可能改动它（字写=设地址{vga_font_counter}、字节写=顺序填+写使能）。
 	//   全部在 clk_cpu 域**事件锁存/计数**（写事件后长期稳定 ⇒ clk_sdr 采样安全）。
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_font_wr_n = 6'd0;
-	(* mark_debug = "true", keep = "true" *) reg [11:0] dbg_font_addr = 12'h000;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_font_data = 8'h00;
+	 reg [5:0]  dbg_font_wr_n = 6'd0;
+	 reg [11:0] dbg_font_addr = 12'h000;
+	 reg [7:0]  dbg_font_data = 8'h00;
 	always @(posedge clk_cpu) begin
 		if (IORQ & CPU_CE & VGA_FONT_OE) begin
 			if (WR & ~WORD && !dbg_font_wr_n[5]) dbg_font_wr_n <= dbg_font_wr_n + 1'b1;
@@ -759,17 +793,37 @@ module system
 	//   ⇒ 典型"显示侧模式/起点被改"的签名（显示内容与 VRAM 内容脱钩）。
 	//   scraddr = CRT 起始地址；vgatext/vga13/planar/half = 文本/图形/平面/半行 模式位
 	//   （[0]=当前生效，[1]=待生效）。全部准静态（只在切模式时变）⇒ clk_sdr 采样安全。
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_scraddr = 16'h0;
-	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_text    = 2'b00;
-	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_13      = 2'b00;
-	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_planar  = 2'b00;
-	(* mark_debug = "true", keep = "true" *) reg [1:0]  dbg_vga_half    = 2'b00;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_scraddr = 16'h0;   // ★144th 加回：验证"上下对调 = 控制台滚屏(scraddr≠0)"这一假设
+	 reg [1:0]  dbg_vga_text    = 2'b00;
+	 reg [1:0]  dbg_vga_13      = 2'b00;
+	 reg [1:0]  dbg_vga_planar  = 2'b00;
+	 reg [1:0]  dbg_vga_half    = 2'b00;
+	// ★140th 新增探针（纯观测，不改逻辑）：定位"半屏上下对调"的行序问题。
+	//   dbg_vga_lcr    = 行比较寄存器（L268）——若它被 BIOS 设成半屏位置，
+	//                    则 L1088 `row_count == lcr` 会在帧中途把行地址拉回 ROWCOL。
+	//   dbg_vga_rowcol = 帧内真实行地址（L141, 17bit）——直接看基址与推进。
+	//   dbg_vga_rowcnt = 扫描行计数器（L198, 9bit）——与 rowcol 配对，
+	//                    即可还原"第 k 条扫描行读到哪一行"，一眼看出行序是否被重排。
+	 reg [9:0]  dbg_vga_lcr     = 10'h0;
+	 reg [16:0] dbg_vga_rowcol  = 17'h0;
+	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_vga_rowcnt  = 9'h0;
+	// ★142nd 再加两个（纯观测）：把"取指侧"与"显示侧"直接对齐比较。
+	//   dbg_vga_vcount  = 显示侧垂直计数（L76, 10bit）
+	//   dbg_vga_charrow = 显示侧正在扫的字符行（L192 char_row, 6bit）
+	//   取指侧字符行 = dbg_vga_rowcnt/16。两者之差 = 屏幕相位错位量（"上下对调"的根因候选）。
+	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_vga_vcount  = 10'h0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_vga_charrow = 6'h0;
 	always @(posedge clk_sdr) begin
 		dbg_vga_scraddr <= scraddr;
 		dbg_vga_text    <= vgatext[1:0];
 		dbg_vga_13      <= vga13[1:0];
 		dbg_vga_planar  <= planar[1:0];
 		dbg_vga_half    <= half[1:0];
+		dbg_vga_lcr     <= lcr;
+		dbg_vga_rowcol  <= vga_ddr_row_col;
+		dbg_vga_rowcnt  <= vga_ddr_row_count;
+		dbg_vga_vcount  <= vcount;
+		dbg_vga_charrow <= char_row;
 	end
 	always @(posedge clk_cpu) begin
 		if (MREQ) begin dbg_cpu_laddr <= ADDR; dbg_cpu_lwr <= WR; end
@@ -986,12 +1040,19 @@ dbg_ad_d1 <= sdraddr[14:5];
 		// ★★ 95th 修复：地址使能与命令同源（cache_owns），
 		//   保证 FSM 采样瞬间“命令”与“地址”不会错配
 		//   （原来两者分别取自 s_ddr_wr||s_ddr_rd 和实时 cache_hi_addr，存在错配窗口）。
+		//sdraddr <= s_prog_empty || !cache_owns ? 
+		//    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 9'd448, 1'b0} :   // ★152nd 只改 k（相位补偿），末位 1'b0 严格不动（用户确认：1'b0 才是消除水平偏移的那一位）。旋转 11 整行：实测"顶部=fb row11"+"底部7行=fb row0-6"(回绕30行) ⇒ 30-19=11 行 ⇒ Δk=440(880字符=11行=40倍数, 无水平分量) ⇒ k=8+440=448
+		//    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
+		//max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
+		
+	    // ★★ 95th 修复：地址使能与命令同源（cache_owns），
+		//   保证 FSM 采样瞬间"命令"与"地址"不会错配
+		//   （原来两者分别取自 s_ddr_wr||s_ddr_rd 和实时 cache_hi_addr，存在错配窗口）。
 		sdraddr <= s_prog_empty || !cache_owns ? 
-		    {6'b000001, vga_ddr_row_col + vga_lnbytecount} : 
+		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b1} :   // ★149th 回退到"稳定上下对调"基线（148th 的 -9'd480 实测反而引入水平偏移+下半屏垃圾）
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
-		
-		
+			
 		// ★★★ 95th 修复（2026-09-26）：一条 cache 事务只允许一次 AXI burst。
 		//
 		//   根因（sim/tb/ddr_pipe.v 逐拍日志实测，gate_fill=1）：
@@ -1045,15 +1106,28 @@ dbg_ad_d1 <= sdraddr[14:5];
 			vga_lnbytecount <= 0;
 			s_vga_endscanline <= 1'b0;
 
-			if(s_vga_endframe) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? 4'b0111 : 4'b0100), scraddr[12:0]};
-			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? 17'h14000 : 17'h8000; 
-				 else if(s_vga_endline) vga_ddr_row_col <= vga_ddr_row_col + (vgatext[0] ? 40 : {vga_offset, 1'b0});
+			// ★★ VGA 文本基址移植修复（2026-09-27）：
+			//   移植时只把"初值(行141, 来源 localparam 139-140)"和"lcr 换行(行1060)"从作者的
+			//   0xe000 改成了端口的 0x14000，却漏改了 endframe 复位这行公式。文本偏移 7 → 0xe000
+			//   (作者页，错)，改成 10 → 10*0x2000 = 0x14000(端口帧缓冲页，对，=DDR 0x08068000)。
+			//   scraddr=0 时：{1'b0,scraddr[15:13]}=0，故 vga_ddr_row_col = offset<<13。
+			//   非文本分支取 VGA_GRAPH_ROWCOL[16:13]（128th 后回到作者值 0x8000[16:13]=4'b0100），与行1063 非文本一致。
+			//   现三处统一引用 VGA_TEXT_ROWCOL / VGA_GRAPH_ROWCOL，端口化只需改这两个 localparam。
+			if(s_vga_endframe) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
+			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? VGA_TEXT_ROWCOL : VGA_GRAPH_ROWCOL; 
+				 else if(s_vga_endline) vga_ddr_row_col <= vga_ddr_row_col + (vgatext[0] ? 40 : {vga_offset, 1'b0});   // 146th 钳位已回退（回到"上下颠倒"基线）
 			
 			if(s_vga_endline) vga_repln_count <= 0;
 			else vga_repln_count <= vga_repln_count + 1'b1;
 			if(s_vga_endframe) begin
 				vga13[0] <= vga13req;
 				vgatext[0] <= vgatextreq;
+			// ★★ 137th：**显示模式锁死 640x480 60Hz**（本机显示器不支持 400 行/70Hz）。
+			//    135th 曾改成作者原逻辑 `vde >= 10'd400` ⇒ 实际落到 400 行 ⇒ 显示器不同步 ⇒ **黑屏**。
+			//    故这里恢复硬编码 1，把 v240[0] 锁死为 1 ⇒ v240[2]=1 ⇒
+			//    tc_vsblnk 479 / tc_vssync 489 / tc_vesync 491 / tc_veblnk 520（即 640x480）。
+			//    由此带来的"30 字符行 vs 25 行文本页(4000B)"越界，改由行推进钳位解决：
+			//    （137th 的行推进钳位已撤回：用户实测确认版本A(`-5'd8`)本就无乱码，钳位会干扰环形滚屏。）
 				v240[0] <= 1'b1;
 				planar[0] <= planarreq;
 				half[0] <= halfreq;
@@ -1080,14 +1154,14 @@ dbg_ad_d1 <= sdraddr[14:5];
 	// ★ 97b：写回"数据↔地址"一致性计数 —— 自测图案里缓冲行 k 的首字高半字节 = k&0xF，
 	//   而 cq_addr[3:0] = victim 的 index[3:0] —— 两者不等 ⇒ 有写回把别行的数据写进了本地址
 	//   （错位写回的直接实锤）。仅统计缓冲行（dbg_buf_line），全速累计不冻结（同 pmis）。
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_wmis  = 6'h00;
+	 reg [5:0]  dbg_wmis  = 6'h00;
 	// v7: the FULL line address ({tag[4:0], index}) the DDR FSM consumed.
 	//   v6 proved the PAGE is never stale (pmis=0), but pmis only sees bits [23:15].
 	//   A hiaddr change inside the sampling window that stays within the SAME page
 	//   (buffer lines thrashing among themselves) is invisible to pmis yet makes the
 	//   fill read another buffer line's address = the observed "+N lines" shift.
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_fill_addr = 10'h000;
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_addr   = 10'h000;
+	 reg [9:0] dbg_fill_addr = 10'h000;
+	 reg [9:0] dbg_wb_addr   = 10'h000;
 	// ★★★ [v5 probe, 2026-09-27] fill integrity (line 2).
 	//   v4b captured fill data with `dbg_fill_arm && sys_rd_data_valid`, which
 	//   also fires for VGA reads -> the board reading nib=0 was not usable.
@@ -1095,9 +1169,9 @@ dbg_ad_d1 <= sdraddr[14:5];
 	//   Expect (pattern byte@m=(m>>2)&0xFF): w0=0x2020 wl=0x2F2F n=32 x=0 full=1
 	// v5 window scratch (not probes)
 	// v6 (rework): write-back integrity + the page the DDR FSM actually used.
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wb_wl    = 16'h0000;
-	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_fill_page = 9'h000;
-	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_wb_page   = 9'h000;
+	 reg [15:0] dbg_wb_wl    = 16'h0000;
+	 reg [8:0]  dbg_fill_page = 9'h000;
+	 reg [8:0]  dbg_wb_page   = 9'h000;
 	reg [8:0]  dbg_pg_d1 = 9'h000;   // sdraddr[23:15] delayed 1 clk_sdr
 	reg [8:0]  dbg_fill_page_live = 9'h000;
 	reg [8:0]  dbg_wb_page_live   = 9'h000;
@@ -1152,8 +1226,8 @@ dbg_ad_d1 <= sdraddr[14:5];
 	//   wb_hiaddr[14:5] so the gate itself is skew-free.
 	//   dbg_rd_reg / dbg_wb_reg are those registers; dbg_wbr_seen distinguishes a
 	//   legitimate 0x000 (buffer line 0) from "never latched".
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_rd_reg = 10'h000;
-	(* mark_debug = "true", keep = "true" *) reg [9:0] dbg_wb_reg = 10'h000;
+	 reg [9:0] dbg_rd_reg = 10'h000;
+	 reg [9:0] dbg_wb_reg = 10'h000;
 	// [87th probe] The 86th run showed dbg_bufwb_n saturating (0xFF) with a plausible
 	//   address (0x3C0F = tag 0x1E0 / index 15), so buffer-line write-backs DO reach the DDR
 	//   controller - and dbg_bufrd_n read 0, but that probe was WRONG: it used ddr_rd's

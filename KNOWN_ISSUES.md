@@ -218,3 +218,54 @@ Some Vivado versions resolve the module reference through a nested
 can fail with `[Synth 8-439] module '...' not found`. Either add the file to
 both directories or fix the project's source list. See the note in
 `README.md`.
+
+---
+
+## 5. VGA text mode: screen content is cyclically rotated by 7 rows
+
+**Status:** open
+**Severity:** cosmetic — all characters render correctly and are in the right
+column order; only the vertical assignment of rows is shifted.
+
+**Symptom**
+
+The text buffer appears on screen as if the whole frame had been rotated by
+exactly **7 rows**: the top 7 lines of the buffer are displayed at the bottom
+of the screen, and the first line of the buffer is displayed as row 8. The
+rotation is a *cyclic shift of row order*, not a vertical mirror and not a
+half-screen swap (see issue 1 for that separate failure mode).
+
+**Where it lives (likely)**
+
+Almost certainly the same neighbourhood as issue 1 — the VGA scan-out start
+offset / per-line advance arithmetic in `ddr_186.v`
+(`vga_ddr_row_col`, `vga_lnbytecount`, `sdraddr`), since the corruption is a
+pure row-index permutation with no character damage:
+
+- a constant start-of-frame offset of `k` rows reproduces exactly this
+  signature — row 0 is fetched from framebuffer row `k`, wrapping at the end
+  of the buffer. The observed shift of 7 rows corresponds to a start offset
+  of `7 × 160 = 1120 bytes` (7 text rows = 7 × 80 16-bit words), if the
+  offset is applied in byte/word units the same way as the per-line advance.
+- it may also be the *same* root cause as issue 1 with a different constant
+  (the "stable upside-down" baseline `k = 448` vs a 7-row offset), or an
+  interaction between the base and the per-line advance. Not yet determined.
+
+**Open questions**
+
+- Is the 7-row rotation static, or does it drift/snap under keyboard activity
+  or scrolling? (Issue 1's displacement was stable; confirm this one is too.)
+- Does this manifest *instead of* the half-screen swap of issue 1 (i.e. after
+  a change), or under different conditions? If the failure mode changed from
+  "half swap" to "7-row rotation", the delta between the two experiments is
+  the most informative signal we have.
+
+**Suggested next step**
+
+Same ILA probe set as issue 1 (`sdraddr`, `vga_ddr_row_col`,
+`vga_lnbytecount`, `s_vga_endscanline`), but this time the check is cheaper:
+capture the *first* `sdraddr` of a frame and compare it against
+`VGA_TEXT_ROWCOL`. A difference of exactly `1120` bytes (or `560` word-units,
+pre-`×2`) confirms a pure start-of-frame offset and reduces the fix to the
+base/offset arithmetic — no per-line advance changes needed.
+

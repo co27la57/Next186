@@ -144,6 +144,14 @@ static void set_pin(int pin, int val) {
     }
 }
 
+static int rd_fd[9];   /* value 文件的只读 fd, 供 -V 回读校验 */
+
+static int get_pin(int idx) {
+    char c = 0;
+    if (pread(rd_fd[idx], &c, 1, 0) != 1) return -1;
+    return c == '0' ? 0 : (c == '1' ? 1 : -2);
+}
+
 static void export_pin(int gpio_num, int idx) {
     char path[256], buf[64];
 
@@ -175,6 +183,11 @@ static void export_pin(int gpio_num, int idx) {
     if (val_fd[idx] < 0) {
         fprintf(stderr, "[kbd_gpio] open %s: %s\n", path, strerror(errno));
         exit(1);
+    }
+    {
+        char rp[256];
+        snprintf(rp, sizeof(rp), "%s/gpio%d/value", SYSFS_GPIO, gpio_num);
+        rd_fd[idx] = open(rp, O_RDONLY);
     }
 }
 
@@ -318,7 +331,7 @@ static void type_string(const char *s) {
 
 int main(int argc, char **argv) {
     int pin0 = DEFAULT_BASE;   /* EMIO 内的引脚序号(0..117), 默认 54 */
-    int i, test_mode = 0, keymap_check = 0, sweep_mode = 0, sweep_from = 0;
+    int i, test_mode = 0, keymap_check = 0, sweep_mode = 0, sweep_from = 0, verify_mode = 0;
     int raw = -1, raw_mode = 0;   /* 原始扫描码探针: raw=扫描码, raw_mode: 1=只发make, 2=make+break */
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-b") && i + 1 < argc) pin0 = atoi(argv[++i]);
@@ -327,6 +340,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-s"))     slow = 1;
         else if (!strcmp(argv[i], "-K"))     keymap_check = 1;
         else if (!strcmp(argv[i], "-B"))     sweep_mode = 1;
+        else if (!strcmp(argv[i], "-V"))     verify_mode = 1;
         else if (!strcmp(argv[i], "-b0") && i + 1 < argc) sweep_from = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-g") && i + 1 < argc) gap_us = atoi(argv[++i]);
         /* -r <hex> 只发 make; -R <hex> 发 make+break —— 用于探测 80186 的真实解释 */
@@ -398,6 +412,36 @@ int main(int argc, char **argv) {
         tcsetattr(STDIN_FILENO, TCSANOW, &old);
         for (int q = 0; q <= NDATA; q++) set_pin(q, 0);
         fprintf(stderr, "\n[probe] 退出, 终端已还原\n");
+        return 0;
+    }
+
+    /* ---- -V 校验模式: 写完 9 根线立刻从 sysfs 读回, 验证 PS->EMIO 这一段 ----
+     * 若读回与写入一致, 说明 PS 侧完全正确, 问题在 PL/BD 或 8042/BIOS;
+     * 若读回就不一致, 问题在 PS 的 GPIO 写入/sysfs 层, 与 PL 无关。 */
+    if (verify_mode) {
+        static const int t[] = {0x24, 0x23, 0x05, 0xA4, 0xA3};
+        unsigned k, v;
+        fprintf(stderr, "[verify] idx : bit7..bit0 strobe   (期望 -> 读回)\n");
+        for (k = 0; k < sizeof(t)/sizeof(t[0]); k++) {
+            v = (unsigned)t[k];
+            for (i = 0; i < NDATA; i++) set_pin(i, (int)((v >> i) & 1));
+            usleep(2000);
+            set_pin(NDATA, 0);  usleep(2000);
+            set_pin(NDATA, 1);  usleep(2000);
+            fprintf(stderr, "  0x%02X ->", v);
+            for (i = NDATA - 1; i >= 0; i--) fprintf(stderr, " %d", get_pin(i));
+            fprintf(stderr, "  stb=%d", get_pin(NDATA));
+            {
+                int bad = 0, rd;
+                for (i = 0; i < NDATA; i++) { rd = get_pin(i); if (rd != (int)((v>>i)&1)) bad++; }
+                if (get_pin(NDATA) != 1) bad++;
+                fprintf(stderr, "   %s\n", bad ? "MISMATCH!" : "OK");
+            }
+            set_pin(NDATA, 0);
+            usleep(2000);
+        }
+        for (int q = 0; q <= NDATA; q++) set_pin(q, 0);
+        fprintf(stderr, "[verify] 结束\n");
         return 0;
     }
 

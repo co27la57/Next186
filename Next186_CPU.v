@@ -1844,6 +1844,14 @@ reg        dbg_HALT;
 reg [15:0] dbg_CS;
 reg [15:0] dbg_IP;
 reg [20:0] dbg_IADDR;
+
+// ★★ 2026-10-10：给这三个加 mark_debug，用于定位键盘映射失败的卡死指令。
+//   背景：抓包显示失败键(KeyCode 行号 >= 17)会让 CPU 停在 FETCH0=A3
+//         (8086 的 MOV AX,moffs16) 上 134 拍不动，而正常键很快 CF=IRET 返回。
+//         之前只有指令字节、没有地址，无法确定这条指令位于何处、bx 算成了什么。
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_CS_probe;
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_IP_probe;
+(* mark_debug = "true", keep = "true" *) reg [20:0] dbg_IADDR_probe;
 //
 //// 复位/中断状态
 (* mark_debug = "true", keep = "true" *) wire        dbg_SRST      = SRST;
@@ -1933,6 +1941,10 @@ reg        dbg_IORQ;
         dbg_IADDR <= IADDR;
         dbg_MREQ  <= MREQ;
         dbg_IORQ  <= IORQ;
+        // 供 ILA 采集的地址镜像(2026-10-10)
+        dbg_CS_probe   <= CS;
+        dbg_IP_probe   <= IP;
+        dbg_IADDR_probe<= IADDR;
     end
 (* mark_debug = "true", keep = "true" *) wire        dbg_WR        = WR;
 

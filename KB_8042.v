@@ -127,11 +127,47 @@ module KB_Mouse_8042(
 	//   (DOS/BIOS 一定会来读端口 0x60), 所以只用 ~OBF & ~MOBF 即可, 不会死锁。
 	assign vk_ready = ~OBF & ~MOBF;
 
-	/* ★★★ ILA 探针组 B: 8042 输出缓冲 —— 核心对比点 ★★★
-	   关键判据:  dbg_vk_data(接收端发出)  vs  dbg_s_data(装入 8042 缓冲)
-	              vs  dbg_dout(80186 实际从端口 0x60 读到)
-	   三者一致(都应是 0x24) → 传输与 8042 均正确, 问题在 BIOS 翻译/CPU 侧
-	   任一处不一致        → 直接定位到被改动的那一级 */
+	/* ★★★ ILA 探针组 B: 8042 输出缓冲 —— 三层字节对账(2026-10-10 恢复) ★★★
+	   判据(干净重启后实测的错映射):
+	       送 0x23 -> DOS 显示 'h'   (正确)
+	       送 0x24 -> DOS 显示 '4'   (BIOS 表说该是 'j'; '4' 是 row51 = 扫描码 0x05)
+	     而 `kbd_gpio_inject -V` 已证明 PS 侧写 sysfs 再读回 9 根线**逐位全对**,
+	     所以字节是在 EMIO 之后被改写的。这三个探针就是定位它在哪一级被改的:
+
+	     dbg_vk_data : kbd_gpio_rx 交给 8042 的字节 (接收端发出)
+	     dbg_s_data  : 实际被装进 8042 输出缓冲的字节 (含鼠标通路/自检应答的混入)
+	     dbg_dout    : 80186 真的从端口 0x60 读到的字节 (经 dout 三选一 mux 之后)
+
+	     三者一致(都是 0x24) => 传输与 8042 都对, 问题在 CPU/BIOS 之后
+	     任意两处不一致       => 立刻指出是被改动的那一级
+
+	   附加: dbg_sel_dout 标出 dout 当前走的是哪一路
+	         (0=s_data正常数据, 1=cmd状态口, 2=ctl_outb 命令字节)
+	   —— 之前怀疑过 dout 的三选一 mux 会把数据口读走, 这个信号能一次性证实或排除。
+	*/
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_vk_data = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_s_data  = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_dout    = 8'h00;
+	(* mark_debug = "true", keep = "true" *) reg [1:0] dbg_sel_dout = 2'd0;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_vk_valid = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_vk_ready = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_OBF      = 1'b0;
+	(* mark_debug = "true", keep = "true" *) reg       dbg_ctl_outb = 1'b0;
+	// 该字节是由哪条通路装进缓冲的: 0=vk_valid(注入) 1=vk_out_v(自检应答) 2=kb_data(物理键盘) 3=mouse_data(鼠标)
+	(* mark_debug = "true", keep = "true" *) reg [1:0] dbg_src     = 2'd0;
+
+	always @(posedge clk) begin
+		// vk_data 的"锁存值": vk_valid 为 1 的那一拍, 记下接收端发出的字节
+		if (vk_valid) dbg_vk_data <= vk_data;
+		dbg_vk_valid <= vk_valid;
+		dbg_vk_ready <= vk_ready;
+		// s_data 每次装缓冲时同步一次, 抓到的是"真正被 80186 读走的那一字节"
+		dbg_s_data   <= s_data;
+		dbg_dout     <= dout;
+		dbg_sel_dout <= cmd ? 2'd1 : (ctl_outb ? 2'd2 : 2'd0);
+		dbg_OBF      <= OBF;
+		dbg_ctl_outb <= ctl_outb;
+	end
 
 	// 自检应答序列发生器(与 vk_cmd_seen 置位同处一个 always 块, 避免多驱动)
 	always @(posedge clk) begin
@@ -206,13 +242,19 @@ module KB_Mouse_8042(
 			if(vk_enable & vk_out_v) begin
 				OBF <= 1'b1;
 				s_data <= vk_out;
+				dbg_src <= 2'd1;
 			end else if(vk_enable & vk_valid) begin
 				OBF <= 1'b1;
 				s_data <= vk_data;
+				dbg_src <= 2'd0;
 			end else if(kb_data_out_ready & ~rd_kb & ~cmdbyte[2] & ~vk_enable) begin
 				OBF <= 1'b1;
 				s_data <= kb_data;
+				dbg_src <= 2'd2;
 			end else if(mouse_data_out_ready & ~rd_mouse & ~cmdbyte[3] & ~vk_enable) begin
+				OBF <= 1'b1;
+				s_data <= mouse_data;
+				dbg_src <= 2'd3;
 				// ★ 2026-10-10 修复: 与上面键盘通路保持对称 —— 虚拟键盘启用时,
 				//   鼠标通路也必须被门控。s_data 是键盘/鼠标**共用**的输出缓冲,
 				//   之前只有键盘通路带 ~vk_enable, 鼠标通路没有; 于是 BIOS 只要发过

@@ -107,4 +107,28 @@ module kbd_gpio_rx #(
     assign vk_valid = ~empty;
     assign vk_data  = mem[rptr[3:0]];
 
+    // ========================================================================
+    // ★ ILA 探针组 A: EMIO 原始引脚(2026-10-10 恢复) ★
+    //   与 KB_8042.v 里的探针组 B 配对使用, 从上到下就是字节流过的**每一级**:
+    //     A: dbg_emio_data / dbg_emio_stb  ← PS 经 EMIO 送到 PL 的原始引脚(第 0 级)
+    //     B: dbg_vk_data                    ← 进入 8042 的字节(第 1 级)
+    //     B: dbg_s_data                     ← 装进输出缓冲的字节(第 2 级)
+    //     B: dbg_dout                       ← 80186 从端口 0x60 真正读到的(第 3 级)
+    //   哪一级开始与 0x24 不同, 故障就在那一级。PS 侧已用 `kbd_gpio_inject -V`
+    //   证明写 sysfs 再读回 9 根线逐位全对, 所以第 0 级这一组是关键对照。
+    //
+    //   电平采样而非边沿: 选通会被注入器保持约 12us(数百拍), 电平采样天然安全。
+    // ========================================================================
+    (* mark_debug = "true", keep = "true" *) reg [7:0] dbg_emio_data = 8'h00;
+    (* mark_debug = "true", keep = "true" *) reg       dbg_emio_stb  = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg [7:0] dbg_rx_data   = 8'h00;
+    (* mark_debug = "true", keep = "true" *) reg       dbg_popped    = 1'b0;
+
+    always @(posedge clk) begin
+        if (gpio_stb) dbg_emio_data <= gpio_data;   // 选通期间持续采样
+        dbg_emio_stb <= gpio_stb;
+        if (vk_valid) dbg_rx_data <= vk_data;       // 出队时锁存
+        dbg_popped   <= (!empty && vk_ready);       // 本拍是否真的交出去了
+    end
+
 endmodule

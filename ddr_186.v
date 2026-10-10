@@ -827,7 +827,7 @@ module system
 	//   ⇒ 典型"显示侧模式/起点被改"的签名（显示内容与 VRAM 内容脱钩）。
 	//   scraddr = CRT 起始地址；vgatext/vga13/planar/half = 文本/图形/平面/半行 模式位
 	//   （[0]=当前生效，[1]=待生效）。全部准静态（只在切模式时变）⇒ clk_sdr 采样安全。
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_scraddr = 16'h0;   // ★144th 加回：验证"上下对调 = 控制台滚屏(scraddr≠0)"这一假设
+	// (2026-10-10 清理: 与键盘排查无关) (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_vga_scraddr = 16'h0;   // ★144th 加回：验证"上下对调 = 控制台滚屏(scraddr≠0)"这一假设
 	 reg [1:0]  dbg_vga_text    = 2'b00;
 	 reg [1:0]  dbg_vga_13      = 2'b00;
 	 reg [1:0]  dbg_vga_planar  = 2'b00;
@@ -840,13 +840,13 @@ module system
 	//                    即可还原"第 k 条扫描行读到哪一行"，一眼看出行序是否被重排。
 	 reg [9:0]  dbg_vga_lcr     = 10'h0;
 	 reg [16:0] dbg_vga_rowcol  = 17'h0;
-	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_vga_rowcnt  = 9'h0;
+	// (2026-10-10 清理: 与键盘排查无关) (* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_vga_rowcnt  = 9'h0;
 	// ★142nd 再加两个（纯观测）：把"取指侧"与"显示侧"直接对齐比较。
 	//   dbg_vga_vcount  = 显示侧垂直计数（L76, 10bit）
 	//   dbg_vga_charrow = 显示侧正在扫的字符行（L192 char_row, 6bit）
 	//   取指侧字符行 = dbg_vga_rowcnt/16。两者之差 = 屏幕相位错位量（"上下对调"的根因候选）。
-	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_vga_vcount  = 10'h0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_vga_charrow = 6'h0;
+	// (2026-10-10 清理: 与键盘排查无关) (* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_vga_vcount  = 10'h0;
+	// (2026-10-10 清理: 与键盘排查无关) (* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_vga_charrow = 6'h0;
 	always @(posedge clk_sdr) begin
 		dbg_vga_scraddr <= scraddr;
 		dbg_vga_text    <= vgatext[1:0];

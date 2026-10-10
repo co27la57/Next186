@@ -1949,5 +1949,38 @@ reg        dbg_IORQ;
     end
 (* mark_debug = "true", keep = "true" *) wire        dbg_WR        = WR;
 
+// ========================================================================
+// ★ 2026-10-10：XLAT(xlat) 取值探针 —— 定位键盘映射错位的关键
+//
+//   背景：BIOS 的 int09 查表段已离线反汇编核对，机器码与源码完全一致：
+//       F000:E4F8  mov  bx,0FB09h        ; &KeyIndex
+//       F000:E4FB  xlat cs:[bx]           ; AL = KeyIndex[扫描码]  ← 行号
+//       F000:E4FD  xor  bx,bx
+//       ...        cmp  al,1Ah(26)        ; 行号 >26 走 NumLock 分支
+//       F000:E536  mov  ax,cs:[bx+0FB7Ah] ; 取字符
+//   台架逐指令模拟这段源码，18 个键（含板子上失败的 j/k/l/g/u）全部正确。
+//   所以唯一没被验证的一环就是【xlat 到底算出了什么】。
+//
+//   dbg_xlat_pre : 执行 xlat 那一拍的 AL（= 扫描码，应等于我们注入的值）
+//   dbg_xlat_post: 下一拍的 AL（= xlat 结果，应等于 BIOS KeyIndex 里的行号）
+//   dbg_xlat_ip  : xlat 的指令地址（用于确认抓到的是 int09 里那一条）
+//   dbg_xlat_cnt : 累计触发次数（确认确实抓到了，而不是一直在空跑）
+// ========================================================================
+(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_xlat_pre  = 8'h00;
+(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_xlat_post = 8'h00;
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_xlat_ip   = 16'd0;
+(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_xlat_cnt  = 16'd0;
+
+always @(posedge CLK) begin
+    // ICODE1==17 即 XLAT（译码见 1718 行 8'b11010111 -> ICODE=17）
+    if (ICODE1 == 6'd17) begin
+        dbg_xlat_pre <= AX[7:0];      // 执行前 AL = 扫描码
+        dbg_xlat_ip  <= IP;
+    end
+    dbg_xlat_post <= AX[7:0];         // 持续跟随，便于看执行后的新 AL
+    if (ICODE1 == 6'd17 && dbg_xlat_cnt != 16'hFFFF)
+        dbg_xlat_cnt <= dbg_xlat_cnt + 16'd1;
+end
+
 endmodule
 

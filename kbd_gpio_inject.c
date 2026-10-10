@@ -318,7 +318,7 @@ static void type_string(const char *s) {
 
 int main(int argc, char **argv) {
     int pin0 = DEFAULT_BASE;   /* EMIO 内的引脚序号(0..117), 默认 54 */
-    int i, test_mode = 0, keymap_check = 0;
+    int i, test_mode = 0, keymap_check = 0, sweep_mode = 0, sweep_from = 0;
     int raw = -1, raw_mode = 0;   /* 原始扫描码探针: raw=扫描码, raw_mode: 1=只发make, 2=make+break */
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-b") && i + 1 < argc) pin0 = atoi(argv[++i]);
@@ -326,6 +326,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-t"))     test_mode = 1;
         else if (!strcmp(argv[i], "-s"))     slow = 1;
         else if (!strcmp(argv[i], "-K"))     keymap_check = 1;
+        else if (!strcmp(argv[i], "-B"))     sweep_mode = 1;
+        else if (!strcmp(argv[i], "-b0") && i + 1 < argc) sweep_from = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-g") && i + 1 < argc) gap_us = atoi(argv[++i]);
         /* -r <hex> 只发 make; -R <hex> 发 make+break —— 用于探测 80186 的真实解释 */
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) { raw = (int)strtol(argv[++i], NULL, 16); raw_mode = 1; }
@@ -396,6 +398,26 @@ int main(int argc, char **argv) {
         tcsetattr(STDIN_FILENO, TCSANOW, &old);
         for (int q = 0; q <= NDATA; q++) set_pin(q, 0);
         fprintf(stderr, "\n[probe] 退出, 终端已还原\n");
+        return 0;
+    }
+
+    /* ---- 扫描模式: 把 0x00..0x7F 全部依次发一遍(每个之间回车) ----
+     * 用来一次性拿到"发送字节 -> DOS 实际显示"的完整映射, 从而直接反推出
+     * 传输链路上到底发生了什么变换。配合 sim/tools/vga_text_dump.sh 读屏即可。 */
+    if (sweep_mode) {
+        int v;
+        fprintf(stderr, "[kbd_gpio] 扫描模式: 发送 0x%02X..0x%02X, 每个后跟回车\n", sweep_from, (sweep_from+31)&0x7F);
+        fprintf(stderr, "[kbd_gpio] 读屏: sh /home/workspace/vga_text_dump.sh 0 25\n");
+        for (v = sweep_from; v < sweep_from + 32 && v < 128; v++) {
+            send_byte((uint8_t)v);
+            usleep(slow ? 30000 : gap_us);
+            send_byte(0x1c);            /* 回车分隔 */
+            usleep(slow ? 30000 : gap_us);
+            send_byte(0x9c);
+            usleep(slow ? 30000 : gap_us);
+        }
+        for (int q = 0; q <= NDATA; q++) set_pin(q, 0);
+        fprintf(stderr, "[kbd_gpio] 扫描结束\n");
         return 0;
     }
 

@@ -156,6 +156,40 @@ module KB_Mouse_8042(
 	// 该字节是由哪条通路装进缓冲的: 0=vk_valid(注入) 1=vk_out_v(自检应答) 2=kb_data(物理键盘) 3=mouse_data(鼠标)
 	(* mark_debug = "true", keep = "true" *) reg [1:0] dbg_src     = 2'd0;
 
+	// ========================================================================
+	// ★ 事件日志(2026-10-10): 16 条循环记录, 取代"靠触发条件碰运气"
+	//
+	//   问题: 一个字节从写入到被 80186 读走只有几微秒(几十拍), 在 2048 深度的
+	//   ILA 窗口里只是一条极细的竖线, 反复调触发条件也常抓不到。实测两次抓取
+	//   窗口里握手信号(dbg_OBF/dbg_vk_valid/dbg_emio_stb)全程为 0, 只看到数据
+	//   通道残留着上一次的字节值 —— 那种波形没有任何判别力。
+	//
+	//   做法: 每往输出缓冲装一个字节, 就往 16 条循环日志里写一条
+	//         { data[7:0], src[1:0], seq[5:0] }
+	//   seq 每装一个字节递增, 所以日志里的 seq 能直接排出先后顺序,
+	//   也能看出"一次注入到底进了几个字节"。
+	//
+	//   用法: ILA 触发条件随便设(甚至 Always capture), 抓下来后按 seq 排序读,
+	//         就能看到最近 16 次入队的 {字节, 来源} —— 完全不需要对准时机。
+	// ========================================================================
+	localparam DBGLOG_N = 16;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbglog_data [0:DBGLOG_N-1];
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbglog_src  [0:DBGLOG_N-1];
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbglog_seq  [0:DBGLOG_N-1];
+	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbglog_wp   = 4'd0;
+	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_evt_cnt  = 16'd0;
+
+	// 日志写入点: 每次真正把字节装进输出缓冲时调用(宏而非 task, Verilog-2001
+	// 不允许在 always 块里调用 task)。
+	`define DBGLOG_PUSH(DATA_, SRC_)                                                \
+		begin                                                                      \
+			dbglog_data[dbglog_wp] <= (DATA_);                                      \
+			dbglog_src [dbglog_wp] <= (SRC_);                                       \
+			dbglog_seq [dbglog_wp] <= dbg_evt_cnt[5:0];                             \
+			dbglog_wp <= dbglog_wp + 4'd1;                                          \
+			dbg_evt_cnt <= dbg_evt_cnt + 16'd1;                                     \
+		end
+
 	always @(posedge clk) begin
 		// vk_data 的"锁存值": vk_valid 为 1 的那一拍, 记下接收端发出的字节
 		if (vk_valid) dbg_vk_data <= vk_data;
@@ -239,22 +273,27 @@ module KB_Mouse_8042(
 			//   而 vk_valid 现在是电平, 会一直保持到被取走, 让路没关系。
 			//   若把 vk_valid 排在前面, 一个待发扫描码就会把 ACK 挤掉,
 			//   BIOS 会一直等 AckReceived ⇒ 键盘命令卡死。
+			//   下面四处 dbglog_push 就是"字节真正入队"的时刻, 也是日志的唯一写入点。
 			if(vk_enable & vk_out_v) begin
 				OBF <= 1'b1;
 				s_data <= vk_out;
 				dbg_src <= 2'd1;
+				`DBGLOG_PUSH(vk_out, 2'd1);
 			end else if(vk_enable & vk_valid) begin
 				OBF <= 1'b1;
 				s_data <= vk_data;
 				dbg_src <= 2'd0;
+				`DBGLOG_PUSH(vk_data, 2'd0);
 			end else if(kb_data_out_ready & ~rd_kb & ~cmdbyte[2] & ~vk_enable) begin
 				OBF <= 1'b1;
 				s_data <= kb_data;
 				dbg_src <= 2'd2;
+				`DBGLOG_PUSH(kb_data, 2'd2);
 			end else if(mouse_data_out_ready & ~rd_mouse & ~cmdbyte[3] & ~vk_enable) begin
 				OBF <= 1'b1;
 				s_data <= mouse_data;
 				dbg_src <= 2'd3;
+				`DBGLOG_PUSH(mouse_data, 2'd3);
 				// ★ 2026-10-10 修复: 与上面键盘通路保持对称 —— 虚拟键盘启用时,
 				//   鼠标通路也必须被门控。s_data 是键盘/鼠标**共用**的输出缓冲,
 				//   之前只有键盘通路带 ~vk_enable, 鼠标通路没有; 于是 BIOS 只要发过

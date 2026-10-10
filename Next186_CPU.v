@@ -1832,13 +1832,13 @@ endfunction
 // ★ CPU 内部诊断探针
 // ==========================================
 // 流水线状态
-//(* mark_debug = "true", keep = "true" *) wire [6:0]  dbg_STAGE     = STAGE;
-//(* mark_debug = "true", keep = "true" *) wire        dbg_IFETCH    = IFETCH;
+(* mark_debug = "true", keep = "true" *) wire [6:0]  dbg_STAGE     = STAGE;
+(* mark_debug = "true", keep = "true" *) wire        dbg_IFETCH    = IFETCH;
 reg        dbg_HALT;
 //
 //// 当前执行的指令
-//(* mark_debug = "true", keep = "true" *) wire [7:0]  dbg_FETCH0    = FETCH[0];
-//(* mark_debug = "true", keep = "true" *) wire [5:0]  dbg_ICODE1    = ICODE1;
+(* mark_debug = "true", keep = "true" *) wire [7:0]  dbg_FETCH0    = FETCH[0];
+(* mark_debug = "true", keep = "true" *) wire [5:0]  dbg_ICODE1    = ICODE1;
 //
 //// 指令指针
 reg [15:0] dbg_CS;
@@ -1846,10 +1846,10 @@ reg [15:0] dbg_IP;
 reg [20:0] dbg_IADDR;
 //
 //// 复位/中断状态
-//(* mark_debug = "true", keep = "true" *) wire        dbg_SRST      = SRST;
-//(* mark_debug = "true", keep = "true" *) wire        dbg_SINTR     = SINTR;
-//(* mark_debug = "true", keep = "true" *) wire        dbg_IACK      = IACK;
-//(* mark_debug = "true", keep = "true" *) wire        dbg_IRQ       = IRQ;
+(* mark_debug = "true", keep = "true" *) wire        dbg_SRST      = SRST;
+(* mark_debug = "true", keep = "true" *) wire        dbg_SINTR     = SINTR;
+(* mark_debug = "true", keep = "true" *) wire        dbg_IACK      = IACK;
+(* mark_debug = "true", keep = "true" *) wire        dbg_IRQ       = IRQ;
 //
 //// 内存/端口请求
 reg        dbg_MREQ;
@@ -1934,7 +1934,7 @@ reg        dbg_IORQ;
         dbg_MREQ  <= MREQ;
         dbg_IORQ  <= IORQ;
     end
-//(* mark_debug = "true", keep = "true" *) wire        dbg_WR        = WR;
+(* mark_debug = "true", keep = "true" *) wire        dbg_WR        = WR;
 
 endmodule
 

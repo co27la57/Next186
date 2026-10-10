@@ -197,12 +197,18 @@ module top_zynq7010 (
     //            if raw changes but lvl/pulse never do -> hold the button longer (>25 ms).
     //            if pulse toggles but the screen does not restart -> reset path problem.
     // ==========================================
-// (2026-10-10 清理: 复位链排查用, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg dbg_btn_raw   = 1'b1;
-// (2026-10-10 清理: 复位链排查用, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg dbg_btn_sync  = 1'b1;
-// (2026-10-10 清理: 复位链排查用, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg dbg_btn_lvl   = 1'b1;
-// (2026-10-10 清理: 复位链排查用, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg dbg_btn_pulse = 1'b0;
-// (2026-10-10 清理: 复位链排查用, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg dbg_auto_rst  = 1'b1;
-// (2026-10-10 清理: 复位链排查用, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg dbg_rst_trig  = 1'b1;
+    // ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 该寄存器是功能代码, 不能删
+    reg dbg_btn_raw   = 1'b1;
+    // ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 该寄存器是功能代码, 不能删
+    reg dbg_btn_sync  = 1'b1;
+    // ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 该寄存器是功能代码, 不能删
+    reg dbg_btn_lvl   = 1'b1;
+    // ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 该寄存器是功能代码, 不能删
+    reg dbg_btn_pulse = 1'b0;
+    // ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 该寄存器是功能代码, 不能删
+    reg dbg_auto_rst  = 1'b1;
+    // ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 该寄存器是功能代码, 不能删
+    reg dbg_rst_trig  = 1'b1;
 
     always @(posedge m_axi_aclk) begin
         dbg_btn_raw   <= BTN_SOUTH;
@@ -260,7 +266,8 @@ module top_zynq7010 (
     localparam W_WAIT_W  = 4'd8;
     localparam B_RESP    = 4'd9;
 
-// (2026-10-10 清理: 写 FSM 探针, 与键盘无关)     (* mark_debug = "true", keep = "true" *) reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
+// (2026-10-10: 摘掉 mark_debug; 这是写 FSM 的真实状态寄存器, 必须保留)
+    reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
     reg        rlast_latched;

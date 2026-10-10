@@ -180,7 +180,13 @@ static void export_pin(int gpio_num, int idx) {
 
 static int verbose = 0;
 static int slow = 0;      /* -s: 字节间加长延时, 用于排查丢字节 */
-static int gap_us = 3000; /* -g <us>: 字节之间 / make 与 break 之间的间隔 */
+static int gap_us = 50000; /* -g <us>: 字节之间 / make 与 break 之间的间隔
+ * ★ 2026-10-10 由 3000 提到 50000: 实测 -R 模式(硬编码 200ms 间隔)连发 5 个
+ *   'a' 全部正确, 而 -K 模式(原来 3ms 间隔)只有前 16 个字符正确、之后全乱。
+ *   16 正好等于 8086 键盘类型缓冲的容量(16 项, BDA 0040:001A Head / 001C Tail)。
+ *   => 3ms 太快, 缓冲区被灌满, 之后 int16h 取不动 -> 8042 的 OBF 停在 1
+ *      -> 整条注入链路背压。50ms 已是 -R 模式的 1/4, 留足余量。
+ *   可用 -g 现场调: -g 20000 更激进, -g 100000 更保守。 */
 
 /* GPIO 使用: base+0..7 = 数据位 data[0..7], base+8 = 选通 strob */
 #define NDATA 8

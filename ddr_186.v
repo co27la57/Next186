@@ -20,6 +20,10 @@ module system
 		 input BTN_RESET,	
 		 input BTN_NMI,		
 		 output [7:0]LED,	
+		 // ★ 诊断(2026-10-10): 虚拟键盘"注入活动"指示
+		 //   每收到一个注入字节(vk_valid 脉冲)翻转一次 -> 引到顶层 LED。
+		 //   用途: 不用物理键盘、不用 ILA, 看灯闪不闪即知"字节有没有进到 PL"。
+		 output wire VK_ACT,
 		 input RS232_DCE_RXD,
 		 output RS232_DCE_TXD,
 		 input RS232_EXT_RXD,
@@ -50,8 +54,11 @@ module system
 		 output MIDI_OUT,
 		 input CLKBD,
 		 input WSBD,
-		 input DABD
-		 
+		 input DABD,
+		 // ---- 虚拟键盘: PS EMIO GPIO (8位并行 + 选通, 不经 AXI) ----
+		 input [7:0] KBD_GPIO_DATA,
+		 input       KBD_GPIO_STB,
+		 input       KBD_VK_ENABLE
     );
 
 	initial SD_n_CS = 1'b1;
@@ -718,6 +725,29 @@ module system
 	wire I_KB;
 	wire I_MOUSE;
 	wire KB_RST;
+	// ================= 虚拟键盘(PS EMIO GPIO, 并行 8 位 + 选通) =================
+	wire        vk_valid;
+	wire [7:0]  vk_data;
+	wire        vk_ready;
+
+	kbd_gpio_rx #(.DW(8)) kbd_gpio_rx_inst
+	(
+		 .clk       (clk_cpu),
+		 .rst_n     (clk_cpu_locked),
+		 .gpio_data (KBD_GPIO_DATA),
+		 .gpio_stb  (KBD_GPIO_STB),
+		 .vk_ready  (vk_ready),      // ★ 握手: 仅当 8042 缓冲空才出队, 防丢字节
+		 .vk_valid  (vk_valid),
+		 .vk_data   (vk_data)
+	);
+
+	// ★ 诊断(2026-10-10): 注入活动指示 —— 每收到一个注入字节翻转一次。
+	//   灯在闪 => 字节已进到 PL(接收端 + FIFO 出队正常) => 问题在 8042/80186 那段;
+	//   灯不闪 => 字节没进 PL => 位流没带注入 / EMIO 电平没到 / vk_ready 卡住(ctl_outb=1)。
+	reg vk_act_r = 1'b0;
+	always @(posedge clk_cpu) if (vk_valid) vk_act_r <= ~vk_act_r;
+	assign VK_ACT = vk_act_r;
+
 	KB_Mouse_8042 KB_Mouse 
 	(
 		 .CS(IORQ && CPU_CE && KB_OE), 
@@ -732,7 +762,11 @@ module system
 		 .PS2_CLK1(PS2_CLK1), 
 		 .PS2_CLK2(PS2_CLK2), 
 		 .PS2_DATA1(PS2_DATA1), 
-		 .PS2_DATA2(PS2_DATA2)
+		 .PS2_DATA2(PS2_DATA2),
+		 .vk_enable(KBD_VK_ENABLE),
+		 .vk_valid(vk_valid),
+		 .vk_data(vk_data),
+		 .vk_ready(vk_ready)
 	);
 	
 	wire [7:0]PIC_IVECT;
@@ -1049,7 +1083,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 		//   保证 FSM 采样瞬间"命令"与"地址"不会错配
 		//   （原来两者分别取自 s_ddr_wr||s_ddr_rd 和实时 cache_hi_addr，存在错配窗口）。
 		sdraddr <= s_prog_empty || !cache_owns ? 
-		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b1} :   // ★149th 回退到"稳定上下对调"基线（148th 的 -9'd480 实测反而引入水平偏移+下半屏垃圾）
+		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // ★修正(2026-10-10): 末位 1'b1 -> 1'b0。用户此前实测并记录"1'b0 才是消除水平偏移的那一位"(见上方 152nd 注释)。末位是 sdraddr 的最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。完整定义见本文件 152nd 注释行。
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 			

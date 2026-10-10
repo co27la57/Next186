@@ -57,7 +57,13 @@ module Next186_SoC (
     output wire        LRCLK,
     output wire        SDIN,
     output wire        SCLK,
-    output wire        STM_RST
+    output wire        STM_RST,
+    // ---- 虚拟键盘: PS EMIO GPIO (并行 8 位 + 选通, 不经 AXI) ----
+    input  wire [7:0]  KBD_GPIO_DATA,
+    input  wire        KBD_GPIO_STB,
+    input  wire        KBD_VK_ENABLE,
+    // ★ 诊断(2026-10-10): 虚拟键盘注入活动指示(每收一个字节翻转一次), 引到顶层 LED
+    output wire        VK_ACT
 );
 
     // ==========================================
@@ -126,7 +132,13 @@ module Next186_SoC (
         .LED            (),
         .GPIO           (),
         .I2C_SCL        (),
-        .I2C_SDA        ()
+        .I2C_SDA        (),
+        // 虚拟键盘 (PS EMIO GPIO)
+        .KBD_GPIO_DATA  (KBD_GPIO_DATA),
+        .KBD_GPIO_STB   (KBD_GPIO_STB),
+        .KBD_VK_ENABLE  (KBD_VK_ENABLE),
+        // ★ 诊断: 注入活动指示引出
+        .VK_ACT         (VK_ACT)
     );
     
     // ==========================================

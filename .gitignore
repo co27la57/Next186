@@ -22,3 +22,21 @@ Next186_SoC-master/
 *.bin
 *.elf
 *.o
+
+# ---- Vivado "imports" mirror (byte-identical duplicate of this directory) ----
+imports/
+
+# ---- Local board images / raw dumps (BIOS sources are vendored under Next186_SoC-master/) ----
+images/
+
+# ---- Verilator / simulation build output ----
+run/
+sim/run/
+.zigcache/
+
+# ---- Misc generated dumps ----
+*.out
+boot_disasm.txt
+
+# ---- Cross-compiled host-side helper binaries (build from the .c next to them) ----
+/kbd_gpio_inject

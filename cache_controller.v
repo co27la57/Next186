@@ -677,8 +677,48 @@ module cache_controller(
 	//   位映射：tag = maddr[20:11]，index = maddr[10:6] ⇒ index[4] = maddr[10]、index[3:0] = maddr[9:6]。
 	//   ⚠️ 必须用 maddr[10]（=index[4]）判"index≥16"；写成 maddr[11] 会把"BIOS 代码下方的栈行"
 	//      （tag 也是 0x1FF、index 0-15）也算进 BIOS 区，导致栈行被填成 ROM 数据。
-	wire        bios_fill  = (STATE == 3'b111) && (maddr[`ADDR-1:`LINE+`SETS] == 10'h1FF) && maddr[`LINE+`SETS-1];
-	wire [7:0]  bios_raddr = {maddr[`LINE+`SETS-2:`LINE], word_a};  // index[3:0] + 行内字序号
+	// ★★★ 时序修复（2026-10-10，第 38 轮补丁）：bios_fill 里由 maddr 派生的那一半也必须寄存。
+	//    第 37 轮只寄存了 bios_raddr 的 index，但 `fill_data` 同时还被 `bios_fill` 门控，
+	//    而 `bios_fill` 也直接取自 maddr ⇒ 那条 25MHz→50MHz 组合长链**没有被切断**
+	//    （实测：改后违例路径仍是 ICODE1_reg -> cache_mem/DIBDI，WNS -2.473ns）。
+	//    这里把「maddr 落在 BIOS 区」这个纯 maddr 派生量寄存一级（CPU 时钟域），
+	//    而 `STATE == 3'b111` 保持**实时**——因为 STATE 必须与 wren_a 同拍对齐，
+	//    绝不能跟着一起延后。
+	//    安全性：填充期间 maddr 恒定 ⇒ 寄存输出恒等于原值，只是晚一拍生效。
+	reg         bios_region_r = 1'b0;
+	always @(posedge clk) bios_region_r <= (maddr[`ADDR-1:`LINE+`SETS] == 10'h1FF) && maddr[`LINE+`SETS-1];
+	wire        bios_fill  = (STATE == 3'b111) && bios_region_r;
+	// ★★★ 时序修复（2026-10-10，第 37 轮）：把 BIOS 填充路径用的 index 在
+	//     **CPU 时钟域(clk, 25MHz)** 先寄存一级，切断 CPU→cache 的跨时钟组合长链。
+	//
+	// 根因（时序报告实测：c0_unbuf_1(25M) → clk_fpga_0(50M)，WNS -2.892/-2.389ns，
+	//       TNS -84.6ns，32 条违例路径）：
+	//   ICODE1_reg(25MHz BRAM) → CPU 组合逻辑 22 级 / 21.4ns（含 8 个 CARRY4 的 SP
+	//   加法链，布线占 59%）→ maddr → bios_raddr → bios_rom → bios_half → fill_data
+	//   → cache 端口数据入 DIBDI（RAMB36，时钟 clk_fpga_0 = 50MHz）
+	//   ⇒ 一条 25MHz→50MHz 的 29 级组合路径。上电后裸片升温 → 延迟增大 → 数十秒后
+	//     该路径失效 → FSM 挂死（现象：开机约 45s 屏幕花成重复字符，且复位按钮失效）。
+	//
+	// 手法：复刻本项目 77th fix（"FROZEN wb_way/wb_hiaddr —— kills the 24.4ns
+	//   CPU(25MHz)->A-port(50MHz) combinational path"），用寄存切断同类跨域组合路径。
+	//
+	// 为何这样改是**安全的**（不改变功能语义）：
+	//   · bios_raddr 是 ROM 的读地址，只由「被填行的 index」+「行内字序号 word_a」组成；
+	//   · 填充一整行期间，被填行的 index(maddr[9:6]) **必须恒定**——否则现行设计本身
+	//     就会把数据写到别的行去。所以这级寄存的输出 == 原值，只是晚一个 CPU 周期生效；
+	//   · 该 index 在进入填充相(STATE=111)之前早已稳定（miss 判定时即确定），
+	//     ⇒ 寄存必然已收敛，填充的第一个 beat 也不会用到陈旧值；
+	//   · 填充本身是多拍操作（每行 32 个 cache_write_data 脉冲），可吸收这 1 拍。
+	//
+	// 效果：长链被拆成两段，各自满足自己的时钟预算：
+	//   (a) ICODE1(25MHz) →…22 级…→ 本级寄存器(25MHz)  ：预算 40ns，实测 21.4ns ✓
+	//   (b) 寄存器(25MHz) → bios_rom → bios_half → fill_data → cache(50MHz)：短路径 ✓
+	//
+	// ⚠️ 若日后要回退：删掉本块，把 bios_raddr 恢复为
+	//    wire [7:0] bios_raddr = {maddr[`LINE+`SETS-2:`LINE], word_a};
+	reg [`SETS-2:0] bios_idx_r = {(`SETS-1){1'b0}};
+	always @(posedge clk) bios_idx_r <= maddr[`LINE+`SETS-2:`LINE];
+	wire [7:0]  bios_raddr = {bios_idx_r, word_a};  // index[3:0] + 行内字序号（index 已寄存）
 	wire [31:0] bios_word  = bios_rom[bios_raddr];
 	wire [15:0] bios_half  = lowaddr[0] ? bios_word[31:16] : bios_word[15:0];
 	wire [31:0] fill_data  = bios_fill ? {bios_half, bios_half} : {ddr_din, ddr_din};

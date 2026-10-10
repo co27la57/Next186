@@ -1,0 +1,34 @@
+# =============================================================================
+# afi-fix.service — 开机自动把 Zynq AFI0 (S_AXI_HP0) 设为 32 位
+# -----------------------------------------------------------------------------
+# 安装(在板子上执行):
+#   sudo cp afi_fix.sh /usr/bin/afi_fix.sh
+#   sudo chmod +x /usr/bin/afi_fix.sh
+#   sudo cp afi-fix.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now afi-fix.service
+#   systemctl status afi-fix.service        # 确认已跑
+#
+# ★ 关键: 本服务必须在"那个把 AFI 设成 64 位的服务之后"运行, 否则会被它覆盖。
+#   那个服务的日志是:
+#       "[ OK ] Finished Set S_AXI_HP0 (AFI0) to 64-bit mode (n32BitEn=0)."
+#   先找到它:
+#       systemctl list-units --type=service --all | grep -iE "axi|afi|hp0|pl|fpga"
+#       grep -rl  "n32BitEn\|F8008000\|AFI0\|S_AXI_HP0" /etc /usr/lib/systemd /lib/systemd /etc/init.d 2>/dev/null
+#   若能直接改它 / 禁用它, 那才是根治(推荐); 本服务只是稳妥的兜底。
+#   若已知它的单元名, 把它填到下面的 After= 里。
+# =============================================================================
+[Unit]
+Description=Fix Zynq AFI0 (S_AXI_HP0) to 32-bit mode for the 32-bit PL AXI master
+# 让它尽量晚跑, 覆盖掉"设成 64 位"的那次设置
+After=multi-user.target sysinit.target
+# 若找到那个服务(例如叫 pl-afi.service), 改成:
+# After=multi-user.target pl-afi.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/afi_fix.sh
+
+[Install]
+WantedBy=multi-user.target

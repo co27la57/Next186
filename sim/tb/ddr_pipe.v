@@ -1,0 +1,1053 @@
+// sim/tb/ddr_pipe.v  —  stage 2
+// Real cache_controller + REAL ddr_186 command pipeline + REAL top_zynq7010 AXI FSM
+// + an AXI slave memory model + a VGA-read traffic generator.
+//
+// The command pipeline and the AXI FSM below are FAITHFUL COPIES of the corresponding
+// lines of ddr_186.v (877..925) and top_zynq7010.v (243..396).  They are copied rather
+// than instantiated because ddr_186.v is the whole `system` (CPU/VGA/SD/audio...), which
+// cannot be elaborated on its own.
+//   ddr_186.v  : s_ddr_rd/s_ddr_wr, sdraddr mux, cntrl0_user_command_register mux,
+//                cache_line_start, seg_map
+//   top_zynq7010: IDLE/AR_ADDR/R_WAIT/R_PUSH_0/R_PUSH_1/W_ISSUE/W_PRE/W_L/W_H/W_WAIT_W/B_RESP
+`timescale 1ns / 1ps
+
+module ddr_pipe #(
+    parameter AW   = 24,          // AXI byte address width used by the model
+    parameter MEMW = 21,          // memory words; index is (byte_addr - 0x0800_0000) >> 2
+    // ★★★ VGA 取指地址: 基址与公式都参数化(2026-10-10), 便于 A/B 对照
+    //   VGA_BASE_PARAM: 文本窗基址(RTL 的 VGA_TEXT_ROWCOL)。当前 RTL = 17'h0E000,
+    //                   历史值 17'h14000。物理地址 = 0x0800_0000 + 2*sdraddr。
+    //   VGA_ADDR_VAR  : 地址公式变体
+    //     0 = {6'b000001, row_col + lnbytecount}                     (79b02d5, 用户称"没问题")
+    //     1 = {5'b00001, row_col + lnbytecount - 8, 1'b1}            (149th 基线, 末位=1)
+    //     2 = {5'b00001, row_col + lnbytecount - 8, 1'b0}            (当前工作区, 末位=0)
+    //     3 = {5'b00001, row_col + lnbytecount - 448, 1'b0}          (152nd, k=448)
+    parameter [16:0] VGA_BASE_PARAM = 17'h0E000,
+    parameter integer VGA_ADDR_VAR  = 2
+) (
+    input  wire        clk_cpu,
+    input  wire        clk_sdr,
+    input  wire        rst,
+    input  wire        gate_fill,      // 1 = 91st fix, 0 = old
+    input  wire        fix_re,         // 1 = 95th fix (one-shot cache command), 0 = old
+    // CPU side
+    input  wire [20:0] cpu_addr,
+    input  wire [31:0] cpu_din,
+    input  wire        cpu_mreq,
+    input  wire [3:0]  cpu_wmask,
+    output wire        cpu_ce,
+    output wire [31:0] cpu_dout,
+    // VGA demand model (s_prog_empty / s_prog_full)
+    input  wire        vga_starving,
+    input  wire        vga_ready,
+    // per-frame auto_flush model (ddr_186.v:1174-1180, clk_cpu domain)
+    input  wire [31:0] frame_period,   // clk_cpu cycles per VGA frame; 0 = never flush
+    input  wire [15:0] vblnk_len,      // vblnk high for this many clk_cpu cycles
+    input  wire [7:0]  fifo_drain,     // VGA FIFO drain period in clk_sdr; 0 = old hand-driven model
+    // VGA scan-out geometry (text mode defaults: 6 / 40 / 400)
+    input  wire [4:0]  vga_lnend_cfg,  // ddr_186.v:176  text mode -> 6   (8-byte groups per line)
+    input  wire [16:0] vga_stride,     // words advanced per character row (text mode -> 40)
+    input  wire [9:0]  vga_lcr,        // scanline count at which vga_ddr_row_col wraps
+    // SYNTHETIC fault injection (TB only): add N buffer lines to the address used for
+    // cache FILLS.  inject_fill_shift=4 must reproduce the board symptom exactly
+    // ([0x80] reads W(6)) and make the v4 data probe report a nibble mismatch.
+    input  wire [4:0]  inject_fill_shift,
+    input  wire        fix_96,   // 96th: request/type/address same-cycle (mirrors patch_ddr_186_96th_samecycle.py)
+    input  wire        fix_97,   // 97th: CDC-coherent latched request presentation (mirrors ddr_186.v 97th)
+    input  wire [1:0]  fix_100,  // [102nd] AXI-side candidate selector:
+                                 //   0 = 现状 (16 halfwords/txn, address strides 8)
+                                 //   1 = A: cap FIFO writes at max_read+1 (8 halfwords/txn)
+                                 //   2 = B: shorten the VGA(cmd=10) AXI burst to 4 beats (=8 halfwords)
+    input  wire        snap_now,     // pulse from C++ at the self-test's report point (freezes v4)
+    // debug hooks (driven from C++): tr_on the AXI transactions, dump the DDR model
+    input  wire [1:0]  tr_on,          // 0 = quiet, 1 = transactions, 2 = + raw cycle log
+    input  wire [19:0] dump_idx,
+    output wire [31:0] dump_data,
+    // observation
+    output wire [2:0]  o_state,
+    output wire [14:0] o_hiaddr,
+    output wire [23:0] o_sdraddr,
+    // ★★★ 取指序列追踪(2026-10-10): VGA 扫描几何量
+    output wire [16:0] o_vga_row_col,   // vga_ddr_row_col (行基址)
+    output wire [7:0]  o_vga_lnb,       // vga_lnbytecount (行内推进量/行尾判据)
+    output wire [4:0]  o_vga_col,       // col_counter
+    output wire        o_vga_isvga,     // 1 = 本拍 sdraddr 取自 VGA 分支
+    output wire [1:0]  o_cmd,
+    output wire [1:0]  o_ack,
+    output wire [7:0]  o_l2_fill_n,
+    output wire [7:0]  o_l2_wb_n,
+    output wire [7:0]  o_fill_foreign_n,
+    output wire [31:0] o_axi_araddr,
+    output wire [31:0] o_axi_awaddr,
+    output wire [15:0] o_ram_rdata,
+    output wire [31:0] o_ddr_dout,
+    // AXI-burst accounting: a burst is "spurious" when the cache is NOT running the
+    // matching transaction at the moment the FSM accepts the command.
+    output wire [15:0] o_aw_n,        // all write bursts
+    output wire [15:0] o_spur_aw,     // write bursts accepted while ddr_wr == 0
+    output wire [15:0] o_ar11_n,      // all fill (cmd=11) read bursts
+    output wire [15:0] o_spur_ar11,   // fill bursts accepted while ddr_rd == 0
+    // ---- 95th-probe candidate: classified on the ACK RISING EDGE (board-observable) ----
+    //      a burst is spurious when the FSM accepted it (sys_cmd_ack rose to 01 / 11)
+    //      while the cache was not asking for that kind of transaction at all.
+    output wire [15:0] o_spur_ack_wb, // accepted write burst with ddr_wr == 0
+    output wire [15:0] o_spur_ack_rd, // accepted fill  burst with ddr_rd == 0
+    output wire [15:0] o_flush_n,     // per-frame auto_flush pulses seen
+    // ---- exact copies of the on-board 89th/90th/86th latches, for a like-for-like
+    //      comparison of the ACCESS ORDER between board and simulation:
+    //        o_buf_rd_first  = index of the FIRST buffer-line (tag 0x1E0) fill command
+    //        o_buf_wb_first  = index of the FIRST buffer-line write-back command
+    //        o_buf_wb_last   = cache_hi_addr of the LAST buffer-line write-back
+    //        o_buf_wb_n      = number of buffer-line write-back transactions (saturating)
+    output wire [9:0]  o_buf_rd_first,
+    output wire [9:0]  o_buf_wb_first,
+    output wire [14:0] o_buf_wb_last,
+    output wire [7:0]  o_buf_wb_n,
+    // VGA scan-out sweep evidence: burst count and the last character-row base seen.
+    // If o_vga_burst_n keeps growing and o_vga_rowcol_last moves, the VGA is sweeping
+    // the framebuffer instead of hammering one constant address.
+    output wire [15:0] o_vga_burst_n,
+    output wire [16:0] o_vga_rowcol_last,
+    // how often the two command-priority conditions actually fired (clk_sdr cycles)
+    output wire [31:0] o_pe_n,   // s_prog_empty  (VGA starving -> VGA gets TOP priority)
+    output wire [31:0] o_pf_n,   // s_prog_full   (FIFO full      -> FSM parks at 2'b00)
+    // ---- v4 data-side probe equivalents: {line_index[4:0], data_high_nibble[3:0]} ----
+    //   The self test fills byte@m = (m>>2)&0xFF, so EVERY word of buffer line k has high
+    //   nibble (k & 0xF).  If a transfer's nibble != its own index, it carried another
+    //   line's data.  o_v4_wb = the latest buffer-line WRITE-BACK, o_v4_rd = the latest fill.
+    output wire [8:0]  o_v4_wb,
+    output wire [8:0]  o_v4_rd,
+    // ---- v5 fill-integrity probe equivalents (gate = the fill's OWN burst) ----
+    //   Mirrors sim/tools/patch_ddr_186_v5_fillprobe.py.  The v4 capture gate was
+    //   `arm && sys_rd_data_valid`, which is also high for VGA reads (2'b10), so it
+    //   could capture VGA data.  v5 gates on sys_cmd_ack == 2'b11 and additionally
+    //   counts the own-burst / foreign valid pulses inside the fill window.
+    output wire [15:0] o_fill_w0,
+    output wire [15:0] o_fill_wl,
+    output wire [5:0]  o_fill_n,
+    output wire [5:0]  o_fill_x,
+    output wire        o_fill_full,
+    // ---- v6 write-back integrity + the PAGE the DDR FSM actually used ----
+    //   (8-bit timestamps were dropped: the self-test spans ~84k clk_sdr, so an
+    //    8-bit counter wraps and carries no ordering information)
+    output wire [15:0] o_wb_wl,
+    output wire [8:0]  o_fill_page,
+    output wire [8:0]  o_wb_page,
+    output wire [5:0]  o_pmis_r,
+    output wire [9:0]  o_fill_addr,
+    output wire [9:0]  o_wb_addr,
+    output wire [5:0]  o_pmis_w,
+    // ---- 102nd [flow model]: FAITHFUL display-enable / flow-control observability ----
+    //   FifoStart 是作者的显示总开关 (ddr_186.v:986-990 -> VGA_SG.ce()).
+    //   o_lvl   = FIFO 占用量, 单位 = WRITE words (16-bit), 与 fifo 包装的 wrusedw 一致,
+    //             511 饱和.
+    //   o_pe_hi/o_pe_lo = FifoStart 置位之后 s_prog_empty 为 1 / 为 0 的周期数
+    //             ("大多数时候满, 偶尔拉高" = 板上实测签名).
+    //   o_underr_n = 显示在空 FIFO 上排空的次数 (画面数据被重复/冻结).
+    output wire        o_fstart,
+    output wire [31:0] o_fstart_cyc,
+    output wire [9:0]  o_lvl,
+    output wire [9:0]  o_lvl_min,
+    output wire [9:0]  o_lvl_max,
+    output wire [31:0] o_pe_hi,
+    output wire [31:0] o_pe_lo,
+    output wire [31:0] o_underr_n
+);
+
+    // =================================================================
+    // 1) cache + seg_map  (real RTL)
+    // =================================================================
+    wire        ddr_rd, ddr_wr;
+    wire [14:0] cache_hi_addr;
+    reg         cache_line_start;
+    wire        cache_write_data, cache_read_data;
+    wire [15:0] sys_DOUT;             // = ram_rdata
+    wire [31:0] cntrl0_user_input_data;
+    wire [8:0]  memmap_mux;
+
+    // in the real design the cache's .din is unit186's DOUT (the CPU write data)
+    wire [31:0] DOUT = cpu_din;
+
+    // ---------------------------------------------------------------------------
+    // per-frame auto_flush  (faithful copy of ddr_186.v:1174-1180, clk_cpu domain)
+    //   vblnk is the VGA vertical-blank flag; auto_flush is a 3-bit shift register that
+    //   emits ONE clk_cpu-cycle flush pulse on the vblnk FALLING edge (auto_flush==3'b110).
+    //   auto_flush[2] is sticky (set by vblnk, only software can clear it), so after the
+    //   first frame the flush fires once per frame for ever.
+    //   The cache answers a flush by scanning all 128 lines (way 0..3 x index 0..31) and
+    //   writing back every dirty line - WITHOUT refilling it.  This is a completely
+    //   separate write-back path from the miss-eviction one and it was NOT modelled here.
+    // ---------------------------------------------------------------------------
+    reg [31:0] frame_cnt = 32'd0;
+    reg        vblnk_m   = 1'b0;
+    reg [2:0]  auto_flush = 3'b000;
+    always @(posedge clk_cpu) begin
+        if (rst) begin
+            frame_cnt <= 32'd0; vblnk_m <= 1'b0; auto_flush <= 3'b000;
+        end else begin
+            if (frame_period == 32'd0) vblnk_m <= 1'b0;
+            else if (frame_cnt >= frame_period - 1'b1) frame_cnt <= 32'd0;
+            else begin
+                frame_cnt <= frame_cnt + 1'b1;
+                vblnk_m   <= (frame_cnt >= frame_period - vblnk_len);
+            end
+            auto_flush[1:0] <= {auto_flush[0], vblnk_m};
+            auto_flush[2]   <= auto_flush[2] | vblnk_m;
+        end
+    end
+    wire flush_pulse = (auto_flush == 3'b110);
+
+    cache_controller u_cache (
+        .addr(cpu_addr), .dout(cpu_dout), .din(DOUT), .clk(clk_cpu),
+        .mreq(cpu_mreq), .wmask(cpu_wmask), .ce(cpu_ce),
+        .ddr_din(sys_DOUT), .ddr_dout(cntrl0_user_input_data), .ddr_clk(clk_sdr),
+        .cache_write_data(cache_write_data), .cache_read_data(cache_read_data),
+        .ddr_rd(ddr_rd), .ddr_wr(ddr_wr), .hiaddr(cache_hi_addr),
+        .flush(flush_pulse), .cache_line_start(cache_line_start)
+    );
+
+    seg_map seg_mapper (
+        .CLK(clk_cpu),
+        .cpuaddr(4'h0),
+        .cpurdata(),                 // output, not used here
+        .cpuwdata(9'h0),
+        .memaddr(cache_hi_addr[14:10]),
+        .memdata(memmap_mux),
+        .WE(1'b0),
+        .seg_addr(4'h0),
+        .vga_planar_seg()
+    );
+
+    // =================================================================
+    // 2) ddr_186 command pipeline  (faithful copy)
+    // =================================================================
+    wire [1:0] ram_cmd_ack = ack;
+    wire [1:0] sys_cmd_ack = ram_cmd_ack;
+    wire       sys_rd_data_valid = ram_rd_valid;
+    wire       sys_wr_data_valid = ram_wr_valid;
+
+    reg  [1:0] sys_cmd_ack_d1 = 2'b00;
+    reg  [1:0] s_ddr_rd = 2'b00, s_ddr_wr = 2'b00;
+
+    // ★★ 95th fix state (see the long comment at the command mux below):
+    //    `cache_cmd_done` = "the cache request currently being presented has already been
+    //    served by one AXI burst".  It is cleared while the cache has no request at all, so
+    //    it re-arms automatically for the next transaction.  This is deliberately a flag on
+    //    the *live* request (s_ddr_wr / s_ddr_rd) rather than a latched command: the command
+    //    TYPE and the ADDRESS must always come from the live signals, otherwise a VGA
+    //    starvation that delays the FSM past the end of the cache pulse would let the FSM
+    //    launch a FILL for a WRITE-BACK request (and the cache would dead-lock in STATE 011
+    //    waiting for ram_wr_valid that never comes).
+    reg  cache_cmd_done = 1'b0;
+    wire cache_req_live = fix_96 ? (ddr_wr | ddr_rd) : (s_ddr_wr[0] | s_ddr_rd[0]);
+    wire cache_owns = fix_re ? (cache_req_live & ~cache_cmd_done) : cache_req_live;
+
+    reg  [23:0] sdraddr;
+    reg  [1:0] cntrl0_user_command_register = 2'b00;
+    reg  [1:0]  s_prog_empty_d = 2'b00;
+
+    // ---------------------------------------------------------------------------
+    // VGA scan-out ADDRESS bookkeeping  (faithful copy of ddr_186.v:169-176, 899-947)
+    //
+    //   TEXT MODE constants (vgatext=1, half=0, v240=1):
+    //       vga_repln  = 15   -> 16 scanlines per character row
+    //       vga_lnend  = 6    -> vga_lnbytecount[7:3] counts 8-byte groups
+    //       frame      = 480 scanlines  (vga_end_frame)
+    //       vga_ddr_row_col += 40 words per character row, wraps at vga_lcr
+    //
+    //   sdraddr's VGA branch is {6'b000001, vga_ddr_row_col + vga_lnbytecount}, and each
+    //   VGA burst is clamped by `max_read` so it never crosses an 8-word boundary.  Without
+    //   this the harness hammered ONE constant VGA address, so the FSM's command stream -
+    //   and therefore the phase at which it samples the cache command - was not
+    //   representative of the board.
+    // ---------------------------------------------------------------------------
+    localparam [16:0] VGA_TEXT_BASE = VGA_BASE_PARAM;
+    reg  [8:0]  vga_ddr_row_count = 9'd0;
+    reg  [2:0]  max_read    = 3'b111;
+    reg  [4:0]  col_counter = 5'd0;
+    reg  [3:0]  vga_repln_count = 4'd0;
+    reg  [7:0]  vga_lnbytecount = 8'd0;
+    reg  [16:0] vga_ddr_row_col = VGA_TEXT_BASE;
+
+    // ★★★ VGA 取指地址公式(参数可选, 见模块头部 VGA_ADDR_VAR)
+    wire [23:0] sdraddr_vga =
+        (VGA_ADDR_VAR == 0) ? {6'b000001, vga_ddr_row_col + vga_lnbytecount} :
+        (VGA_ADDR_VAR == 1) ? {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8,   1'b1} :
+        (VGA_ADDR_VAR == 2) ? {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8,   1'b0} :
+                              {5'b00001, vga_ddr_row_col + vga_lnbytecount - 9'd448, 1'b0};
+    reg         s_vga_endline = 1'b0;
+    reg         s_vga_endscanline = 1'b0;
+    wire [4:0]  vga_lnend     = vga_lnend_cfg;          // ddr_186.v:176
+    wire [3:0]  vga_repln     = 4'd15;                  // ddr_186.v:174  (vgatext && ~half)
+    wire        vga_end_frame = (vga_ddr_row_count == 9'd479);   // ddr_186.v:172 (v240=1)
+    reg  [15:0] vga_burst_n   = 16'd0;
+    reg  [16:0] vga_rowcol_last = 17'h0;
+
+    // ---------------------------------------------------------------------------
+    // VGA scan-out FIFO occupancy model  (ddr_186.v:536-540, 888-895, 913-924)
+    //
+    //   The real design feeds the scan-out FIFO from the DDR read return port:
+    //       wrreq = !crw && sys_rd_data_valid && !col_counter[4]        (line 540)
+    //   and derives the command priority from its occupancy:
+    //       s_prog_full  <= fifo_wr_used_words > 350                    (line 888)
+    //       s_prog_empty <= fifo_wr_used_words < (fix_100 ? 9'd32 : 9'd64)                     (line 891)
+    //   `crw` is set by a cache burst ack (2'b01/2'b11) and cleared by a VGA ack
+    //   (2'b10) - i.e. "the FIFO must not swallow cache-burst data".  col_counter is
+    //   reloaded with max_read+1 on a VGA ack and decremented per accepted word.
+    //
+    //   This matters because s_prog_empty gives the VGA TOP priority on the command
+    //   mux and s_prog_full parks the FSM at 2'b00 - both of which change WHEN the
+    //   FSM samples the command register, i.e. the exact timing that decides whether
+    //   a cache transaction races with the FSM's post-burst IDLE window.
+    //   fifo_drain == 0 keeps the old hand-driven behaviour (vga_starving/vga_ready).
+    // ---------------------------------------------------------------------------
+    wire s_prog_empty_raw, s_prog_full_raw;
+    reg  crw_m = 1'b0;
+    reg  [3:0] vga_acc = 4'd0;   // [100A] 本 VGA 事务已接受半字数
+    reg  [2:0] vga_max_m = 3'd7;  // [100A] ack 沿锁存的 max_read（与 RTL vga_max98 一致）
+    reg  [9:0] fifo_used = 10'd0;      // [102nd] WRITE words (16-bit); starts EMPTY (board-like)
+    // ---- 102nd: display enable + realistic scan-out timing ------------------
+    //   ddr_186.v: displ_on = !(hblnk|vblnk|!FifoStart); vrdon = s_displ_on[~vga_hrzpan]
+    //   => pops only happen after FifoStart and only inside the visible part of a line.
+    localparam [10:0] LINE_LEN_M = 11'd1600;   // 800 pixel clocks * 2 clk_sdr (25 MHz dot clock)
+    localparam [10:0] VIS_LEN_M  = 11'd1280;   // 640 visible pixels   * 2 clk_sdr
+    reg  [10:0] line_cnt   = 11'd0;
+    reg         fstart     = 1'b0;             // FifoStart: latch once at lvl>=64, never cleared
+    reg  [31:0] fstart_cyc = 32'd0;
+    reg  [9:0]  lvl_min = 10'd511, lvl_max = 10'd0;
+    reg  [31:0] pe_hi = 32'd0, pe_lo = 32'd0, underr_n = 32'd0;
+    wire [9:0]  lvl_m = (fifo_used > 10'd511) ? 10'd511 : fifo_used[9:0];  // wrapper: saturating wrusedw
+    reg  [7:0] drain_cnt = 8'd0;
+    reg  s_prog_empty_m = 1'b0, s_prog_full_m = 1'b0;
+    wire vga_acc_ok = (vga_acc <= {1'b0, vga_max_m});
+    wire fifo_wr_m = (!crw_m && sys_rd_data_valid && !col_counter[4]) &&
+                     (!fix_100[0] || vga_acc_ok);   // [102nd] A: cap accepts at max_read+1
+
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            crw_m <= 1'b0; fifo_used <= 10'd0; drain_cnt <= 8'd0;
+            line_cnt <= 11'd0; fstart <= 1'b0; fstart_cyc <= 32'd0;
+            lvl_min <= 10'd511; lvl_max <= 10'd0;
+            pe_hi <= 32'd0; pe_lo <= 32'd0; underr_n <= 32'd0;
+            s_prog_empty_m <= 1'b0; s_prog_full_m <= 1'b0;
+            max_read <= 3'b111; col_counter <= 5'd0;
+            vga_lnbytecount <= 8'd0; vga_ddr_row_col <= VGA_TEXT_BASE;
+            vga_ddr_row_count <= 9'd0; vga_repln_count <= 4'd0;
+            s_vga_endline <= 1'b0; s_vga_endscanline <= 1'b0;
+            vga_burst_n <= 16'd0; vga_rowcol_last <= 17'h0;
+        end else begin
+            // ---- ddr_186.v:904  clamp the burst so it never crosses an 8-word boundary
+            max_read <= (&sdraddr[7:3]) ? ~sdraddr[2:0] : 3'b111;
+
+            // ---- ddr_186.v:899 / 946
+            s_vga_endline     <= (vga_repln_count == vga_repln);
+            s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
+
+            // ---- ddr_186.v:913-924
+            if (!crw_m && sys_rd_data_valid) col_counter <= col_counter - 1'b1;
+            if (sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00) begin
+                case (sys_cmd_ack)
+                    2'b10: begin
+                        crw_m <= 1'b0;
+                        vga_acc <= 4'd0;                 // [100A] 每个 VGA 事务重新开始计数
+                        vga_max_m <= max_read;           // [100A] 锁存本事务的 max_read
+                        col_counter <= {1'b0, max_read, 1'b1};   // 与当前 RTL 一致（105th' 时才改成 {2'b00,max_read}）
+                        vga_lnbytecount <= vga_lnbytecount + max_read + 1'b1;
+                        if (vga_burst_n != 16'hFFFF) vga_burst_n <= vga_burst_n + 1'b1;
+                        vga_rowcol_last <= vga_ddr_row_col;
+                    end
+                    2'b01, 2'b11: crw_m <= 1'b1;
+                endcase
+            end
+
+            // ---- ddr_186.v:926-946
+            if (s_vga_endscanline) begin
+                col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
+                vga_lnbytecount <= 8'd0;
+                s_vga_endscanline <= 1'b0;
+                if (vga_end_frame)                             vga_ddr_row_col <= VGA_TEXT_BASE;
+                else if ({1'b0, vga_ddr_row_count} == vga_lcr)  vga_ddr_row_col <= VGA_TEXT_BASE;
+                else if (s_vga_endline)                        vga_ddr_row_col <= vga_ddr_row_col + vga_stride;
+                if (s_vga_endline) vga_repln_count <= 4'd0;
+                else               vga_repln_count <= vga_repln_count + 1'b1;
+                if (vga_end_frame) vga_ddr_row_count <= 9'd0;
+                else               vga_ddr_row_count <= vga_ddr_row_count + 1'b1;
+            end
+
+            // ---- [102nd] FAITHFUL copy of ddr_186.v:983-990 + the fifo wrapper ----
+            //   水位单位 = 16-bit WRITE words; 排空 1 次 = 1 个 32-bit read word = -2 write words.
+            if (fifo_drain != 8'd0) begin
+                // fills (1 per accepted halfword)
+                if (fifo_wr_m && fifo_used < 10'd1023) fifo_used <= fifo_used + 1'b1;
+
+                // pops: only while the display is ON (FifoStart) and inside the visible window
+                if (fstart && (line_cnt < VIS_LEN_M)) begin
+                    if (drain_cnt >= fifo_drain - 1'b1) begin
+                        drain_cnt <= 8'd0;
+                        if (lvl_m >= 10'd2) fifo_used <= fifo_used - 10'd2;
+                        else underr_n <= underr_n + 1'b1;      // pop on empty -> display starves
+                    end else drain_cnt <= drain_cnt + 1'b1;
+                end else drain_cnt <= 8'd0;
+
+                // line timing (1600 clk_sdr per scanline, 1280 of them visible)
+                if (line_cnt >= LINE_LEN_M - 1'b1) line_cnt <= 11'd0;
+                else                              line_cnt <= line_cnt + 1'b1;
+
+                // thresholds -- exactly ddr_186.v:983/986
+                s_prog_full_m  <= (lvl_m > 10'd350);
+                s_prog_empty_m <= (lvl_m < 10'd64);
+
+                // FifoStart -- ddr_186.v:986-990 (latch only, never cleared)
+                if (!fstart && (lvl_m >= 10'd64)) begin
+                    fstart     <= 1'b1;
+                    fstart_cyc <= cyc_ctr;
+                end
+
+                // statistics, measured over the display-active phase only
+                if (fstart) begin
+                    if (lvl_m > lvl_max) lvl_max <= lvl_m;
+                    if (lvl_m < lvl_min) lvl_min <= lvl_m;
+                    if (lvl_m < 10'd64)  pe_hi <= pe_hi + 1'b1;
+                    else                 pe_lo <= pe_lo + 1'b1;
+                end
+            end
+        end
+    end
+    assign s_prog_empty_raw = (fifo_drain != 8'd0) ? s_prog_empty_m : vga_starving;
+    assign s_prog_full_raw  = (fifo_drain != 8'd0) ? s_prog_full_m  : ~vga_ready;
+    wire s_prog_empty = s_prog_empty_raw;
+    wire s_prog_full  = s_prog_full_raw;
+
+    always @(posedge clk_sdr) begin
+        // DEBUG 97th: detect an incoherent (cmd,addr) presentation cycle
+        if ((cntrl0_user_command_register == 2'b11 || cntrl0_user_command_register == 2'b01) &&
+            sdraddr[23:18] == 6'b000001)
+            $display("INCOH cyc=%0d cmd=%b sdraddr=%h spe=%b owns=%b ddrwr=%b ddrrd=%b cd=%b hi=%h",
+                     cyc_ctr, cntrl0_user_command_register, sdraddr, s_prog_empty,
+                     cache_owns, ddr_wr, ddr_rd, cache_cmd_done, cache_hi_addr);
+        sys_cmd_ack_d1 <= sys_cmd_ack;
+        s_prog_empty_d <= {1'b0, s_prog_empty};
+
+        // ddr_186.v:885
+        cache_line_start <= (sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00) &&
+                            ((sys_cmd_ack == 2'b01) || (sys_cmd_ack == 2'b11));
+
+        s_ddr_rd <= {1'b0, ddr_rd};       // ddr_186.v:897
+        s_ddr_wr <= {1'b0, ddr_wr};       // ddr_186.v:898
+
+        // ★★ 95th fix: mark the current cache request as served once the FSM acks it;
+        //    re-arm as soon as the cache presents no request at all.
+        if (fix_re) begin
+            if (!ddr_wr && !ddr_rd)    cache_cmd_done <= 1'b0;
+            else if (cache_line_start) cache_cmd_done <= 1'b1;
+        end
+
+        // ddr_186.v:901   (95th fix: enable follows the command register, not the raw delay)
+        // ★★★ 可参数化(2026-10-10): VGA 取指地址公式有 4 个历史变体, 用 VGA_ADDR_VAR 选择,
+        //      便于一次编译跑遍全部变体做 A/B 对照(见本文件顶部参数说明)。
+        //      sdraddr 最低位 = 32bit 取指内选哪个 16bit 字符; 该位错 => 屏幕"每 2 字符重复"。
+        sdraddr <= (s_prog_empty || !cache_owns) ?
+                   sdraddr_vga :
+                   ({memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000}
+                    + (s_ddr_rd[0] ? {14'b0, inject_fill_shift, 5'b0} : 24'b0));
+
+        // ddr_186.v:907-911  (VGA read has TOP priority)
+        //
+        // ★★ 95th fix (this session, diagnosis CORRECTED against the raw cycle log):
+        //
+        //   The old mux is LEVEL-based on s_ddr_wr/s_ddr_rd, which stay high for the WHOLE
+        //   cache transaction.  Measured (sim, gate_fill=1, vga off):
+        //       ddr_wr pulse width = 144 clk_sdr   (cache streams 16 words, paced by W_L/W_H)
+        //       one AXI 16-beat burst = ~80 clk_sdr + 6-cycle post-burst IDLE
+        //   => while a single cache transaction is still running, the FSM finishes its burst,
+        //      returns to IDLE, and 6 cycles later RE-SAMPLES the command register, which still
+        //      reads 2'b01 / 2'b11 -> it launches a SECOND whole burst for the same line.
+        //
+        //   For a write-back the second burst is fatal: `ram_wdata` is the cache's ddr_dout
+        //   indexed by wb_pcnt, and wb_pcnt is forced to 0 whenever ddr_wr is low
+        //   (cache_controller.v:358).  By then the cache has already left STATE 011, so
+        //   wb_pcnt == 0 and the FSM re-transmits WORD 0 sixteen times over the line it had
+        //   just written back correctly.
+        //
+        //   Raw-log proof (cyc 36717 -> 36804, buffer line 0):
+        //       36717  AW cmd=01 byte=8150000 ... cst=3 ddrwr=1   <- correct write-back
+        //       36803  IDLE ic=5, ack=00, cmd=01, dwr=0, sdwr=0   <- stale cmd, FSM samples it
+        //       36804  AW cmd=10 byte=8150000 ... cst=7 ddrwr=0   <- SPURIOUS burst, W[0..15] all word0
+        //   Every one of the 16 buffer lines shows this pair, 87 cycles apart: 48 AW bursts,
+        //   16 of them spurious.  Result: all 16 buffer lines end up as (k*16)&0xFF repeated
+        //   in every word -> exactly the corruption the board reports.
+        //
+        //   Fix: ONE burst per cache transaction.  Arm on the cache request's rising edge,
+        //   disarm as soon as the FSM acks it (`cache_line_start` is already exactly that
+        //   pulse, ddr_186.v:885).  The cache only ever needs one burst, and the ack rises
+        //   within ~6 cycles of the command, so the command line is released long before the
+        //   FSM's next IDLE sampling window.
+        //
+        //   `cache_owns` (above) drives the sdraddr mux from the SAME condition, so command
+        //   and address can never disagree at the instant the FSM samples them.
+        if      (s_prog_empty)                          cntrl0_user_command_register <= 2'b10;
+        else if (fix_re && cache_owns)                  cntrl0_user_command_register <= (fix_96 ? ddr_wr : s_ddr_wr[0]) ? 2'b01 : 2'b11;
+        else if (!fix_re && s_ddr_wr[0])                cntrl0_user_command_register <= 2'b01;
+        else if (!fix_re && s_ddr_rd[0])                cntrl0_user_command_register <= 2'b11;
+        else if (~s_prog_full)                          cntrl0_user_command_register <= 2'b10;
+        else                                            cntrl0_user_command_register <= 2'b00;
+    end
+
+    // ★★★ 97th mirror: latch the cache request pair once at request start, present
+    //      2'b00 for 2 clk_sdr, then hold stable for the whole request (see ddr_186.v 97th).
+    wire       cq_req97  = ddr_wr | ddr_rd;
+    wire       cq_want97 = cq_act97 && cache_owns && !s_prog_empty;
+    reg        cq_req_d97 = 1'b0;
+    reg        cq_act97  = 1'b0, cq_seen97 = 1'b0, cq_on97 = 1'b0;
+    reg  [1:0] cq_sp97   = 2'd0, cq_cmd97 = 2'b00;
+    reg [23:0] cq_addr97 = 24'h0;
+    always @(posedge clk_sdr) begin
+        cq_req_d97 <= cq_req97;
+        if (!cq_req97) begin
+            cq_seen97 <= 1'b0;  cq_act97 <= 1'b0;  cq_on97 <= 1'b0;  cq_sp97 <= 2'd0;
+        end else begin
+            if (cq_req_d97 && !cq_seen97) begin
+                cq_seen97 <= 1'b1;
+                cq_act97  <= 1'b1;
+                cq_addr97 <= {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000}
+                             + (ddr_rd ? {14'b0, inject_fill_shift, 5'b0} : 24'b0);
+                cq_cmd97  <= ddr_wr ? 2'b01 : 2'b11;
+            end else if (cache_line_start) begin
+                cq_act97 <= 1'b0;
+            end
+            cq_on97 <= cq_want97;
+            if (cq_want97 && !cq_on97)      cq_sp97 <= 2'd2;
+            else if (cq_sp97 != 2'd0)       cq_sp97 <= cq_sp97 - 2'd1;
+        end
+    end
+    wire        cq_pres97 = fix_97 && cq_act97 && cq_on97;
+    wire [1:0]  ram_cmd   = cq_pres97 ? (cq_sp97 != 2'd0 ? 2'b00 : cq_cmd97) : cntrl0_user_command_register;
+    wire [23:0] ram_addr  = cq_pres97 ? cq_addr97 : sdraddr;
+    wire [31:0] ram_wdata = cntrl0_user_input_data;
+    assign sys_DOUT = ram_rdata;
+
+    // 91st fix (selectable)
+    assign cache_read_data  = sys_wr_data_valid;
+    assign cache_write_data = gate_fill ?
+        ((sys_cmd_ack == 2'b11) && sys_rd_data_valid) : sys_rd_data_valid;
+
+    // =================================================================
+    // 3) top_zynq7010 AXI FSM  (faithful copy, minus reset/LED glue)
+    // =================================================================
+    localparam IDLE = 4'd0, AR_ADDR = 4'd1, R_WAIT = 4'd2, R_PUSH_0 = 4'd3, R_PUSH_1 = 4'd4,
+               W_ISSUE = 4'd5, W_PRE = 4'd10, W_L = 4'd6, W_H = 4'd7, W_WAIT_W = 4'd8, B_RESP = 4'd9;
+
+    reg [3:0]  state = IDLE;
+    reg [3:0]  idle_cnt = 4'd0;
+    reg [31:0] latched_rdata = 32'h0;
+    reg        rlast_latched = 1'b0;
+    reg [4:0]  w_burst_cnt = 5'd0;
+    // ★ TB BUG FIX (this session): ack must be 2 bits.  It was declared 1-bit here, so
+    //   `ack <= ram_cmd` kept only bit0 and `sys_cmd_ack == 2'b11` could NEVER be true
+    //   -> with gate_fill=1 the fill was dead-locked (line-2 fills = 0, 1.07e8 cycles).
+    //   The real design has `reg [1:0] ram_cmd_ack` (top_zynq7010.v:96).
+    reg [1:0]  ack = 2'b00;
+    reg [31:0] main_awaddr = 32'h0, main_araddr = 32'h0;
+    reg        main_awvalid = 0, main_arvalid = 0, main_wvalid = 0;
+    reg        main_rready = 0, main_bready = 0, main_wlast = 0;
+    reg [31:0] main_wdata = 32'h0;
+
+    wire [31:0] axi_awaddr = main_awaddr;
+    wire [31:0] axi_araddr = main_araddr;
+    // AXI slave (memory model) side
+    wire        slv_awready = 1'b1, slv_arready = 1'b1;
+    wire        slv_wready  = 1'b1, slv_rvalid  = 1'b1, slv_bvalid = 1'b1;
+    wire [31:0] slv_rdata;
+    wire        slv_rlast;
+
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            state <= IDLE; idle_cnt <= 0; ack <= 2'b00;
+            main_awvalid <= 0; main_arvalid <= 0; main_wvalid <= 0;
+            main_rready <= 0; main_bready <= 0; w_burst_cnt <= 0;
+        end else begin
+            case (state)
+            IDLE: begin
+                main_arvalid <= 1'b0; main_awvalid <= 1'b0; main_wvalid <= 1'b0;
+                main_rready  <= 1'b0; main_bready  <= 1'b0;
+                if (idle_cnt < 4'd5) begin
+                    idle_cnt <= idle_cnt + 1'b1;
+                    ack <= 2'b00;
+                end else if (ram_cmd != 2'b00) begin
+                    ack      <= ram_cmd;
+                    idle_cnt <= 4'd0;
+                    if (ram_cmd == 2'b10 || ram_cmd == 2'b11) begin
+                        main_araddr  <= 32'h0800_0000 + {7'b0, ram_addr, 1'b0};
+                        main_arvalid <= 1'b1;
+                        state        <= AR_ADDR;
+                    end else begin
+                        main_awaddr  <= 32'h0800_0000 + {7'b0, ram_addr, 1'b0};
+                        main_awvalid <= 1'b1;
+                        main_bready  <= 1'b1;
+                        w_burst_cnt  <= 5'd0;
+                        state        <= W_ISSUE;
+                    end
+                end
+            end
+            AR_ADDR: if (slv_arready && main_arvalid) begin
+                         main_arvalid <= 1'b0; state <= R_WAIT;
+                     end
+            R_WAIT: begin
+                main_rready <= 1'b1;
+                if (slv_rvalid && main_rready) begin
+                    latched_rdata <= slv_rdata;
+                    rlast_latched <= slv_rlast;
+                    main_rready   <= 1'b0;
+                    state         <= R_PUSH_0;
+                end
+            end
+            R_PUSH_0: state <= R_PUSH_1;
+            R_PUSH_1: state <= rlast_latched ? IDLE : R_WAIT;
+
+            W_ISSUE: begin
+                if (main_awvalid && slv_awready) main_awvalid <= 1'b0;
+                state <= W_PRE;
+            end
+            W_PRE:  state <= W_L;
+            W_L:    state <= W_H;
+            W_H: begin
+                main_wdata  <= ram_wdata;
+                main_wlast  <= (w_burst_cnt == 5'd15);
+                main_wvalid <= 1'b1;
+                state       <= W_WAIT_W;
+            end
+            W_WAIT_W: begin
+                if (main_wvalid && slv_wready) begin
+                    main_wvalid <= 1'b0; main_wlast <= 1'b0;
+                    if (w_burst_cnt == 5'd15) state <= B_RESP;
+                    else begin w_burst_cnt <= w_burst_cnt + 1'b1; state <= W_ISSUE; end
+                end
+            end
+            B_RESP: if (slv_bvalid && main_bready) begin
+                        main_bready <= 1'b0; state <= IDLE;
+                    end
+            default: state <= IDLE;
+            endcase
+        end
+    end
+
+    wire [15:0] ram_rdata   = (state == R_PUSH_0) ? latched_rdata[15:0] : latched_rdata[31:16];
+    wire        ram_rd_valid = (state == R_PUSH_0) || (state == R_PUSH_1);
+    wire        ram_wr_valid = (state == W_L) || (state == W_H);
+
+    // =================================================================
+    // 4) AXI slave: 16-beat INCR bursts into a memory array
+    //    ★★ TB BUG FIX (this session): the index MUST be relative to the DDR base.
+    //    The old code used (byte_addr >> 2) directly, but every AXI address is
+    //    0x0800_0000+ => index >= 0x200_0000, i.e. far outside the array => EVERY
+    //    model access was out of bounds (reads returned heap garbage, writes
+    //    corrupted the heap).  Self-consistent only by accident.
+    // =================================================================
+    localparam [31:0] MEMBASE = 32'h0800_0000;
+    reg [31:0] mem [0:(1<<MEMW)-1];
+    integer i;
+    initial for (i = 0; i < (1<<MEMW); i = i + 1) mem[i] = 32'hDEAD0000 + i;
+
+    reg [31:0] ar_addr_l = 0; reg [4:0] r_cnt = 0;
+    reg [1:0]  ar_cmd_l = 2'b00;   // [100B] AR 时刻的命令类型
+    always @(posedge clk_sdr) begin
+        if (rst) begin r_cnt <= 0; end
+        else if (main_arvalid && slv_arready) begin
+            ar_addr_l <= main_araddr; ar_cmd_l <= ram_cmd; r_cnt <= 0;
+        end else if (slv_rvalid && main_rready) begin
+            r_cnt <= r_cnt + 1'b1;
+        end
+    end
+    assign slv_rdata = mem[((ar_addr_l - MEMBASE) + {r_cnt, 2'b00}) >> 2];
+    // [102nd] AXI-side candidate B: for VGA reads (cmd=10) shorten the burst to 4 beats
+    //         = 16 bytes = 8 halfwords = exactly max_read+1, which is what the author's
+    //         address stride (vga_lnbytecount += max_read+1) accounts for.
+    wire [4:0] rlast_at = (fix_100[1] && (ar_cmd_l == 2'b10)) ? 5'd3 : 5'd15;
+    assign slv_rlast = (r_cnt == rlast_at);
+
+    always @(posedge clk_sdr) begin
+        if (!rst && main_wvalid && slv_wready)
+            mem[((axi_awaddr - MEMBASE) + {w_burst_cnt, 2'b00}) >> 2] <= main_wdata;
+    end
+
+    // ---- [多 hot 置脏实验] DDR 写监视：① 落到目标行的写（看谁写了它、写的什么）
+    //                                   ② 携带实验图案(0x5A5Axxxx)的写（看正确数据被写到哪）
+    always @(posedge clk_sdr) begin
+        if (!rst && main_wvalid && slv_wready) begin
+            if ((axi_awaddr - MEMBASE) == 32'h0015_FC00)
+                $display("DDRWR-TGT  cyc=%0d byte=%07x data=%08x", cyc_ctr, axi_awaddr, main_wdata);
+            else if (main_wdata[31:16] == 16'h5A5A)
+                $display("DDRWR-MINE cyc=%0d byte=%07x data=%08x", cyc_ctr, axi_awaddr, main_wdata);
+        end
+    end
+
+    // ---- [多 hot 置脏实验] index16 逐出监视：每次 miss 决定时打印 victim way / 其 dirty / LRU / 四 way tag
+    always @(posedge clk_sdr) begin
+        if (!rst && u_cache.st0 && u_cache.mmreq && !u_cache.r_flush && !u_cache.hit
+            && (u_cache.index == 5'd16))
+            $display("EVICT16 cyc=%0d fblk=%b dirty=%b lru=%0d%0d%0d%0d tags=%0d/%0d/%0d/%0d",
+                     cyc_ctr, u_cache.fblk, u_cache.dirty,
+                     u_cache.cache_lru[0][16], u_cache.cache_lru[1][16],
+                     u_cache.cache_lru[2][16], u_cache.cache_lru[3][16],
+                     u_cache.cache_addr[0][16], u_cache.cache_addr[1][16],
+                     u_cache.cache_addr[2][16], u_cache.cache_addr[3][16]);
+    end
+
+    // =================================================================
+    // 4b) transaction tracing + memory dump hook  (debug only)
+    // =================================================================
+    reg ddr_rd_d = 1'b0, ddr_wr_d = 1'b0;
+    reg [31:0] cyc_ctr = 32'd0;
+    always @(posedge clk_sdr) begin
+        ddr_rd_d <= ddr_rd;
+        ddr_wr_d <= ddr_wr;
+        cyc_ctr <= cyc_ctr + 1'b1;
+        // tr_on==2 : raw cycle-by-cycle log (the ground truth for the stale-command hunt)
+        if (tr_on >= 2) begin
+            $display("C %0d st=%0d ic=%0d ack=%b cmd=%b dwr=%b sdwr=%b drd=%b sdrd=%b cst=%0d wbc=%0d hi=%04x sdr=%06x arv=%b awv=%b aw=%07x",
+                     cyc_ctr, state, idle_cnt, ack, ram_cmd, ddr_wr, s_ddr_wr[0], ddr_rd, s_ddr_rd[0],
+                     u_cache.STATE, u_cache.wb_pcnt, cache_hi_addr, sdraddr,
+                     main_arvalid, main_awvalid, main_awaddr);
+        end
+        if (tr_on) begin
+            if (ddr_rd & ~ddr_rd_d)
+                $display("%8d CACHE FILL-REQ hiaddr=%04x tag=%03x idx=%02x cst=%0d",
+                         cyc_ctr, cache_hi_addr, cache_hi_addr[14:5], cache_hi_addr[4:0], u_cache.STATE);
+            if (ddr_wr & ~ddr_wr_d)
+                $display("%8d CACHE WB-REQ   hiaddr=%04x tag=%03x idx=%02x cst=%0d",
+                         cyc_ctr, cache_hi_addr, cache_hi_addr[14:5], cache_hi_addr[4:0], u_cache.STATE);
+            if (main_arvalid && slv_arready && (state == AR_ADDR))
+                $display("%8d   AR cmd=%b byte=%07x sdraddr=%06x cst=%0d ddrwr=%b ddrrd=%b",
+                         cyc_ctr, ram_cmd, main_araddr, ram_addr, u_cache.STATE, ddr_wr, ddr_rd);
+            if (main_awvalid && slv_awready && (state == W_ISSUE))
+                $display("%8d   AW cmd=%b byte=%07x sdraddr=%06x cst=%0d ddrwr=%b wbcnt=%0d",
+                         cyc_ctr, ram_cmd, main_awaddr, ram_addr, u_cache.STATE, ddr_wr, u_cache.wb_pcnt);
+            if (slv_rvalid && main_rready)
+                $display("            R[%0d] = %08x  cst=%0d", r_cnt, slv_rdata, u_cache.STATE);
+            if (main_wvalid && slv_wready)
+                $display("            W[%0d] = %08x  cst=%0d ddrwr=%b wbcnt=%0d",
+                         w_burst_cnt, main_wdata, u_cache.STATE, ddr_wr, u_cache.wb_pcnt);
+        end
+    end
+
+    // ---- [100th VGA-FIFO experiment] 统计"每个 VGA 事务被 FIFO 接受多少个半字"，
+    //      并录下被接受的数据流（用于验证"每 8 字符重复"）。
+    reg [15:0] txn_wr_n = 16'd0;        // 本事务已接受数
+    reg [15:0] txn_wr_prev = 16'd0;     // 上一事务接受数
+    reg [15:0] txn_cnt = 16'd0;
+    reg [15:0] acc_n = 16'd0;
+    reg [4:0]  col_left = 5'd0;         // [105th'] 上一笔 VGA 读结束时 col_counter 的余量（>0 = 写门还开着）
+    wire vga_ack_m = (sys_cmd_ack == 2'b10) && (sys_cmd_ack_d1 != 2'b10);
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            txn_wr_n <= 16'd0; txn_wr_prev <= 16'd0; txn_cnt <= 16'd0; acc_n <= 16'd0; col_left <= 5'd0;
+        end else begin
+            if (vga_ack_m) begin
+                txn_wr_prev <= txn_wr_n;
+                txn_wr_n <= 16'd0;
+                col_left <= col_counter;      // 采样"重装前"的余量
+                if (txn_cnt < 16'd6) begin
+                    $display("TXNWR txn=%0d accepted=%0d col_leftover=%0d (VGA ack cyc=%0d sdr=%06x)", txn_cnt, txn_wr_n, col_counter, cyc_ctr, sdraddr);
+                end
+                txn_cnt <= txn_cnt + 1'b1;
+            end
+            if (fifo_wr_m) begin
+                vga_acc <= vga_acc + 1'b1;
+                txn_wr_n <= txn_wr_n + 1'b1;
+                if (tr_on >= 3) $display("  ACC[%0d] = %04x (cyc=%0d sdr=%06x)", acc_n, sys_DOUT, cyc_ctr, sdraddr);
+                acc_n <= acc_n + 1'b1;
+            end
+        end
+    end
+
+    assign dump_data = mem[dump_idx];
+
+    // ---- spurious-burst accounting (sampled exactly when the FSM latches a command) ----
+    reg [15:0] aw_n = 0, spur_aw = 0, ar11_n = 0, spur_ar11 = 0;
+    always @(posedge clk_sdr) begin
+        if (!rst) begin
+            if (main_awvalid && slv_awready && (state == W_ISSUE)) begin
+                aw_n <= aw_n + 1'b1;
+                if (!ddr_wr) spur_aw <= spur_aw + 1'b1;
+            end
+            if (main_arvalid && slv_arready && (state == AR_ADDR) && (ack == 2'b11)) begin
+                ar11_n <= ar11_n + 1'b1;
+                if (!ddr_rd) begin
+                    spur_ar11 <= spur_ar11 + 1'b1;
+                    if (tr_on) $display("%8d  !!SPUR-AR cyc=%0d cmd=%b ack=%b drd=%b cst=%0d sdr=%06x",
+                                        cyc_ctr, cyc_ctr, ram_cmd, ack, ddr_rd, u_cache.STATE, sdraddr);
+                end
+            end
+        end
+    end
+    assign o_aw_n = aw_n;
+    assign o_spur_aw = spur_aw;
+    assign o_ar11_n = ar11_n;
+    assign o_spur_ar11 = spur_ar11;
+
+    // ---- 95th-probe candidate, classified exactly the way the on-board probe would be:
+    //      on the rising edge of sys_cmd_ack, ask "was the cache asking for this?".
+    //      Both signals (sys_cmd_ack / ddr_wr / ddr_rd) are module-boundary ports of
+    //      cache_controller, so the same probe is legal inside ddr_186.v.
+    reg [15:0] spur_ack_wb = 0, spur_ack_rd = 0;
+    wire ack_rise = (sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00);
+    always @(posedge clk_sdr) begin
+        if (!rst) begin
+            if (ack_rise && sys_cmd_ack == 2'b01 && !ddr_wr) spur_ack_wb <= spur_ack_wb + 1'b1;
+            if (ack_rise && sys_cmd_ack == 2'b11 && !ddr_rd) spur_ack_rd <= spur_ack_rd + 1'b1;
+        end
+    end
+    assign o_spur_ack_wb = spur_ack_wb;
+    assign o_spur_ack_rd = spur_ack_rd;
+
+    reg [15:0] flush_n = 0;
+    always @(posedge clk_cpu) if (!rst && flush_pulse) flush_n <= flush_n + 1'b1;
+    assign o_flush_n = flush_n;
+
+    // ---- on-board latch equivalents (ddr_186.v: dbg_buf_line / dbg_wbr_seen / dbg_rdr_seen) ----
+    wire buf_line = (cache_hi_addr[14:5] == 10'h1E0);
+    reg [9:0]  buf_rd_first = 10'h000;
+    reg [9:0]  buf_wb_first = 10'h000;
+    reg [14:0] buf_wb_last  = 15'h0000;
+    reg [7:0]  buf_wb_n     = 8'h00;
+    reg        buf_rd_seen  = 1'b0, buf_wb_seen = 1'b0;
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            buf_rd_first <= 10'h000; buf_wb_first <= 10'h000;
+            buf_wb_last <= 15'h0000; buf_wb_n <= 8'h00;
+            bw_last_live <= 15'h0000; bw_n_live <= 8'h00;
+            buf_rd_seen <= 1'b0; buf_wb_seen <= 1'b0;
+        end else if (!s_prog_empty) begin
+            // same gating as the board: only while the VGA is NOT starving
+            if (s_ddr_wr[0] && !buf_wb_seen && buf_line) begin
+                buf_wb_seen  <= 1'b1;
+                buf_wb_first <= cache_hi_addr[9:0];
+            end
+            if (!s_ddr_wr[0] && s_ddr_rd[0] && !buf_rd_seen && buf_line) begin
+                buf_rd_seen  <= 1'b1;
+                buf_rd_first <= cache_hi_addr[9:0];
+            end
+        end
+        if (!rst) begin
+            // track in scratch; freeze on the same snap_now pulse as the v4 data probe
+            // (mirrors the on-board v4b change: the board's SD stage overwrites these too)
+            if (ddr_wr && !s_ddr_wr[0] && buf_line) begin
+                if (bw_n_live != 8'hFF) bw_n_live <= bw_n_live + 1'b1;
+                bw_last_live <= cache_hi_addr;
+            end
+            if (v4_snap_d && !snap_now) begin
+                buf_wb_last <= bw_last_live;
+                buf_wb_n    <= bw_n_live;
+            end
+        end
+    end
+    assign o_buf_rd_first = buf_rd_first;
+    assign o_buf_wb_first = buf_wb_first;
+    assign o_buf_wb_last  = buf_wb_last;
+    assign o_buf_wb_n     = buf_wb_n;
+    assign o_vga_burst_n     = vga_burst_n;
+    assign o_vga_rowcol_last = vga_rowcol_last;
+
+    reg [31:0] pe_n = 0, pf_n = 0;
+    always @(posedge clk_sdr) begin
+        if (!rst) begin
+            if (s_prog_empty && pe_n != 32'hFFFFFFFF) pe_n <= pe_n + 1'b1;
+            if (s_prog_full  && pf_n != 32'hFFFFFFFF) pf_n <= pf_n + 1'b1;
+        end
+    end
+    // [102nd] flow-model observability
+    assign o_fstart     = fstart;
+    assign o_fstart_cyc = fstart_cyc;
+    assign o_lvl        = lvl_m;
+    assign o_lvl_min    = lvl_min;
+    assign o_lvl_max    = lvl_max;
+    assign o_pe_hi      = pe_hi;
+    assign o_pe_lo      = pe_lo;
+    assign o_underr_n   = underr_n;
+    assign o_pe_n = pe_n;
+    assign o_pf_n = pf_n;
+
+    // ---- v4 data-side probe (same logic as the on-board one) ----
+    reg       v4_fill_arm = 1'b0, v4_wb_arm = 1'b0, v4_wb_pcnt = 1'b0;
+    reg [4:0] v4_fill_idx = 5'd0, v4_wb_idx = 5'd0;
+    reg [8:0] v4_wb = 9'd0, v4_rd = 9'd0;
+    reg [8:0] v4_wb_live = 9'd0, v4_rd_live = 9'd0;
+    reg [14:0] bw_last_live = 15'd0;
+    reg [7:0]  bw_n_live = 8'd0;
+    reg       v4_snap_d = 1'b0;
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            v4_fill_arm <= 1'b0; v4_wb_arm <= 1'b0; v4_wb_pcnt <= 1'b0;
+            v4_fill_idx <= 5'd0; v4_wb_idx <= 5'd0; v4_wb <= 9'd0; v4_rd <= 9'd0;
+            v4_wb_live <= 9'd0; v4_rd_live <= 9'd0; v4_snap_d <= 1'b0;
+        end else begin
+            // freeze on the C++ snap_now pulse: guarantees the captured values are the
+            // self test's, not a later SD-stage event on the same buffer
+            v4_snap_d <= snap_now;
+            if (v4_snap_d && !snap_now) begin v4_wb <= v4_wb_live; v4_rd <= v4_rd_live; end
+            // target line 2 = the line the self test reads at offset 0x80
+            if (buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b11) && (sys_cmd_ack_d1 != 2'b11)) begin
+                v4_fill_arm <= 1'b1; v4_fill_idx <= cache_hi_addr[4:0];
+            end else if (v4_fill_arm && sys_rd_data_valid && (sys_cmd_ack == 2'b11)) begin
+                v4_fill_arm <= 1'b0;
+                v4_wb_live <= {v4_fill_idx, ram_rdata[7:4]};
+            end
+            if (buf_line && (cache_hi_addr[4:0] == 5'd2) && (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
+                v4_wb_arm <= 1'b1; v4_wb_idx <= cache_hi_addr[4:0];
+            end else if (v4_wb_arm && sys_wr_data_valid && (sys_cmd_ack == 2'b01)) begin
+                if (!v4_wb_pcnt) v4_wb_pcnt <= 1'b1;
+                else begin
+                    v4_wb_pcnt <= 1'b0; v4_wb_arm <= 1'b0;
+                    v4_rd_live <= {v4_wb_idx, cntrl0_user_input_data[7:4]};
+                end
+            end
+        end
+    end
+    assign o_v4_wb = v4_wb;
+    assign o_v4_rd = v4_rd;
+
+    // ---- v5 fill-integrity window (mirrors the on-board v5 probe) ----
+    //   Own burst = sys_cmd_ack == 2'b11 (cache fill).  Everything else that
+    //   presents ram_rd_valid inside the window is counted as FOREIGN.
+    reg        fw_act  = 1'b0;
+    reg [5:0]  fw_n    = 6'd0;
+    reg [5:0]  fw_x    = 6'd0;
+    reg        fw_full = 1'b0;
+    reg [15:0] fw_w0   = 16'd0;
+    reg [15:0] fw_wl   = 16'd0;
+    reg [15:0] o_fw0_r = 16'd0, o_fwl_r = 16'd0;
+    reg [5:0]  o_fn_r  = 6'd0,   o_fx_r  = 6'd0;
+    reg        o_ff_r  = 1'b0;
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            fw_act <= 1'b0; fw_n <= 6'd0; fw_x <= 6'd0; fw_full <= 1'b0;
+            fw_w0 <= 16'd0; fw_wl <= 16'd0;
+            o_fw0_r <= 16'd0; o_fwl_r <= 16'd0;
+            o_fn_r <= 6'd0; o_fx_r <= 6'd0; o_ff_r <= 1'b0;
+        end else begin
+            if (fw_act) begin
+                if (sys_rd_data_valid) begin
+                    if (sys_cmd_ack == 2'b11) begin
+                        if (fw_n == 6'd0) fw_w0 <= ram_rdata;
+                        fw_wl <= ram_rdata;
+                        if (fw_n < 6'd63) fw_n <= fw_n + 1'b1;
+                        if (fw_n >= 6'd31) fw_full <= 1'b1;
+                    end else if (fw_x < 6'd63)
+                        fw_x <= fw_x + 1'b1;
+                end
+                if ((sys_cmd_ack != 2'b11) && !ddr_rd) fw_act <= 1'b0;
+            end else if (buf_line && (cache_hi_addr[4:0] == 5'd2) &&
+                         (sys_cmd_ack == 2'b11) && (sys_cmd_ack_d1 != 2'b11)) begin
+                fw_act  <= 1'b1;
+                fw_n    <= 6'd0;
+                fw_x    <= 6'd0;
+                fw_full <= 1'b0;
+            end
+            if (v4_snap_d && !snap_now) begin
+                o_fw0_r <= fw_w0;  o_fwl_r <= fw_wl;
+                o_fn_r  <= fw_n;   o_fx_r  <= fw_x;
+                o_ff_r  <= fw_full;
+            end
+        end
+    end
+    assign o_fill_w0   = o_fw0_r;
+    assign o_fill_wl   = o_fwl_r;
+    assign o_fill_n    = o_fn_r;
+    assign o_fill_x    = o_fx_r;
+    assign o_fill_full = o_ff_r;
+
+    // ---- v6: write-back window + event order (same shape as the v5 fill window) ----
+    reg        bw_act  = 1'b0;
+    reg [5:0]  bw_n    = 6'd0;
+    reg [15:0] bw_wl   = 16'd0;
+    reg [8:0]  pg_d1   = 9'h000;
+    reg [9:0]  ad_d1   = 10'h000;
+    reg [8:0]  fill_pg = 9'h000, wb_pg = 9'h000;
+    reg [9:0]  fill_ad = 10'h000, wb_ad = 10'h000;
+    reg [5:0]  pmis_r  = 6'h0,   pmis_w = 6'h0;
+    reg [15:0] o_bwl_r = 16'd0;
+    reg [8:0]  o_fpg_r = 9'h000, o_wpg_r = 9'h000;
+    reg [5:0]  o_pr_r  = 6'h0,   o_pw_r  = 6'h0;
+    reg [9:0]  o_fad_r = 10'h000, o_wad_r = 10'h000;
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            bw_act <= 1'b0; bw_n <= 6'd0; bw_wl <= 16'd0;
+            pg_d1 <= 9'h000; ad_d1 <= 10'h000;
+            fill_pg <= 9'h000; wb_pg <= 9'h000; pmis_r <= 6'h0; pmis_w <= 6'h0;
+            o_bwl_r <= 16'd0; o_fpg_r <= 9'h000; o_wpg_r <= 9'h000;
+            o_pr_r <= 6'h0; o_pw_r <= 6'h0; o_fad_r <= 10'h000; o_wad_r <= 10'h000;
+        end else begin
+            pg_d1 <= sdraddr[23:15];
+            ad_d1 <= sdraddr[14:5];
+            if (bw_act) begin
+                if (sys_wr_data_valid && (sys_cmd_ack == 2'b01)) begin
+                    bw_wl <= cntrl0_user_input_data;
+                    if (bw_n < 6'd63) bw_n <= bw_n + 1'b1;
+                end
+                if ((sys_cmd_ack != 2'b01) && !ddr_wr) bw_act <= 1'b0;
+            end else if (buf_line && (cache_hi_addr[4:0] == 5'd2) &&
+                         (sys_cmd_ack == 2'b01) && (sys_cmd_ack_d1 != 2'b01)) begin
+                bw_act <= 1'b1;
+                bw_n   <= 6'd0;
+            end
+            if ((sys_cmd_ack != 2'b00) && (sys_cmd_ack_d1 == 2'b00)) begin
+                if (sys_cmd_ack == 2'b11) begin
+                    if (buf_line && (cache_hi_addr[4:0] == 5'd2)) begin fill_pg <= cq_addr97[23:15]; fill_ad <= cq_addr97[14:5]; end
+                    if ((cq_addr97[23:15] != memmap_mux) && (pmis_r != 6'h3F)) pmis_r <= pmis_r + 1'b1;
+                end
+                if (sys_cmd_ack == 2'b01) begin
+                    if (buf_line && (cache_hi_addr[4:0] == 5'd2)) begin wb_pg <= cq_addr97[23:15]; wb_ad <= cq_addr97[14:5]; end
+                    if ((cq_addr97[23:15] != memmap_mux) && (pmis_w != 6'h3F)) pmis_w <= pmis_w + 1'b1;
+                end
+            end
+            if (v4_snap_d && !snap_now) begin
+                o_bwl_r <= bw_wl;  o_fpg_r <= fill_pg;  o_wpg_r <= wb_pg;
+                o_pr_r  <= pmis_r; o_pw_r  <= pmis_w;
+                o_fad_r <= fill_ad;  o_wad_r <= wb_ad;
+            end
+        end
+    end
+    assign o_wb_wl     = o_bwl_r;
+    assign o_fill_page = o_fpg_r;
+    assign o_wb_page   = o_wpg_r;
+    assign o_pmis_r    = o_pr_r;
+    assign o_pmis_w    = o_pw_r;
+    assign o_fill_addr = o_fad_r;
+    assign o_wb_addr   = o_wad_r;
+    assign o_fill_addr = o_fad_r;
+    assign o_wb_addr   = o_wad_r;
+
+    // =================================================================
+    // 5) observation
+    // =================================================================
+    assign o_state   = u_cache.STATE;
+    assign o_hiaddr  = cache_hi_addr;
+    assign o_sdraddr = sdraddr;
+    // ★★★ 取指序列追踪(2026-10-10): 把 VGA 扫描的几何量直接引出来
+    assign o_vga_row_col = vga_ddr_row_col;
+    assign o_vga_lnb     = vga_lnbytecount;
+    assign o_vga_col     = col_counter;
+    assign o_vga_isvga   = (s_prog_empty || !cache_owns);   // 1 = 本拍 sdraddr 走 VGA 分支
+    assign o_cmd     = ram_cmd;
+    assign o_ack     = ack;
+    assign o_axi_araddr = axi_araddr;
+    assign o_axi_awaddr = axi_awaddr;
+    assign o_ram_rdata  = ram_rdata;
+    assign o_ddr_dout   = cntrl0_user_input_data;
+
+    // ---- counters ----
+    reg [7:0] l2_fill_n = 0, l2_wb_n = 0, fill_foreign_n = 0;
+    wire l2 = (cache_hi_addr[14:5] == 10'h1E0) && (cache_hi_addr[4:0] == 5'd2);
+    always @(posedge clk_sdr) begin
+        if (!rst) begin
+            if (ack == 2'b11 && l2 && ram_rd_valid) if (l2_fill_n != 8'hFF) l2_fill_n <= l2_fill_n + 1;
+            if (ack == 2'b01 && l2 && ram_wr_valid) if (l2_wb_n   != 8'hFF) l2_wb_n   <= l2_wb_n   + 1;
+            if (ddr_rd && ram_rd_valid && (ack != 2'b11))
+                if (fill_foreign_n != 8'hFF) fill_foreign_n <= fill_foreign_n + 1;
+        end
+    end
+    assign o_l2_fill_n = l2_fill_n;
+    assign o_l2_wb_n   = l2_wb_n;
+    assign o_fill_foreign_n = fill_foreign_n;
+
+endmodule

@@ -68,11 +68,29 @@ module KB_Mouse_8042(
 	 inout PS2_CLK1,
 	 inout PS2_CLK2,
 	 inout PS2_DATA1,
-	 inout PS2_DATA2
+	 inout PS2_DATA2,
+	 // ---- 虚拟键盘(PS EMIO GPIO 送来的 scancode, clk 域) ----
+	 input      vk_enable,      // 1 = 启用虚拟键盘(屏蔽物理PS/2并代答自检)
+	 input      vk_valid,       // 1 拍: vk_data 为一个待注入字节
+	 input [7:0]vk_data,
+	 output     vk_ready        // 1 = 输出缓冲空, 可接收一个字节
     );
 	 
 //	status bit5 = MOBF (mouse to host buffer full - with OBF), bit4=INH, bit2(1-initialized ok), bit1(IBF-input buffer full - host to kb/mouse), bit0(OBF-output buffer full - kb/mouse to host)
 	reg [3:0]cmdbyte = 4'b1100; // EN2,EN,INT2,INT
+
+	// ================= 虚拟键盘(PS EMIO GPIO) =================
+	// 代答 BIOS 的键盘自检, 让 POST 认为键盘存在。否则 BIOS 走 nokb 分支:
+	//   KbdFlags3=0 且发 0xAD 关闭键盘接口。
+	reg [7:0] vk_cmd = 8'h00;        // 最近收到的键盘命令
+	reg       vk_cmd_seen = 1'b0;    // 有新命令待应答
+	reg [2:0] vk_state = 3'd0;
+	reg [7:0] vk_out = 8'h00;
+	reg       vk_out_v = 1'b0;
+	// 0xFF 复位 -> FA,AA ; 0xF2 读ID -> FA,AB,83 ; 其它 -> FA
+	localparam VK_IDLE = 3'd0, VK_ACK = 3'd1, VK_BAT = 3'd2, VK_ID1 = 3'd3, VK_ID2 = 3'd4;
+
+	/* ★ ILA 探针 */
 	reg wcfg = 1'b0;	// write config byte
 	reg next_mouse = 1'b0;
 	reg ctl_outb = 1'b0;
@@ -100,6 +118,35 @@ module KB_Mouse_8042(
 	assign dout = cmd ? {2'b00, MOBF, 1'b1, wcfg, 1'b1, IBF, OBF | MOBF | ctl_outb} : ctl_outb ? {2'b00, cmdbyte[3:2], 2'b00, cmdbyte[1:0]} : s_data; //MOBF ? mouse_data : kb_data;
 	assign I_KB = cmdbyte[0] & OBF; 			// INT & OBF
 	assign I_MOUSE = cmdbyte[1] & MOBF; 	// INT2 & MOBF
+
+	// 输出缓冲空: 可接受"虚拟键盘字节"(GPIO scancode 或 自检应答)
+	assign vk_ready = ~OBF & ~MOBF & ~ctl_outb;
+
+	/* ★★★ ILA 探针组 B: 8042 输出缓冲 —— 核心对比点 ★★★
+	   关键判据:  dbg_vk_data(接收端发出)  vs  dbg_s_data(装入 8042 缓冲)
+	              vs  dbg_dout(80186 实际从端口 0x60 读到)
+	   三者一致(都应是 0x24) → 传输与 8042 均正确, 问题在 BIOS 翻译/CPU 侧
+	   任一处不一致        → 直接定位到被改动的那一级 */
+
+	// 自检应答序列发生器(与 vk_cmd_seen 置位同处一个 always 块, 避免多驱动)
+	always @(posedge clk) begin
+		vk_out_v <= 1'b0;
+		case (vk_state)
+			VK_IDLE: if (vk_enable && vk_cmd_seen) begin
+						vk_out      <= 8'hFA;            // ACK
+						vk_out_v    <= 1'b1;
+						// ★ 不在这里清 vk_cmd_seen! 本块与主 always 块是**两个**块,
+						//   同时驱动同一 reg 会触发 DRC MDRV-1(多驱动)。
+						//   清标志统一放到主 always 块里(见下方 "ACK 已发出则清标志")。
+						vk_state    <= (vk_cmd == 8'hFF) ? VK_BAT :
+						               (vk_cmd == 8'hF2) ? VK_ID1 : VK_IDLE;
+					 end
+			VK_BAT:  begin vk_out <= 8'hAA; vk_out_v <= 1'b1; vk_state <= VK_IDLE; end
+			VK_ID1:  begin vk_out <= 8'hAB; vk_out_v <= 1'b1; vk_state <= VK_ID2;  end
+			VK_ID2:  begin vk_out <= 8'h83; vk_out_v <= 1'b1; vk_state <= VK_IDLE; end
+			default: vk_state <= VK_IDLE;
+		endcase
+	end
 	
 	PS2Interface Keyboard
 	(
@@ -146,7 +193,14 @@ module KB_Mouse_8042(
 		
 		
 		if(~OBF & ~MOBF)
-			if(kb_data_out_ready & ~rd_kb & ~cmdbyte[2]) begin
+			// 虚拟键盘优先: GPIO 送来的 scancode, 或自检应答字节
+			if(vk_enable & vk_valid) begin
+				OBF <= 1'b1;
+				s_data <= vk_data;
+			end else if(vk_enable & vk_out_v) begin
+				OBF <= 1'b1;
+				s_data <= vk_out;
+			end else if(kb_data_out_ready & ~rd_kb & ~cmdbyte[2] & ~vk_enable) begin
 				OBF <= 1'b1;
 				s_data <= kb_data;
 			end else if(mouse_data_out_ready & ~rd_mouse & ~cmdbyte[3]) begin
@@ -174,8 +228,17 @@ module KB_Mouse_8042(
 					else begin
 						next_mouse <= 0;
 						wr_mouse <= next_mouse;
-						wr_kb <= ~next_mouse;
-						wr_data <= {~^din, din, 1'b0};
+						if(vk_enable) begin
+							// 虚拟键盘: 不发给物理 PS/2, 记录命令以便代答自检
+							wr_kb <= 1'b0;
+							if(!next_mouse) begin
+								vk_cmd      <= din;
+								vk_cmd_seen <= 1'b1;
+							end
+						end else begin
+							wr_kb <= ~next_mouse;
+							wr_data <= {~^din, din, 1'b0};
+						end
 					end
 					wcfg <= 0;
 				end
@@ -189,6 +252,10 @@ module KB_Mouse_8042(
 						rd_mouse <= MOBF;
 					end
 				end
+
+		// ★ ACK 已发出则清自检命令标志(必须与置位同在主 always 块内, 否则多驱动)
+		if (vk_out_v) vk_cmd_seen <= 1'b0;
+
 	end
 endmodule
 

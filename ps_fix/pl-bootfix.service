@@ -1,0 +1,28 @@
+# =============================================================================
+# pl-bootfix.service —— 开机自动补齐 PL 所需的 PS 侧配置
+# -----------------------------------------------------------------------------
+# 安装(在板子上执行):
+#   cp aper_clk_fix.sh /usr/bin/aper_clk_fix.sh
+#   chmod +x /usr/bin/aper_clk_fix.sh
+#   cp pl-bootfix.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now pl-bootfix.service
+#   systemctl status pl-bootfix.service
+#
+# 注意: AFI0 64-bit 那个遗留服务(afi0-hp64)是"一次性删除"的事, 由
+#       ps_fix/remove_afi_hp64.sh 处理, 不需要常驻服务。
+#       本服务只处理"每次开机都必须重做"的 APER 时钟门控。
+# =============================================================================
+[Unit]
+Description=Enable Zynq APER clocks (GPIO / GEM0) required by the PL design
+DefaultDependencies=no
+After=local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/aper_clk_fix.sh
+
+[Install]
+WantedBy=multi-user.target

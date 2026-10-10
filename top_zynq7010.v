@@ -71,7 +71,10 @@ module top_zynq7010 (
     output wire        LRCLK,
     output wire        SDIN,
     output wire        SCLK,
-    output wire        STM_RST
+    output wire        STM_RST,
+    // ---- 虚拟键盘: PS EMIO GPIO (并行 8 位 + 选通, 不经 AXI) ----
+    // BD 中接 processing_system7_0 的 GPIO_O[8:0]
+    input  wire [8:0]  KBD_GPIO
 );
 
     // ==========================================
@@ -100,6 +103,7 @@ module top_zynq7010 (
     wire        ram_rd_valid;
     wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
     wire        SDLED;
+    wire        VK_ACT;      // ★ 诊断: 虚拟键盘注入活动(每收一个字节翻转一次)
 
     reg [25:0] blink_cnt = 0;
     always @(posedge m_axi_aclk) blink_cnt <= blink_cnt + 1'b1;
@@ -224,8 +228,8 @@ module top_zynq7010 (
         .SRAM_ADDR  (), .SRAM_DQ    (), .SRAM_OE_N  (), .SRAM_WE_N  (), .SRAM_UB_N  (), .SRAM_LB_N  (),
         .VGA_R      (VGA_R), .VGA_G      (VGA_G), .VGA_B      (VGA_B),
         .VGA_VSYNC  (VGA_VSYNC), .VGA_HSYNC  (VGA_HSYNC),
-        .SDLED      (SDLED),
-        .BTN_SOUTH  (next186_reset_trigger),
+        .SDLED      (SDLED),        .BTN_SOUTH  (next186_reset_trigger),
+        .VK_ACT     (VK_ACT),
         .BTN_WEST   (1'b0),
         .PS2_CLKA   (PS2_CLKA), .PS2_DATA   (PS2_DATA),
         .PS2_CLKB   (PS2_CLKB), .PS2_DATB   (PS2_DATB),
@@ -234,7 +238,11 @@ module top_zynq7010 (
         .SD_CK      (SD_CK), .SD_DI      (SD_DI),
         .RX_EXT     (RX_EXT), .TX_EXT     (TX_EXT), .MIDI_OUT   (MIDI_OUT),
         .CLKBD      (CLKBD), .WSBD       (WSBD), .DABD       (DABD),
-        .LRCLK      (LRCLK), .SDIN       (SDIN), .SCLK       (SCLK), .STM_RST    (STM_RST)
+        .LRCLK      (LRCLK), .SDIN       (SDIN), .SCLK       (SCLK), .STM_RST    (STM_RST),
+        // 虚拟键盘 (PS EMIO GPIO): 拆分总线; VK_ENABLE 固定为 1
+        .KBD_GPIO_DATA  (KBD_GPIO[7:0]),
+        .KBD_GPIO_STB   (KBD_GPIO[8]),
+        .KBD_VK_ENABLE  (1'b1)
     );
 
     // ==========================================
@@ -428,9 +436,25 @@ module top_zynq7010 (
     assign ram_wr_valid = (state == W_L) || (state == W_H);
 
     assign test_led[0] = init_done && !init_fail;
-    assign test_led[1] = init_done &&  init_fail;
+    // ★★★ 诊断(2026-10-10): 原 test_led[1] = init_done && init_fail, 但 `init_fail` 在本文件里
+    //   **从未被赋值**(只有声明), 所以这盏灯永远不亮 —— 现在把它改造成"配置完成后是否又复位过"的粘滞标志。
+    //   用途: 上电跑起来后, 若 40 秒左右真的发生了一次复位, 这盏灯会**亮起并保持**,
+    //         一眼即可回答"到底有没有复位"(不用 ILA)。
+    //   判据源: m_axi_aresetn(= PS 的 FCLK_RESET0_N 经 proc_sys_reset) 在 init 完成后被拉低过。
+    reg init_was_done = 1'b0;
+    reg rst_seen      = 1'b0;
+    reg autorst_seen  = 1'b0;
+    always @(posedge m_axi_aclk) begin
+        if (init_done)      init_was_done <= 1'b1;
+        if (init_was_done && !m_axi_aresetn) rst_seen <= 1'b1;   // 配置完成后又复位 -> 粘滞
+        if (init_was_done && auto_rst_reg)   autorst_seen <= 1'b1; // init 后 auto_rst 又抬升(=给 SoC 一次复位)
+    end
+    // test_led[1] 亮 = init 之后发生过复位(任一路), 且粘滞保持到断电。
+    assign test_led[1] = rst_seen | autorst_seen;
     assign test_led[2] = blink_cnt[25];
-    assign test_led[3] = SDLED;
+    // ★ test_led[3] 暂改为"虚拟键盘注入活动"指示(每收一个注入字节翻转一次)。
+    //   原为 SDLED(SD 片选调试); 本次诊断优先, 用完可改回: assign test_led[3] = SDLED;
+    assign test_led[3] = VK_ACT;
 
     // ==========================================
     // ★ 方案 A 验证粘滞计数（2026-09-20，纯观测，不影响主逻辑）

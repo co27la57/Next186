@@ -1877,17 +1877,18 @@ reg        dbg_IORQ;
     //     （CS=0xF000 且 IP<0xFC00）= 崩点本身；并附"最后一次在代码窗内的 IP + 当时译码的 opcode"
     //     = 肇事指令。开头用 okcnt>=32 做门限，避免上电瞬间的瞬态误触发。
     reg        dbg_boot_seen = 1'b0;
-    reg        dbg_esc_seen  = 1'b0;
-    reg [15:0] dbg_esc_ip    = 16'd0;
-    reg [15:0] dbg_esc_cs    = 16'd0;
-    reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
-    reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
-    reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
-    reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
-    reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
-    reg [15:0] dbg_wild_bx   = 16'd0; // 崩点时的 BX
-    reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
-    reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
+    (* mark_debug = "true", keep = "true" *) reg        dbg_esc_seen  = 1'b0;
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_ip    = 16'd0;
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_cs    = 16'd0;
+    (* mark_debug = "true", keep = "true" *) reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
+    (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
+    // ★ 崩点时的 BX —— 键盘查表正是靠 BX 定位 KeyCode 行, 抓这个最直接
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_bx   = 16'd0;
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
+    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
     reg [7:0]  dbg_bfe_cnt   = 8'd0;  // 对 0xFFBFE 的数据读次数（预期 3）
     reg        dbg_stale_popret = 1'b0; // pop(0xFFBFC)→ret(0xFFBFE) 读到同一数据
     reg [15:0] dbg_din_h1 = 16'd0;

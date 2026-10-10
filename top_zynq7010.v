@@ -456,37 +456,30 @@ module top_zynq7010 (
         if (init_was_done && !m_axi_aresetn) rst_seen <= 1'b1;   // 配置完成后又复位 -> 粘滞
         if (init_was_done && auto_rst_reg)   autorst_seen <= 1'b1; // init 后 auto_rst 又抬升(=给 SoC 一次复位)
     end
-    // assign test_led[1] = rst_seen | autorst_seen;
-    // assign test_led[2] = blink_cnt[25];
+    // test_led[1] 亮 = init 之后发生过复位(任一路), 且粘滞保持到断电。
+    assign test_led[1] = rst_seen | autorst_seen;
+    assign test_led[2] = blink_cnt[25];
     // ★ test_led[3] 暂改为"虚拟键盘注入活动"指示(每收一个注入字节翻转一次)。
     //   原为 SDLED(SD 片选调试); 本次诊断优先, 用完可改回: assign test_led[3] = SDLED;
-    // assign test_led[3] = VK_ACT;
+    assign test_led[3] = VK_ACT;
 
     // ========================================================================
-    // ★ 键盘字节观测 (2026-10-10, 临时诊断, 用完请还原上面四行)
-    //   4 个 LED 显示"PL 侧 KBD_GPIO[3:0] 在选通有效时的低 4 位"。
+    // ★ 键盘字节观测: 已从 LED 方案改为纯 ILA 方案(2026-10-10)
     //
-    //   为什么低 4 位就够: 当前症状(干净重启后实测, 排除状态污染)
-    //       送 0x23 -> 显示 'h'   (正确; BIOS 表 row16 = 'h')
-    //       送 0x24 -> 显示 '4'   (错误; BIOS 表 row20 = 'j', 而 '4' 是 row51 = 扫描码 0x05)
-    //       送 0x05 -> 显示 '@'
-    //     低 4 位分别是 3 / 4 / 5, 互不相同, 足以判定字节在哪一级被改写:
-    //       LED 显示 4 => PL 收到的就是 0x24, 故障在 8042 / BIOS 之后
-    //       LED 显示 5 => 字节在 EMIO -> 本模块之间已被改写
+    //   曾试过让 4 个 LED 直接显示 KBD_GPIO[3:0] 的低 4 位(方案 A), 但:
+    //     1) test_led 只有 4 位, 要显示字节得占掉全部 4 盏灯, 代价太大;
+    //     2) test_led[0] 与下面的整体赋值会造成 MDRV-1 多驱动(实测报错)。
+    //   所以恢复 4 个 LED 各自的原职, 字节对账完全交给 ILA 的四层探针:
+    //     组A(kbd_gpio_rx.v): dbg_emio_data / dbg_emio_stb / dbg_rx_data / dbg_popped
+    //     组B(KB_8042.v)    : dbg_vk_data / dbg_s_data / dbg_dout / dbg_sel_dout
+    //                         dbg_vk_valid / dbg_vk_ready / dbg_OBF / dbg_ctl_outb / dbg_src
+    //   触发与判读表见 sim/BOARD-TEST-110th-键盘字节四层对账探针.md
     //
-    //   用法: ./kbd_gpio_inject -r 24   (只发 make, 回车触发一次), 然后看 LED。
-    //         板子上已确认 PS 侧写入+读回逐位全对(-V 模式), 所以嫌疑已收敛到 PL 侧。
-    //
-    //   采样用"电平"而非边沿: 选通会被注入器保持约 12us(数百个 m_axi_aclk 周期),
-    //   电平采样天然跨时钟安全, 且不需要给调试信号加同步器。
+    //   下面这行整体赋值已删除 —— 它与逐位 assign test_led[N] 冲突:
+    //       [DRC MDRV-1] Net .../test_led[0] has multiple drivers
     // ========================================================================
-    reg [3:0] dbg_kbd_nib = 4'd0;
-    always @(posedge m_axi_aclk) begin
-        if (KBD_GPIO[8]) dbg_kbd_nib <= KBD_GPIO[3:0];   // 选通有效时采样
-    end
-    assign test_led = dbg_kbd_nib;
 
-    // ==========================================
+    // ========================================================================
     // ★ 方案 A 验证粘滞计数（2026-09-20，纯观测，不影响主逻辑）
     //   dbg_wb_word_cnt  : 累计写出的 32-bit 字数（每次 AXI 写握手 +1）
     //   dbg_wb_burst_cnt : 累计写回 burst 数（w_burst_cnt 到 15 时 +1）

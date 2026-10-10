@@ -24,7 +24,18 @@
 // 编译: gcc -O2 -o kbd_gpio_inject kbd_gpio_inject.c   (或 ARM 交叉编译 + -static)
 // 运行: ./kbd_gpio_inject            # 默认 base=54
 //       ./kbd_gpio_inject -b 54      # 指定 EMIO 起始 GPIO 编号
+//       ./kbd_gpio_inject -v         # 打印每个发出的字节
+//       ./kbd_gpio_inject -K         # 键位对照: 顺序键入 4 行已知字符串, 回读屏幕对账
+//       ./kbd_gpio_inject -g 8000    # 字节间隔(us), 默认 3000
+//       ./kbd_gpio_inject -R 24      # 原始扫描码探针: 只发 0x24 + break, 回车触发
 // 退出: Ctrl+]
+//
+// ★ 扫描码集: 本板 BIOS 是 SCANCODE1 版本(见 images/BIOS/BIOS_Next186.asm 第 52 行
+//   `SCANCODE1 equ 1`), 接受的**只有 set-1**。已用 sim/tools/bios_keymap.py 从
+//   预编译 BIOS 二进制里把 KeyIndex/KeyCode 表抠出来验证:
+//       0x02..0x0B -> '1'..'0'   0x1E -> 'a'   0x24 -> 'j'
+//       0x1C -> CR(0Dh)          0x0E -> BS(08h)
+//   ⇒ 发送侧必须全部用 set-1, 不能混 set-2 (旧版数字表就是混的, 已修)。
 // ============================================================================
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -131,13 +142,18 @@ static void export_pin(int gpio_num, int idx) {
 
 static int verbose = 0;
 static int slow = 0;      /* -s: 字节间加长延时, 用于排查丢字节 */
+static int gap_us = 3000; /* -g <us>: 字节之间 / make 与 break 之间的间隔 */
 
 /* GPIO 使用: base+0..7 = 数据位 data[0..7], base+8 = 选通 strob */
 #define NDATA 8
 
 /* 发送一个字节(8 位并行 + 选通)
  * 先写 8 根数据线, 再拉高选通 -> PL 在选通上升沿锁存已稳定的字节。
- * 结构上不可能丢位(串行位帧方案实测会偶发丢 bit)。 */
+ * 结构上不可能丢位(串行位帧方案实测会偶发丢 bit)。
+ *
+ * ★ 2026-10-10: PL 侧 vk_valid 是单拍脉冲, 8042 缓冲非空时该脉冲会被整体丢弃,
+ *   所以这里必须**放慢**: 每个字节之间留出足够时间让 BIOS 的 INT 09 把上一字节
+ *   从端口 0x60 取走。默认 3ms 对 DOS 的键盘处理绰绰有余。 */
 static void send_byte(uint8_t byte) {
     int i;
     const int D = 3000;   /* 空转延时, 约 2-4us */
@@ -153,8 +169,17 @@ static void send_byte(uint8_t byte) {
     set_pin(NDATA, 0);
     if (verbose)
         fprintf(stderr, "[tx] 0x%02x\n", byte);
-    /* 慢速模式: 字节间额外留长延时, 便于判断是否 8042 侧来不及取走(丢字节) */
-    if (slow) usleep(30000);
+    usleep(slow ? 30000 : gap_us);
+}
+
+/* 一次完整的按键: make -> 间隔 -> break。
+ * break 之后再补发一次: BIOS 对 break 字节只做标志处理(>=0x59 被清零, 不入队),
+ * 重复无害; 但若前一个 break 被丢掉, 按键就会"粘住", 那才是 DOS 卡死的典型成因。 */
+static void send_key(uint8_t sc) {
+    send_byte(sc);            /* make  */
+    usleep(slow ? 30000 : gap_us);
+    send_byte(sc | 0x80);     /* break */
+    if (verbose) fprintf(stderr, "[key] 0x%02x + break\n", sc);
 }
 
 /* ---- 按键解码: 终端字节 -> PS/2 set-1 scancode ---- */
@@ -178,10 +203,18 @@ static const uint8_t sc_a_z[26] = {
 };
 
 /* 数字 1..0 -> PS/2 set-1 扫描码
- * (原表 {0x0b,0x02,...} 是错的: 0x02-0x09 不是数字键码) */
+ * ★ 2026-10-10 修复: 旧表是 PS/2 **set-2** 的顶行数字码 (0x16,0x1e,0x26,0x25,...),
+ *   只在"0"那一项混进了 set-1 的 0x0b, 整张表自相矛盾。
+ *   而板上跑的 BIOS 是 **SCANCODE1** 版本(set-1):
+ *     实测从 images/BIOS_Next186.bin 抠表验证 (sim/tools/bios_keymap.py):
+ *       0x02..0x0B -> '1'..'0'   (正确)
+ *       0x24 -> 'j'  0x1C -> CR  0x0E -> BS
+ *   用旧表的结果: '1'->0x16->'u', '2'->0x1e->'a', '4'->0x25->'k',
+ *                 '6'->0x36->RShift, '7'->0x3d->F3, '9'->0x46->ScrollLock
+ *   ⇒ 全部错位。set-1 顶行数字就是 0x02..0x0B。 */
 static const uint8_t sc_0_9[10] = {
-    0x16,/*1*/ 0x1e,/*2*/ 0x26,/*3*/ 0x25,/*4*/ 0x2e,/*5*/
-    0x36,/*6*/ 0x3d,/*7*/ 0x3e,/*8*/ 0x46,/*9*/ 0x0b/*0*/
+    0x0b,/*0*/ 0x02,/*1*/ 0x03,/*2*/ 0x04,/*3*/ 0x05,/*4*/
+    0x06,/*5*/ 0x07,/*6*/ 0x08,/*7*/ 0x09,/*8*/ 0x0a/*9*/
 };
 
 static int ascii_to_sc(char c, uint8_t *sc, int *shift) {
@@ -211,15 +244,36 @@ static int ascii_to_sc(char c, uint8_t *sc, int *shift) {
     }
 }
 
+/* 按 ASCII 字符串逐字符键入(带 Shift 处理), 同时把"期望字符"打到 stderr,
+ * 便于把 DOS 屏幕上的实际结果与期望逐字符对齐 —— 这是判断映射是否错位的
+ * 最快办法(不需要任何仪器)。 */
+static void type_string(const char *s) {
+    for (; *s; s++) {
+        uint8_t sc; int shift;
+        unsigned char c = (unsigned char)*s;
+        if (c == '\n') { send_key(0x1c); fprintf(stderr, "  [exp] <CR>\n"); continue; }
+        if (!ascii_to_sc((char)c, &sc, &shift)) {
+            fprintf(stderr, "  [exp] (skip 0x%02x)\n", c);
+            continue;
+        }
+        if (shift) send_byte(0x2a);       /* LShift 按下 */
+        send_key(sc);
+        if (shift) send_byte(0xaa);       /* LShift 松开 */
+        fprintf(stderr, "  [exp] '%c'  sc=%02x%s\n", isprint(c) ? c : '?', sc, shift ? " +Shift" : "");
+    }
+}
+
 int main(int argc, char **argv) {
     int pin0 = DEFAULT_BASE;   /* EMIO 内的引脚序号(0..117), 默认 54 */
-    int i, test_mode = 0;
+    int i, test_mode = 0, keymap_check = 0;
     int raw = -1, raw_mode = 0;   /* 原始扫描码探针: raw=扫描码, raw_mode: 1=只发make, 2=make+break */
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-b") && i + 1 < argc) pin0 = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))     verbose = 1;
         else if (!strcmp(argv[i], "-t"))     test_mode = 1;
         else if (!strcmp(argv[i], "-s"))     slow = 1;
+        else if (!strcmp(argv[i], "-K"))     keymap_check = 1;
+        else if (!strcmp(argv[i], "-g") && i + 1 < argc) gap_us = atoi(argv[++i]);
         /* -r <hex> 只发 make; -R <hex> 发 make+break —— 用于探测 80186 的真实解释 */
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) { raw = (int)strtol(argv[++i], NULL, 16); raw_mode = 1; }
         else if (!strcmp(argv[i], "-R") && i + 1 < argc) { raw = (int)strtol(argv[++i], NULL, 16); raw_mode = 2; }
@@ -288,6 +342,25 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    /* ---- 键位对照模式: 顺序键入 4 行, 用户回读 DOS 屏幕即可定位错位 ----
+     * 设计意图: 把"映射问题"变成一次可对账的打印, 不必猜。
+     * 第1行验数字、第2行验字母、第3行验 j/4/h/f 这四个已知可疑键、
+     * 第4行验 Shift(大写)通路。 */
+    if (keymap_check) {
+        fprintf(stderr, "[kbd_gpio] 键位对照模式, 请回读 DOS 屏幕上出现的 4 行\n");
+        fprintf(stderr, "第1行 期望: 1234567890\n");
+        type_string("1234567890\n");
+        fprintf(stderr, "第2行 期望: abcdefghijklmnopqrstuvwxyz\n");
+        type_string("abcdefghijklmnopqrstuvwxyz\n");
+        fprintf(stderr, "第3行 期望: j4hf\n");
+        type_string("j4hf\n");
+        fprintf(stderr, "第4行 期望: JJJJ\n");
+        type_string("JJJJ\n");
+        for (int q = 0; q <= NDATA; q++) set_pin(q, 0);
+        fprintf(stderr, "[kbd_gpio] 键位对照结束\n");
+        return 0;
+    }
+
     /* ---- 测试模式: 每秒发一个 'a'(scancode 0x1E) ----
      * 用来区分"集成没通"(DOS 完全没反应) vs "键盘映射问题"。
      * 若 DOS 出现一串 a, 说明 8 位并行链路 OK, 剩下才是映射表问题。 */
@@ -295,8 +368,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[kbd_gpio] 测试模式: 每秒发送一个 'a'(0x1E), Ctrl+C 退出\n");
         signal(SIGINT, SIG_DFL);
         for (;;) {
-            send_byte(0x1E);
-            send_byte(0x9E);
+            send_key(0x1E);
             sleep(1);
         }
     }
@@ -326,8 +398,7 @@ int main(int argc, char **argv) {
                     shift ? " +Shift" : "");
         }
         if (shift) send_byte(0x2a);               /* Shift 按下 */
-        send_byte(sc);                            /* make */
-        send_byte(sc | 0x80);                     /* break */
+        send_key(sc);                             /* make -> 间隔 -> break */
         if (shift) send_byte(0xaa);               /* Shift 松开 */
     }
     tcsetattr(STDIN_FILENO, TCSANOW, &old);

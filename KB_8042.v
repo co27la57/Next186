@@ -120,7 +120,12 @@ module KB_Mouse_8042(
 	assign I_MOUSE = cmdbyte[1] & MOBF; 	// INT2 & MOBF
 
 	// 输出缓冲空: 可接受"虚拟键盘字节"(GPIO scancode 或 自检应答)
-	assign vk_ready = ~OBF & ~MOBF & ~ctl_outb;
+	// ★ 2026-10-10: 去掉原来的 ~ctl_outb。
+	//   ctl_outb = "80186 发了 0x20 读配置命令但还没读端口 0x60"。它在启动时
+	//   一旦卡住, vk_ready 就恒 0 ⇒ 配合 kbd_gpio_rx 的电平握手会把整条注入
+	//   链路永久堵死(第 27 轮就是这么坏掉的)。而 OBF 空下来这件事是必然的
+	//   (DOS/BIOS 一定会来读端口 0x60), 所以只用 ~OBF & ~MOBF 即可, 不会死锁。
+	assign vk_ready = ~OBF & ~MOBF;
 
 	/* ★★★ ILA 探针组 B: 8042 输出缓冲 —— 核心对比点 ★★★
 	   关键判据:  dbg_vk_data(接收端发出)  vs  dbg_s_data(装入 8042 缓冲)
@@ -193,13 +198,17 @@ module KB_Mouse_8042(
 		
 		
 		if(~OBF & ~MOBF)
-			// 虚拟键盘优先: GPIO 送来的 scancode, 或自检应答字节
-			if(vk_enable & vk_valid) begin
-				OBF <= 1'b1;
-				s_data <= vk_data;
-			end else if(vk_enable & vk_out_v) begin
+			// ★ 顺序很重要: 自检/命令应答(vk_out_v)必须**优先**。
+			//   它是单拍脉冲、协议关键(BIOS 的 sendcmd 在等 0xFA);
+			//   而 vk_valid 现在是电平, 会一直保持到被取走, 让路没关系。
+			//   若把 vk_valid 排在前面, 一个待发扫描码就会把 ACK 挤掉,
+			//   BIOS 会一直等 AckReceived ⇒ 键盘命令卡死。
+			if(vk_enable & vk_out_v) begin
 				OBF <= 1'b1;
 				s_data <= vk_out;
+			end else if(vk_enable & vk_valid) begin
+				OBF <= 1'b1;
+				s_data <= vk_data;
 			end else if(kb_data_out_ready & ~rd_kb & ~cmdbyte[2] & ~vk_enable) begin
 				OBF <= 1'b1;
 				s_data <= kb_data;

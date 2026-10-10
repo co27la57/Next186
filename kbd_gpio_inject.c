@@ -49,9 +49,47 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <signal.h>
+#include <sys/mman.h>
 
 #define SYSFS_GPIO "/sys/class/gpio"
 #define DEFAULT_BASE 54
+
+/* ★ 8086 的键盘状态字 (BDA 0040:0017) 的物理地址
+ * ------------------------------------------------------------------
+ * 映射已实测确认: 物理 = 0x08000000 + (段<<4)
+ *   证据: devmem 0x08000400 16 -> 0x03F8  (BDA 0040:0000 = COM1 基址)
+ *         devmem 0x08000417 16 -> 键盘状态字
+ *   所以 0040:0017 -> 0x08000417  (★ 不是 0x417, 那个地址落在别的 DDR 区域)
+ *
+ * 为什么要在注入前清它: 该字是 Shift/Ctrl/Alt/CapsLock/NumLock 的**锁存**状态。
+ * 一旦某个修饰键的 break 字节(0xAA/0x9D/0xB8/0xB6)在传输中丢失, 这里就永久
+ * 保持"按下"。此后 BIOS 的 int09 会让**每一个**按键都去取 KeyCode 表的
+ * ctrl/shift 列 -> 满屏乱码、回车/退格失效、映射全部错乱。
+ * 2026-10-10 实测到过该字 = 0x8005 (RShfDown|CtrlDown 同时锁死)。 */
+#define BDA_KBD_FLAGS 0x08000417UL
+
+static void clear_kbd_state(void) {
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr, "[kbd_gpio] 打开 /dev/mem 失败(%s), 跳过键盘状态字清理\n",
+                strerror(errno));
+        return;
+    }
+    {
+        unsigned long pg  = BDA_KBD_FLAGS & ~0xFFFUL;
+        unsigned long off = BDA_KBD_FLAGS & 0xFFFUL;
+        void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)pg);
+        if (p == MAP_FAILED) {
+            fprintf(stderr, "[kbd_gpio] mmap 0x%08lX 失败(%s), 跳过清理\n", pg, strerror(errno));
+        } else {
+            *(volatile unsigned short *)((char *)p + off) = 0;
+            munmap(p, 4096);
+            fprintf(stderr, "[kbd_gpio] 已清 8086 键盘状态字 (0040:0017 @ 0x%08lX)\n",
+                    BDA_KBD_FLAGS);
+        }
+    }
+    close(fd);
+}
 
 static int val_fd[9];   /* 8 根数据线 + 1 根选通 的 value 文件描述符(常开) */
 
@@ -182,6 +220,15 @@ static void send_key(uint8_t sc) {
     if (verbose) fprintf(stderr, "[key] 0x%02x + break\n", sc);
 }
 
+/* Shift 松开。BIOS 的 int09 只有见到 0xAA 才会清掉 RShfDown/LShfDown;
+ * 传输中丢一个 break, Shift 就会**永久**保持"按下", 此后每一个按键都被 BIOS
+ * 取 KeyCode 表的 shift 列 => 满屏乱码 + 回车/退格失效。
+ * 重复发一次是幂等的(第二个 0xAA 只是重复清标志), 但能把"丢一个"压到可忽略。 */
+static void send_shift_release(void) {
+    send_byte(0xAA);
+    send_byte(0xAA);
+}
+
 /* ---- 按键解码: 终端字节 -> PS/2 set-1 scancode ---- */
 /* ===========================================================================
  * 扫描码表 = 标准 PC PS/2 set-1 (Make code)
@@ -258,7 +305,7 @@ static void type_string(const char *s) {
         }
         if (shift) send_byte(0x2a);       /* LShift 按下 */
         send_key(sc);
-        if (shift) send_byte(0xaa);       /* LShift 松开 */
+        if (shift) send_shift_release();  /* LShift 松开(发两次) */
         fprintf(stderr, "  [exp] '%c'  sc=%02x%s\n", isprint(c) ? c : '?', sc, shift ? " +Shift" : "");
     }
 }
@@ -296,6 +343,10 @@ int main(int argc, char **argv) {
         export_pin(base + pin0 + NDATA, NDATA);   /* 选通 */
     }
     for (int k = 0; k <= NDATA; k++) set_pin(k, 0);
+
+    /* ★ 先清掉 8086 可能残留的修饰键锁存状态, 否则整个键盘行为都是错的。
+     *   见文件头 BDA_KBD_FLAGS 处的说明。 */
+    clear_kbd_state();
 
     fprintf(stderr, "[kbd_gpio] 并行模式: data[7:0]=GPIO %d..%d, strob=GPIO %d (base=%d)\n",
             base + pin0, base + pin0 + NDATA - 1, base + pin0 + NDATA, base);
@@ -399,7 +450,7 @@ int main(int argc, char **argv) {
         }
         if (shift) send_byte(0x2a);               /* Shift 按下 */
         send_key(sc);                             /* make -> 间隔 -> break */
-        if (shift) send_byte(0xaa);               /* Shift 松开 */
+        if (shift) send_shift_release();       /* Shift 松开(发两次) */
     }
     tcsetattr(STDIN_FILENO, TCSANOW, &old);
     for (int k = 0; k <= NDATA; k++) set_pin(k, 0);

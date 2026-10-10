@@ -212,8 +212,16 @@ module KB_Mouse_8042(
 			end else if(kb_data_out_ready & ~rd_kb & ~cmdbyte[2] & ~vk_enable) begin
 				OBF <= 1'b1;
 				s_data <= kb_data;
-			end else if(mouse_data_out_ready & ~rd_mouse & ~cmdbyte[3]) begin
-				MOBF <= 1'b1;
+			end else if(mouse_data_out_ready & ~rd_mouse & ~cmdbyte[3] & ~vk_enable) begin
+				// ★ 2026-10-10 修复: 与上面键盘通路保持对称 —— 虚拟键盘启用时,
+				//   鼠标通路也必须被门控。s_data 是键盘/鼠标**共用**的输出缓冲,
+				//   之前只有键盘通路带 ~vk_enable, 鼠标通路没有; 于是 BIOS 只要发过
+				//   0xA8(使能鼠标, 会把 cmdbyte[3] 清 0), 物理鼠标的应答字节就会被
+				//   塞进同一个缓冲, 混进键盘字节流。若其中混入 0x2A/0x36/0x1D/0x38
+				//   而 break 没跟上, BIOS 的 KbdFlags1 就会把 Shift/Ctrl 锁死
+				//   (实测 BDA 0040:0017 = 0x8005, 即 RShfDown|CtrlDown), 之后所有
+				//   按键都走 ctrl/shift 列 => 屏幕全是乱码、回车/退格失效。
+	MOBF <= 1'b1;
 				s_data <= mouse_data;
 			end
 		

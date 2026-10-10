@@ -58,14 +58,26 @@ module kbd_gpio_rx #(
     wire empty = (wptr == rptr);
     wire full  = (wptr[3:0] == rptr[3:0]) && (wptr[4] != rptr[4]);
 
+    // ---- ★ 2026-10-10 看门狗出队: 防止 8042 侧一旦停止消费就把整条链路堵死 ----
+    //   现象(实测): 屏幕上"正好前 16 个字符正常, 之后全乱码" —— 16 = DEPTH。
+    //   成因: 出队条件是 `!empty && vk_ready`, 而 vk_ready = ~OBF & ~MOBF。
+    //   只要 80186 停止读端口 0x60 (OBF 停在 1), FIFO 就永久填满, 之后再多的
+    //   字节全部被丢弃 —— 我加 FIFO 时把"丢字节"升级成了"死锁", 这是设计缺陷。
+    //   对策: 队头等待超过阈值就**强行弹出一个**(宁可丢一个字节, 也不能堵死)。
+    //   阈值 2^20 拍: clk_cpu 25MHz 时约 42ms, 远大于任何一次合法的忙等,
+    //   也不会在正常打字(字节间隔 3ms)时误触发。
+    reg  [19:0] wait_cnt = 20'd0;
+    wire        stalled  = (wait_cnt >= 20'hFFFFF);
+
     always @(posedge clk) begin
         if (!rst_n) begin
-            d1   <= {DW{1'b0}};
-            d2   <= {DW{1'b0}};
-            s1   <= 1'b0;
-            s2   <= 1'b0;
-            wptr <= 5'd0;
-            rptr <= 5'd0;
+            d1      <= {DW{1'b0}};
+            d2      <= {DW{1'b0}};
+            s1      <= 1'b0;
+            s2      <= 1'b0;
+            wptr    <= 5'd0;
+            rptr    <= 5'd0;
+            wait_cnt <= 20'd0;
         end else begin
             d1 <= gpio_data;
             d2 <= d1;
@@ -78,10 +90,15 @@ module kbd_gpio_rx #(
                 wptr           <= wptr + 1'b1;
             end
 
-            if (!empty && vk_ready) begin
+            if (empty || vk_ready) wait_cnt <= 20'd0;
+            else                  wait_cnt <= wait_cnt + 1'b1;
+
+            if (!empty && (vk_ready || stalled)) begin
                 // 时序: 本拍 vk_valid=1 且 vk_ready=1, KB_8042 在**同一个上升沿**
                 // 把 vk_data(= 队头)装进 OBF; 我们同时弹出一项 ⇒ 下一拍队头
                 // 前移 ⇒ 不会把同一字节再装一次。
+                // stalled 分支是死锁保护: 此时 8042 并没有真正收下, 这一字节会丢,
+                // 但队列得以推进, 链路不会永久失效。
                 rptr <= rptr + 1'b1;
             end
         end

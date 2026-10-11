@@ -829,19 +829,41 @@ module system
 	//   （[0]=当前生效，[1]=待生效）。全部准静态（只在切模式时变）⇒ clk_sdr 采样安全。
 	// ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 寄存器本身是功能代码,
 	//   在下方 always 块里被赋值, 不能删。
-	reg [15:0] dbg_vga_scraddr = 16'h0;   // ★144th 加回：验证"上下对调 = 控制台滚屏(scraddr≠0)"这一假设
-	 reg [1:0]  dbg_vga_text    = 2'b00;
-	 reg [1:0]  dbg_vga_13      = 2'b00;
-	 reg [1:0]  dbg_vga_planar  = 2'b00;
-	 reg [1:0]  dbg_vga_half    = 2'b00;
+// ★ 第 117 次（2026-10-11）：VGA 7 行全局回绕定位探针（键盘已修复，探针预算让给 VGA）
+	//
+	//   ★ 决定性线索（用户提供）：**图形模式也是最后 7 行对应前面 7 行**，与文本一致。
+	//   ⇒ 文本步进(+40) 与 图形步进({vga_offset,1'b0}) 数值不同，回绕量却同为 7 行
+	//   ⇒ 故障**不在步进**，而在文本/图形的**共用逻辑**：帧边界 / 行计数 / 地址映射。
+	//
+	//   ★ 已排除（有据）：lcr 行比较寄存器 = 0x3FF(禁用)。
+	//     BIOS 在 FE7D3 写 `mov ax,0xff18; out 0x3d4,ax`，配合 CRTC 0x07/0x09
+	//     的溢出位拼成 lcr={1,1,0xFF}=0x3FF，而 row_count 最大 479 ⇒ 永不触发。
+	//     （详见 sim/stage1_disasm.txt 与 images/BIOS 反汇编 FE7BF-FE7D6）
+	//
+	//   因此本轮必测的是"行推进到底走了多少、在哪一帧边界复位、可见区多长"：
+	//     dbg_vga_rowcnt : 扫描行计数(0..479)
+	//     dbg_vga_rowcol : 帧内行地址(17bit)——看它一帧推进多少、是否越界
+	//     dbg_vga_vde    : 可见扫描行数(vde)——决定屏幕实际显示几行  ★关键
+	//     dbg_vga_charrow: 显示侧字符行
+	//     dbg_vga_eol/eof: 行末/帧末事件脉冲（对齐 rowcol 推进时刻）
+	//     dbg_vga_rowmax : 一帧内 rowcol 达到的最大值（越界证据，粘滞）
+	reg [15:0] dbg_vga_scraddr = 16'h0;
+	reg [1:0]  dbg_vga_text    = 2'b00;
+	reg [1:0]  dbg_vga_half    = 2'b00;
+	reg [9:0]  dbg_vga_vde     = 10'h0;
+	reg        dbg_vga_eol     = 1'b0;
+	reg        dbg_vga_eof     = 1'b0;
+	reg [16:0] dbg_vga_rowmax  = 17'h0;
+	reg [1:0]  dbg_vga_13      = 2'b00;
+	reg [1:0]  dbg_vga_planar  = 2'b00;
 	// ★140th 新增探针（纯观测，不改逻辑）：定位"半屏上下对调"的行序问题。
 	//   dbg_vga_lcr    = 行比较寄存器（L268）——若它被 BIOS 设成半屏位置，
 	//                    则 L1088 `row_count == lcr` 会在帧中途把行地址拉回 ROWCOL。
 	//   dbg_vga_rowcol = 帧内真实行地址（L141, 17bit）——直接看基址与推进。
 	//   dbg_vga_rowcnt = 扫描行计数器（L198, 9bit）——与 rowcol 配对，
 	//                    即可还原"第 k 条扫描行读到哪一行"，一眼看出行序是否被重排。
-	 reg [9:0]  dbg_vga_lcr     = 10'h0;
-	 reg [16:0] dbg_vga_rowcol  = 17'h0;
+	reg [9:0]  dbg_vga_lcr     = 10'h0;
+	(* mark_debug = "true", keep = "true" *) reg [16:0] dbg_vga_rowcol  = 17'h0;
 	// ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 寄存器本身是功能代码,
 	//   在下方 always 块里被赋值, 不能删。
 	reg [8:0]  dbg_vga_rowcnt  = 9'h0;
@@ -850,9 +872,47 @@ module system
 	//   dbg_vga_charrow = 显示侧正在扫的字符行（L192 char_row, 6bit）
 	//   取指侧字符行 = dbg_vga_rowcnt/16。两者之差 = 屏幕相位错位量（"上下对调"的根因候选）。
 	// ★2026-10-10: 摘掉 mark_debug; 寄存器本身是功能代码, 不能删。
-	reg [9:0]  dbg_vga_vcount  = 10'h0;
+	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_vga_vcount  = 10'h0;
 	// ★2026-10-10: 摘掉 mark_debug; 寄存器本身是功能代码, 不能删。
-	reg [5:0]  dbg_vga_charrow = 6'h0;
+	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_vga_charrow = 6'h0;
+
+	// ★★ 第 118 次（2026-10-11）：补齐地址公式的两个缺失量
+	//   上一包已确认：vde=399(25字符行可见) 而 rowcnt=479(480扫描行=30字符行推进)
+	//   ⇒ 地址推进比显示多 5 字符行。但 rowcol 峰值换算成字节时对不上
+	//     (1160*2=2320B 只够14.5行；*4=4640B 又超25行4行)，
+	//     差的正是 `vga_lnbytecount`(行内字节计数) 与 sdraddr 的最终值。
+	//   故本轮补：
+	//     dbg_vga_sdraddr : VGA 实际输出的 DDR 地址(24bit) —— 直接看读到哪、范围多宽
+	//     dbg_vga_lnbyte  : 行内字节计数(8bit)
+	//     （原设计的 sdr_min/sdr_max 已撤，见下方 118b 说明）
+	reg [23:0] dbg_vga_sdraddr = 24'h0;
+	reg [7:0]  dbg_vga_lnbyte  = 8'h0;
+
+	// ★★ 第 119 次（2026-10-11）：直接量化"行推进次数 vs 实际显示行数"
+	//   动机：三次抓包的相位差在"帧末"和"eol"两种状态下不一致
+	//     (rowcnt-vcount：帧末=+4，eol=+196/197，差 193 扫描行=12 字符行)
+	//     ⇒ 不能确定固定补偿量，必须先把"推进次数"与"显示行数"分别数出来。
+	//   判据（一帧累积，触发点不影响结果）：
+	//     eol_cnt == cr_cnt  ⇒ 推进与显示同步，问题在**起点偏移**
+	//     eol_cnt  > cr_cnt  ⇒ 推进比显示多，多出部分越界 ⇒ 问题在**推进速率/边界**
+	//   预期：480 扫描行/16 = 30 次推进；显示 25 行 ⇒ cr_cnt 应为 25
+	reg [7:0]  dbg_vga_eol_cnt = 8'd0;
+	reg [7:0]  dbg_vga_cr_cnt  = 8'd0;
+	reg [5:0] dbg_cr_prev = 6'd0;   // 上一拍 charrow（内部用，不必开探针）
+
+	// ★★★ 第 119 次核心探针：**屏幕第一行(charrow=0)时读的是哪个地址**
+	//   这是"起点偏移"的直接证据，比计数更硬：
+	//     若 sd_at_cr0 == 0x5C000(帧缓冲基址对应值)  ⇒ 起点正确，问题在推进
+	//     若 ≠  ⇒ 起点就偏了，偏移字节数 = (sd_at_cr0 - 0x5C000)*2
+	//   charrow=0 时 vcount=0..15 持续 16 个扫描行，锁存到的是该行末尾值，
+	//   此时 rowcol 仍是本行(未推进到下一行)，故即为"第 0 行的地址"。
+	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_vga_sd_at_cr0 = 24'h0;
+	(* mark_debug = "true", keep = "true" *) reg [16:0] dbg_vga_rc_at_cr0 = 17'h0;
+	// ★ 第 118b：sdr_min/sdr_max 已撤（各带一个 24 位比较器，组合逻辑压力大，
+	//   疑为本次黑屏(显示器无信号 / dbg_vga_eof 不触发)的诱因之一）。
+	//   只用 sdraddr 本身 + eol 触发即可判断基址：行末拍读一次 sdraddr 就够。
+	//   若确需"一帧范围"，改用行号(k)与行首 sdraddr 两个点算即可，不必常开比较器。
+
 	always @(posedge clk_sdr) begin
 		dbg_vga_scraddr <= scraddr;
 		dbg_vga_text    <= vgatext[1:0];
@@ -864,6 +924,34 @@ module system
 		dbg_vga_rowcnt  <= vga_ddr_row_count;
 		dbg_vga_vcount  <= vcount;
 		dbg_vga_charrow <= char_row;
+		// ---- 第 117 次新增：帧边界与越界取证 ----
+		dbg_vga_vde     <= vde;
+		dbg_vga_eol     <= s_vga_endline;
+		dbg_vga_eof     <= s_vga_endframe;
+		// 帧内 rowcol 峰值（粘滞，供 ILA 直接读取；每帧开始时用当前值刷新）
+		// 判读：若 rowmax 超出 VRAM 有效范围 ⇒ 越界 ⇒ 末尾回绕/乱码的根因
+		if (s_vga_endframe)
+			dbg_vga_rowmax <= 17'h0;
+		else if (vga_ddr_row_col > dbg_vga_rowmax)
+			dbg_vga_rowmax <= vga_ddr_row_col;
+
+		// ---- 第 118b：只锁存 sdraddr / lnbyte（纯赋值，无比较器）----
+		dbg_vga_sdraddr <= sdraddr;
+		dbg_vga_lnbyte  <= vga_lnbytecount;
+
+		// ---- 第 119 次：一帧内累积计数（整帧重置，无越界风险：30 次 << 255）----
+		dbg_cr_prev <= char_row;                       // 先记上一拍
+		if (char_row == 6'd0) begin                    // ★ 锁存"第一行"的地址
+			dbg_vga_sd_at_cr0 <= sdraddr;
+			dbg_vga_rc_at_cr0 <= vga_ddr_row_col;
+		end
+		if (s_vga_endframe) begin
+			dbg_vga_eol_cnt <= 8'd0;
+			dbg_vga_cr_cnt  <= 8'd0;
+		end else begin
+			if (s_vga_endline) dbg_vga_eol_cnt <= dbg_vga_eol_cnt + 8'd1;
+			if (char_row != dbg_cr_prev) dbg_vga_cr_cnt <= dbg_vga_cr_cnt + 8'd1;
+		end
 	end
 	always @(posedge clk_cpu) begin
 		if (MREQ) begin dbg_cpu_laddr <= ADDR; dbg_cpu_lwr <= WR; end
@@ -1089,7 +1177,22 @@ dbg_ad_d1 <= sdraddr[14:5];
 		//   保证 FSM 采样瞬间"命令"与"地址"不会错配
 		//   （原来两者分别取自 s_ddr_wr||s_ddr_rd 和实时 cache_hi_addr，存在错配窗口）。
 		sdraddr <= s_prog_empty || !cache_owns ? 
-		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // ★修正(2026-10-10): 末位 1'b1 -> 1'b0。用户此前实测并记录"1'b0 才是消除水平偏移的那一位"(见上方 152nd 注释)。末位是 sdraddr 的最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。完整定义见本文件 152nd 注释行。
+		    // ★★★ 第 121 次修复（2026-10-11）：补偿行级相位差 12 行（=480 作者单位=960 sdraddr 单位）。
+		    //   根因（ILA 直接锁存证据，非推断）：
+		    //     · dbg_vga_sd_at_cr0（charrow==0 那一拍锁存的 sdraddr）= 0x5C400
+		    //     · 而帧缓冲起点对应值应为 0x5BFF0（= 0x40000 + 2*(0xE000-8)）
+		    //     · 差 = 0x3C0 = 960 sdraddr 单位 = 12 行   ← 屏幕第一行读到了 VRAM 第 12 行
+		    //     · 独立探针 dbg_vga_rc_at_cr0 = 0xE1E0 印证：(0xE1E0-0xE000)/40 = 12 行 ✓
+		    //   机理：rowcol 复位用 s_vga_endframe(rowcnt==479)，而显示侧帧首是 charrow==0
+		    //     (vcount==0)；两者相位差恒为 197 扫描行(≈12.3 字符行，三次抓包一致)
+		    //     ⇒ rowcol 比显示超前 12 行。
+		    //   症状对应：屏幕行 k 显示 VRAM (k+12)；一帧推进 30 行 ⇒ 屏幕 18..24 行落到
+		    //     VRAM 30..36 mod 30 = 0..6 ⇒ **末尾 7 行显示开头 7 行**（用户实测症状）。
+		    //   ★ 文本/图形共用此式 ⇒ 同一次补偿同时修好两种模式（与用户观察一致）。
+		    //   ★ 下溢安全：rowcol 最小 0xE000(57344) - 488 > 0。
+		    //   ★ 与旧的 -8(水平 16 字符相位) 是叠加关系：488 = 480(12行) + 8(水平)。
+		    //   若需回退，把 11'd488 改回 5'd8 即可（水平相位 1'b0 末位严格不动）。
+		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 			
@@ -1153,7 +1256,33 @@ dbg_ad_d1 <= sdraddr[14:5];
 			//   scraddr=0 时：{1'b0,scraddr[15:13]}=0，故 vga_ddr_row_col = offset<<13。
 			//   非文本分支取 VGA_GRAPH_ROWCOL[16:13]（128th 后回到作者值 0x8000[16:13]=4'b0100），与行1063 非文本一致。
 			//   现三处统一引用 VGA_TEXT_ROWCOL / VGA_GRAPH_ROWCOL，端口化只需改这两个 localparam。
-			if(s_vga_endframe) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
+			// ★★★★★ 第 122 次修复（2026-10-11）：rowcol 复位基准 从"取指侧" 改为"显示侧"
+			//
+			//   原: if(s_vga_endframe) ...   —— s_vga_endframe 来自 vga_ddr_row_count==479
+			//   新: if(vcount == 10'd0) ...  —— vcount 是显示侧垂直计数
+			//
+			//   根因（ILA 锁存 + 源码逐行核对）：
+			//     · vga_ddr_row_count: 由 s_vga_endscanline(vga_lnbytecount 到行末) +1，周期 480
+			//     · vcount:            由 ce && hcount==tc_heblnk(VGA 像素计数到行末) +1，周期 521
+			//       两者速率相同但**触发源不同** ⇒ 相位差恒定 197 扫描行(≈12.3 字符行)，
+			//       五次抓包实测一致(4/197/196/197/197)。
+			//     · 后果：rowcol 比显示超前 12 行 ⇒ 屏幕行 k 显示 VRAM (k+12)，
+			//       一帧推进 30 行 ⇒ 屏幕 18..24 落到 VRAM 30..36 mod 30 = 0..6
+			//       ⇒ **末尾 7 行显示开头 7 行**（用户实测症状，文本/图形皆有）。
+			//
+			//   ★ 为什么用 vcount==0 而不是 charrow==0：
+			//     charrow = vcount/16 ⇒ charrow==0 **持续 16 个扫描行**，会造成连续复位 16 次；
+			//     vcount==0 只持续 1 行 ⇒ 每帧恰好复位一次。
+			//   ★ 为什么不冲突：本分支是 if/else if 链的**最高优先级**，
+			//     即使复位那一拍同时满足 s_vga_endline（推进）条件，也只会复位、不会推进
+			//     ⇒ 天然互斥。且 vcount=0 时 vga_repln_count 位于行首，本就不会触发 endline。
+			//   ★ 只改"行序基准"，**不动地址窗口**：
+			//     先前第 121 次试过平移地址窗口(-488)，结果把读窗口推到未写入区
+			//     ⇒ 末尾 7 行变垃圾（用户实测"改了就读垃圾、不改就有旋转"）。
+			//     根因是**行序错**而非内容缺，故正确做法是修行序、保持地址窗口不变。
+			//   ★ row_count 自己的复位(s_vga_endframe，见本块下方)保持不动，两者互不干扰。
+			//   若需回退：把 vcount == 10'd0 改回 s_vga_endframe 即可。
+			if(vcount == 10'd0) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
 			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? VGA_TEXT_ROWCOL : VGA_GRAPH_ROWCOL; 
 				 else if(s_vga_endline) vga_ddr_row_col <= vga_ddr_row_col + (vgatext[0] ? 40 : {vga_offset, 1'b0});   // 146th 钳位已回退（回到"上下颠倒"基线）
 			

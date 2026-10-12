@@ -146,3 +146,33 @@
   本次把根因钉在"相位"本身，而不是继续调常量。
 - 本次分析产物：`sim/ANALYSIS-153rd/`（照片裁剪、原版对照图）。
 - 参考：`sim/TB-FLOWMODEL-102nd`（水位模型：取回=接受=推进 才能保住余量）、`KNOWN_ISSUES.md`。
+
+---
+
+## 7. 153rd-B 已落地（2026-10-12 当天，本仓库第二个提交）
+
+用户实测 153rd（8 拍）后的新情况：**画面重复消失**，只剩水平方向滚动（约 1/16 幅面），
+但暂停时也会轻微乱跳 ⇒ 说明"水位漂"确实被压制，但"映射随水位变"这个根因还在。
+⇒ 落地根治方案（§4）。改动全部在 `ddr_186.v`：
+
+| 位置 | 改动 |
+|---|---|
+| FIFO 实例（`.wrreq` / `.rst`） | 写门控加 `&& !rs_active`；复位改成 `fifo_rst \| fifo_rst_rs` |
+| 新声明块 | `rs_trig`(clk_25, `vcount==10'd482 && FifoStart`)、`rs_sync`(2FF)、`rs_cnt`(5bit 窗口计数)、`rs_active`、`fifo_rst_rs` |
+| clk_sdr always 顶部 | 重同步状态机：`rs_trig` 上升沿 → `rs_cnt=1`；窗口内 `rs_cnt` 计数到 31 后回 0 |
+| ack 记账块 | `2'b10`(VGA ack) 分支加 `if(!rs_active)` ⇒ 窗口内在途 VGA burst 的记账被忽略；`2'b01/2'b11`(cache ack) **不受影响** |
+| 行推进块 | `if(s_vga_endscanline && !rs_active)` / `else if(!rs_active)` ⇒ 窗口内冻结行推进 |
+| **删除** 122nd 的 `if(vcount == 10'd0)` 复位分支 | 它是竞态源（每帧 Δ 可能 ±1 扫描行）；改由窗口末**确定性**清零 |
+| always 块末尾 | `rs_cnt==31` 时清零 `row_col`(帧基址)/`lnbytecount`/`repln_count`/`row_count`，并把 `col_counter` 置 16(bit4=1) 挡住在途 burst 的余波 |
+| 地址公式 | `- 5'd8` → `- 5'd0`（相位已归零，-8 反而会造成每行 16 字符偏移） |
+
+**为什么 cache 不会被打断**：`cntrl0_user_command_register` / DDR FSM 全程不动；
+cache 数据不经 FIFO，写门控只挡 VGA 流；`xpm_fifo_async` 的 `wr_rst_busy/rd_rst_busy`
+本来就自动屏蔽复位期间的读写。
+
+**上板后的两个 A/B 旋钮（都是一次性标定，不再是随机量）**：
+1. 地址 `- 5'd0` vs `- 5'd8`：若文本整体平移 16 字符，就把 `- 5'd0` 改回 `- 5'd8`。
+2. 若某模式仍不齐，探针读 `dbg_vga_repln_at_fs / dbg_vga_lnb_at_fs`（帧起点锁存）即可直接看出 Δ。
+
+**回退**：`git revert <153rd-B commit>`，或把上面任一行改回原样。
+

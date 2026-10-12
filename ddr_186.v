@@ -578,52 +578,17 @@ module system
 		.locked(clk_cpu_locked)
 	);
 
-	// ============================================================================
-	// ★★★ 153rd-B 帧相位重同步（2026-10-12）
-	//   完整推导见 sim/FINDINGS-153rd-VGA显示相位=FIFO水位.md
-	//
-	//   根因：显示侧(clk_25, `vrden` 按 hcount_pan 每 16/8 像素弹一个 32bit 读字)与
-	//         取指侧(clk_sdr, `vga_ddr_row_col/vga_lnbytecount/vga_repln_count` 生成 sdraddr)
-	//         之间**只有 FIFO，没有帧/行级同步** ⇒ 屏幕第 k 行显示帧缓冲哪一行，
-	//         完全由"显示帧起点那一刻的 FIFO 水位 L"决定：Δ = L − 取指行相位 c'。
-	//           · 文本：每字符行=16 个拷贝(每拷贝 48 读字)，Δ=3 拷贝 ⇒ 每行顶部 3 排像素
-	//             取到相邻行字符（第一行取到上一帧末行 ⇒ 看起来"缺 3 排像素"）；
-	//           · 13h：每扫描行 88 读字，Δ mod 88 ≠ 0 ⇒ 行内竖缝 + 整行水平偏移。
-	//         而水位随 DDR 竞争漂移 ⇒ 画面乱跳/闪烁（暂停后 CPU 不写显存 ⇒ 水位稳 ⇒ 画面稳）。
-	//
-	//   做法：vblank 起点(vcount==482, 显示侧此时已停弹字) → 2FF 同步进 clk_sdr → 32 拍窗口内
-	//         ① 关掉 FIFO 写（丢弃在途 VGA burst 的余波，否则它会把刚清空的 FIFO 起点顶偏）；
-	//         ② 异步复位 FIFO 指针（xpm_fifo_async 的 .rst 是异步复位，需 ≥3 个慢时钟周期，
-	//            这里给 20 个 clk_sdr = 10 个 clk_25；wr_rst_busy/rd_rst_busy 已自动屏蔽读写）；
-	//         ③ 窗口末清零取指侧行相位(row_col=帧基址 / lnbytecount / repln / row_count)，
-	//            并把 col_counter 置成 16(bit4=1) 让在途 burst 的余波写不进来，
-	//            下一个 VGA ack 会把 col_counter 重新装回 15。
-	//         放开后取指从"行 0"重新灌，显示在 vcount==0 起接着弹 ⇒ **显示帧第一拍弹到的
-	//         就是取指侧行 0 的第一个字** ⇒ 屏幕到帧缓冲的映射与水位无关，缝/缺行/乱跳一起消失。
-	//
-	//   ★ 有意不动的东西：cntrl0_user_command_register / DDR FSM / cache 事务全程不参与，
-	//     所以重同步绝不会卡住 cache 填充或写回（cache 数据不经 FIFO；写门控只挡 VGA 流）。
-	//   ★ 代价：每帧 vblank 里白扔一次在途 burst（≈1µs 带宽），换来映射完全确定。
-	//   ★ 与 153rd 的关系：153rd 把 VGA 读改成 8 拍（取回=接受，省一半 DDR 带宽），
-	//     让水位不再被钉在下限附近漂；本条把"水位"这个自由度从映射里彻底消掉。
-	// ============================================================================
-	wire rs_trig = (vcount == 10'd482) && FifoStart;   // clk_25 域；vcount==482 会持续一整行
-	reg  [1:0] rs_sync = 2'b00;
-	reg  [4:0] rs_cnt  = 5'd0;                          // 0=空闲，1..32=重同步窗口
-	wire rs_active = (rs_cnt != 5'd0);
-	wire fifo_rst_rs = rs_active && (rs_cnt <= 5'd20);  // 20 个 clk_sdr = 10 个 clk_25
-
-	fifo vga_fifo
+	fifo vga_fifo 
 	(
-	  .wrclk(clk_sdr),
-	  .rdclk(clk_25),
-	  .data(sys_DOUT),
-	  //.wrreq(!crw && sys_rd_data_valid),
-	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4] && !rs_active),   // ★153rd-B: 窗口内不许写
-	  .rdreq(vrden),
-	  .q(fifo_dout32),
+	  .wrclk(clk_sdr), 
+	  .rdclk(clk_25), 
+	  .data(sys_DOUT), 
+	  //.wrreq(!crw && sys_rd_data_valid), 
+	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4]),
+	  .rdreq(vrden), 
+	  .q(fifo_dout32), 
 	  .wrusedw(fifo_wr_used_words),
-	  .rst(fifo_rst | fifo_rst_rs)                      // ★153rd-B: 窗口内异步清空
+	  .rst(fifo_rst)
 	);
 
 	VGA_SG VGA 
@@ -1189,17 +1154,6 @@ module system
 	always @ (posedge clk_sdr) begin
         sys_cmd_ack_d1 <= sys_cmd_ack;
 
-		// ★153rd-B 重同步状态机（2FF 同步 clk_25 的 rs_trig + 32 拍窗口）
-		//   rs_trig 在 vcount==482 持续一整行(800 个 clk_25)，所以必须用**边沿**触发：
-		//   rs_sync[1] && !rs_sync[2] 每帧只成立一次，窗口结束(rs_cnt 回 0)后 rs_trig 仍为高
-		//   也不会重复触发，直到下一帧 vcount==482 重新拉高。
-		rs_sync <= {rs_sync[1:0], rs_trig};
-		if(rs_active) begin
-			rs_cnt <= (rs_cnt == 5'd31) ? 5'd0 : rs_cnt + 5'd1;
-		end else if(rs_sync[1] && !rs_sync[2]) begin
-			rs_cnt <= 5'd1;
-		end
-
 // v6: page the DDR FSM actually consumed (sdraddr delayed 2 clk_sdr).
 //   sdraddr(k) = f(hiaddr(k-1)); the FSM samples sdraddr(k-1) at edge k.
 dbg_pg_d1 <= sdraddr[23:15];
@@ -1260,13 +1214,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 		    //   ★ 下溢安全：rowcol 最小 0xE000(57344) - 488 > 0。
 		    //   ★ 与旧的 -8(水平 16 字符相位) 是叠加关系：488 = 480(12行) + 8(水平)。
 		    //   若需回退，把 11'd488 改回 5'd8 即可（水平相位 1'b0 末位严格不动）。
-		    // ★★★ 153rd-B（2026-10-12）：-5'd8 → -5'd0。
-		    //   -8 是当年为了补"显示/取指行相位误差"留下的常量（129th/130th：16 字符水平偏移）。
-		    //   现在行相位由 vblank 重同步确定性地归零（显示帧第一拍 = 取指行 0 第一个字），
-		    //   若还留着 -8，扫描行起点会整体前移 8 单位 = 16 个字符 ⇒ 文本每行左侧 16 字符
-		    //   显示上一行尾巴、右侧 16 字符来自下一行。
-		    //   回退/标定：若上板看到文本整体平移，只需在 {5'd0, 5'd8} 里二选一（一次性，不再是随机量）。
-		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd0, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
+		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 			
@@ -1303,8 +1251,8 @@ dbg_ad_d1 <= sdraddr[14:5];
 		
         if (sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00) begin
             case(sys_cmd_ack)
-                2'b10: if(!rs_active) begin   // ★153rd-B: 重同步窗口内忽略 VGA ack 的记账
-                    crw <= 1'b0;
+                2'b10: begin
+                    crw <= 1'b0;	
                     col_counter <= {1'b0, max_read, 1'b1};
                     // ★ 已回退（2026-09-27）：曾把步进改成 2*(max_read+1)，但 `vga_lnbytecount`
                     //   同时是「扫描行长度判据」的计数器（见 :1064 `s_vga_endscanline <=
@@ -1313,12 +1261,12 @@ dbg_ad_d1 <= sdraddr[14:5];
                     //   ⇒ 行/帧指针跑得比实际扫描快 ⇒ **画面全黑**。
                     //   正确方向：保持本行语义不变，改为限制 FIFO 每事务接受量 = max_read+1 个半字（待验证）。
                     vga_lnbytecount <= vga_lnbytecount + max_read + 1'b1;
-                end
-                2'b01, 2'b11: crw <= 1'b1;		// cache 事务的 ack 不受重同步影响（cache 数据不经 FIFO）
+                end					
+                2'b01, 2'b11: crw <= 1'b1;		
             endcase
         end
 				
-		if(s_vga_endscanline && !rs_active) begin   // ★153rd-B: 窗口内冻结行推进（计数器统一在窗口末清零）
+		if(s_vga_endscanline) begin
 			col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
 			vga_lnbytecount <= 0;
 			s_vga_endscanline <= 1'b0;
@@ -1356,14 +1304,8 @@ dbg_ad_d1 <= sdraddr[14:5];
 			//     根因是**行序错**而非内容缺，故正确做法是修行序、保持地址窗口不变。
 			//   ★ row_count 自己的复位(s_vga_endframe，见本块下方)保持不动，两者互不干扰。
 			//   若需回退：把 vcount == 10'd0 改回 s_vga_endframe 即可。
-			// ★★★ 153rd-B（2026-10-12）：**删除 122nd 的 `if(vcount == 10'd0)` 复位分支**。
-			//   原因：它被包在 `if(s_vga_endscanline)` 里 ⇒ 能否在 vcount==0 那一窗内被取指侧的
-			//   扫描行末命中取决于当时的 DDR 延迟 ⇒ 取指帧边界是**竞态** ⇒ 每帧 Δ 可能 ±1 扫描行
-			//   地跳（这正是"乱跳"的来源）。现在行相位由 vblank 起点(vcount==482)的重同步
-			//   **确定性地**清零（见本块末尾 rs_cnt==31 处），这里再复位反而会在帧中途把相位打乱。
-			//   回退：把下面这行 if 加回来即可（git 也可直接 revert 153rd-B）。
-			// if(vcount == 10'd0) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
-			if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? VGA_TEXT_ROWCOL : VGA_GRAPH_ROWCOL;
+			if(vcount == 10'd0) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
+			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? VGA_TEXT_ROWCOL : VGA_GRAPH_ROWCOL; 
 				 else if(s_vga_endline) vga_ddr_row_col <= vga_ddr_row_col + (vgatext[0] ? 40 : {vga_offset, 1'b0});   // 146th 钳位已回退（回到"上下颠倒"基线）
 			
 			if(s_vga_endline) vga_repln_count <= 0;
@@ -1383,20 +1325,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 				repln_graph[0] <= replnreq;
 				vga_ddr_row_count <= 0;
 			end else vga_ddr_row_count <= vga_ddr_row_count + 1'b1; 
-		end else if(!rs_active) s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
-
-		// ★★★ 153rd-B：重同步窗口末拍 —— 清零取指侧行相位（放在 always 块**最后**赋值，
-		//   优先级高于上面的行推进逻辑；且此时 rs_active=1 已把行推进逻辑冻结，不会冲突）。
-		//   col_counter 置 16(5'b10000) ⇒ bit4=1 ⇒ 在途 burst 的余波写不进刚清空的 FIFO；
-		//   下一个 VGA ack 会把 col_counter 重新装回 {1'b0,max_read,1'b1}=15，之后正常灌数。
-		if(rs_active && rs_cnt == 5'd31) begin
-			vga_ddr_row_col   <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
-			vga_lnbytecount   <= 8'd0;
-			vga_repln_count   <= 4'd0;
-			vga_ddr_row_count <= 9'd0;
-			s_vga_endscanline <= 1'b0;
-			col_counter       <= 5'd16;
-		end
+		end else s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
 	end
 	
 	// ============================================================================

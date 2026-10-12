@@ -1,134 +1,193 @@
 // ============================================================================
-// kbd_gpio_rx.v — 从 PS EMIO GPIO 接收 scancode 字节 (并行 8 位 + 选通, 不经 AXI!)
+// kbd_gpio_rx.v.mouse — 从 PS EMIO GPIO 接收 scancode / 鼠标字节 (副本, 未改动原文件)
 // ----------------------------------------------------------------------------
-// 传输: 8 位并行 + 选通。发送端先写 gpio_data[7:0], 再拉高 gpio_stb;
-//   PL 在选通上升沿锁存已稳定的 8 位。
+// 来源: 由 kbd_gpio_rx.v(纯键盘版, 已上板验证可用) 扩展而来;
+//   键盘版原文件备份 = kbd_gpio_rx.v.bak.premouse, 一键回退:
+//     cp kbd_gpio_rx.v.bak.premouse kbd_gpio_rx.v
+// 本版新增: **鼠标通道**。目标是在不改 BD、不加 EMIO 引脚的前提下,
+//   让 PS 能把 PS/2 鼠标包(3 字节)送进 8042 的鼠标通路(MOBF -> IRQ12)。
 //
-// ★★★ 2026-10-10 修复(FIFO 版) ★★★
-//   历史演进与各自的真实缺陷:
-//     · 第 24 轮: `if(stb_rise) vk_valid <= 1'b1;` —— vk_valid 只有**1 拍**。
-//       而 KB_8042 的入队条件是 `if(~OBF & ~MOBF) if(vk_enable & vk_valid)`:
-//       只要送字节那一刻 8042 缓冲非空(上一条 make 的 break 还没被 BIOS 的
-//       INT09 从端口 0x60 取走), 这**一个脉冲就被整体丢弃**, 字节静默消失。
-//       症状: 丢 make ⇒ 该键不出字符; 丢 break ⇒ 按键粘住 ⇒ DOS 卡死。
-//     · 第 27 轮: 加 16 深度 FIFO + vk_ready 握手, 结果键盘**一个字符都收不到**。
-//       根因: vk_ready 里含 `~ctl_outb`。ctl_outb 是"80186 发了 0x20 读配置
-//       命令但还没读端口 0x60"的标志, 启动时一旦卡住, vk_ready 就恒 0
-//       ⇒ FIFO 永不弹出 ⇒ 链路整体堵死。
-//     · 本版 = 正确的组合:
-//         (1) vk_ready **只**用 ~OBF & ~MOBF(在 KB_8042.v 里改), 去掉 ctl_outb
-//             ⇒ 不再有"永远不接收"的死锁;
-//         (2) 保留 16 深度 FIFO ⇒ 发送端快于 8042 时也不丢字节;
-//         (3) vk_valid 为**电平**(= FIFO 非空), 配合上面的握手, 每字节恰好
-//             被取走一次(既不丢也不重发)。
-//   验证: sim/tb/vk_rx.v 用 KB_8042 入队行为的精确模型 + 慢消费者,
-//        12 字节 100% 按序收到 → RESULT: PASS。(旧版同台架会丢字节)
+// ★ 通道区分方式(默认, AUX_MODE=0): 用**选通高电平宽度**
+//     选通高电平 <  MOUSE_STB_MIN_US (默认 1ms)  => 键盘字节 (走 vk_*)
+//     选通高电平 >= MOUSE_STB_MIN_US (默认 1ms)  => 鼠标字节 (走 vm_*)
+//   为什么这样最稳:
+//     · 每个字节**独立判通道**, 没有转义序列 => 不存在"丢一个字节后整条流错位"的风险;
+//     · 判据只看"拉高->拉低"的宽度, 发端用 usleep 精确控制(键盘≈0.1ms, 鼠标≈3ms),
+//       量级差 30 倍; 且 sysfs 写延迟只会把脉冲**变长**, 是安全方向;
+//     · 老的 kbd_gpio_inject 二进制(短脉冲)完全不受影响, 仍然全部走键盘通道。
+//   ★ 代价: 字节在**选通下降沿**才入队(比原来的上升沿晚一个脉宽, 无关紧要)。
 //
-//   端口列表与旧版**完全一致**, BD 侧无需任何改动。
+// ★ 备选(AUX_MODE=1): 用第 10 根 EMIO 线 gpio_aux 做通道选择(1=鼠标)。
+//   若以后愿意把 EMIO 从 9 位扩到 10 位, 把实例化处的 AUX_MODE 改成 1 并接上即可,
+//   判定在上升沿完成, 完全不依赖时序。
+//
+// 端口: 与 kbd_gpio_rx.v 完全兼容, 只是在尾部追加 vm_ready/vm_valid/vm_data
+//   和 gpio_aux / AUX_MODE。键盘侧行为(FIFO + 看门狗)与原件逐行一致。
+//
+// 配套: KB_8042.v.mouse(虚拟鼠标应答) + ddr_186.v.mouse(接线) + mouse_gpio_inject.c
 // ============================================================================
 `timescale 1ns / 1ps
 
 module kbd_gpio_rx #(
     parameter DW    = 8,
-    parameter DEPTH = 16          // FIFO 深度(2 的幂)
+    parameter DEPTH = 16,             // FIFO 深度(2 的幂)
+    parameter CLK_MHZ = 25,           // clk 频率(MHz), 用于把 us 阈值换算成周期数
+    parameter MOUSE_STB_MIN_US = 1000,// 选通高电平 >= 该值(us) 判为鼠标字节
+    parameter AUX_MODE = 0            // 0=脉宽判通道(默认, 不改 BD); 1=gpio_aux 引脚判通道
 )(
     input  wire            clk,        // clk_cpu
     input  wire            rst_n,      // 高有效复位
     // ---- PS EMIO GPIO ----
     input  wire [DW-1:0]   gpio_data,
     input  wire            gpio_stb,
-    // ---- 与 8042 的握手 ----
+    input  wire            gpio_aux,   // AUX_MODE=1 时: 1=鼠标字节(需第 10 根 EMIO)
+    // ---- 与 8042 的握手: 键盘通道 ----
     input  wire            vk_ready,   // 1 = 8042 输出缓冲空, 可接收
-    // ---- 输出: 一个完整字节(在 clk 域) ----
     output wire            vk_valid,   // **电平**: FIFO 非空期间一直为 1
-    output wire [DW-1:0]   vk_data      // 首字直通(FWFT): 始终是队头
+    output wire [DW-1:0]   vk_data,    // 首字直通(FWFT): 始终是队头
+    // ---- 与 8042 的握手: 鼠标通道 ----
+    input  wire            vm_ready,   // 1 = 8042 输出缓冲空, 可接收
+    output wire            vm_valid,
+    output wire [DW-1:0]   vm_data
 );
+
+    // 选通宽度阈值(周期数)
+    localparam integer THR_CYC = CLK_MHZ * MOUSE_STB_MIN_US;
+    localparam [23:0]  WMAX    = 24'hFFFFFF;
 
     // ---- 输入同步 (2-FF + ASYNC_REG) ----
     (* ASYNC_REG = "TRUE" *) reg [DW-1:0] d1 = {DW{1'b0}}, d2 = {DW{1'b0}};
     (* ASYNC_REG = "TRUE" *) reg          s1 = 1'b0, s2 = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg          a1 = 1'b0, a2 = 1'b0;
 
     wire stb_rise = (s1 & ~s2);
+    wire stb_fall = (~s1 & s2);
 
-    // ---- FWFT FIFO ----
-    reg  [DW-1:0] mem [0:DEPTH-1];
-    reg  [4:0]    wptr = 5'd0;
-    reg  [4:0]    rptr = 5'd0;
+    // ---- 待分类字节(脉宽模式) ----
+    reg [DW-1:0] pend   = {DW{1'b0}};
+    reg          pend_v = 1'b0;
+    reg [23:0]   wcnt   = 24'd0;
 
-    wire empty = (wptr == rptr);
-    wire full  = (wptr[3:0] == rptr[3:0]) && (wptr[4] != rptr[4]);
+    // ---- 入队请求(每拍至多一个字节) ----
+    reg          push_v = 1'b0;
+    reg          push_m = 1'b0;
+    reg [DW-1:0] push_d = {DW{1'b0}};
 
-    // ---- ★ 2026-10-10 看门狗出队: 防止 8042 侧一旦停止消费就把整条链路堵死 ----
-    //   现象(实测): 屏幕上"正好前 16 个字符正常, 之后全乱码" —— 16 = DEPTH。
-    //   成因: 出队条件是 `!empty && vk_ready`, 而 vk_ready = ~OBF & ~MOBF。
-    //   只要 80186 停止读端口 0x60 (OBF 停在 1), FIFO 就永久填满, 之后再多的
-    //   字节全部被丢弃 —— 我加 FIFO 时把"丢字节"升级成了"死锁", 这是设计缺陷。
-    //   对策: 队头等待超过阈值就**强行弹出一个**(宁可丢一个字节, 也不能堵死)。
-    //   阈值 2^20 拍: clk_cpu 25MHz 时约 42ms, 远大于任何一次合法的忙等,
-    //   也不会在正常打字(字节间隔 3ms)时误触发。
-    reg  [19:0] wait_cnt = 20'd0;
-    wire        stalled  = (wait_cnt >= 20'hFFFFF);
+    // ---- 两个 FWFT FIFO: 键盘 / 鼠标 ----
+    reg  [DW-1:0] mem_k [0:DEPTH-1];
+    reg  [DW-1:0] mem_m [0:DEPTH-1];
+    reg  [4:0]    wptr_k = 5'd0, rptr_k = 5'd0;
+    reg  [4:0]    wptr_m = 5'd0, rptr_m = 5'd0;
+
+    wire empty_k = (wptr_k == rptr_k);
+    wire full_k  = (wptr_k[3:0] == rptr_k[3:0]) && (wptr_k[4] != rptr_k[4]);
+    wire empty_m = (wptr_m == rptr_m);
+    wire full_m  = (wptr_m[3:0] == rptr_m[3:0]) && (wptr_m[4] != rptr_m[4]);
+
+    // ---- 看门狗出队: 防止 8042 侧停止消费就把整条链路堵死 ----
+    //   现象(实测, 键盘侧): 屏幕上"正好前 16 个字符正常, 之后全乱码" —— 16 = DEPTH。
+    //   对策: 队头等待超过 2^20 拍(clk_cpu 25MHz 时约 42ms)就**强行弹出一个**
+    //   (宁可丢一个字节, 也不能堵死)。鼠标侧同样处理。
+    reg  [19:0] wait_k = 20'd0;
+    reg  [19:0] wait_m = 20'd0;
+    wire        stalled_k = (wait_k >= 20'hFFFFF);
+    wire        stalled_m = (wait_m >= 20'hFFFFF);
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            d1      <= {DW{1'b0}};
-            d2      <= {DW{1'b0}};
-            s1      <= 1'b0;
-            s2      <= 1'b0;
-            wptr    <= 5'd0;
-            rptr    <= 5'd0;
-            wait_cnt <= 20'd0;
+            d1 <= {DW{1'b0}}; d2 <= {DW{1'b0}};
+            s1 <= 1'b0; s2 <= 1'b0;
+            a1 <= 1'b0; a2 <= 1'b0;
+            pend   <= {DW{1'b0}};
+            pend_v <= 1'b0;
+            wcnt   <= 24'd0;
+            push_v <= 1'b0;
+            push_m <= 1'b0;
+            push_d <= {DW{1'b0}};
+            wptr_k <= 5'd0; rptr_k <= 5'd0;
+            wptr_m <= 5'd0; rptr_m <= 5'd0;
+            wait_k <= 20'd0; wait_m <= 20'd0;
         end else begin
             d1 <= gpio_data;
             d2 <= d1;
             s1 <= gpio_stb;
             s2 <= s1;
+            a1 <= gpio_aux;
+            a2 <= a1;
 
-            if (stb_rise && !full) begin
-                // 数据比选通早写很久, 同步后的 d2 早已稳定
-                mem[wptr[3:0]] <= d2;
-                wptr           <= wptr + 1'b1;
+            // ---- 通道判定 ----
+            push_v <= 1'b0;
+            if (AUX_MODE != 0) begin
+                // 引脚模式: 上升沿即判定, 与脉宽无关
+                if (stb_rise) begin
+                    push_v <= 1'b1;
+                    push_m <= a2;       // 数据比选通早写很久, a2/d2 均已稳定
+                    push_d <= d2;
+                end
+                pend_v <= 1'b0;
+                wcnt   <= 24'd0;
+            end else begin
+                // 脉宽模式: 上升沿锁存, 下降沿按高电平宽度判定
+                if (stb_rise) begin
+                    pend   <= d2;
+                    pend_v <= 1'b1;
+                    wcnt   <= 24'd0;
+                end else if (stb_fall) begin
+                    pend_v <= 1'b0;
+                    if (pend_v) begin
+                        push_v <= 1'b1;
+                        push_m <= (wcnt >= THR_CYC);
+                        push_d <= pend;
+                    end
+                end else if (pend_v && (wcnt != WMAX)) begin
+                    wcnt <= wcnt + 1'b1;
+                end
             end
 
-            if (empty || vk_ready) wait_cnt <= 20'd0;
-            else                  wait_cnt <= wait_cnt + 1'b1;
-
-            if (!empty && (vk_ready || stalled)) begin
-                // 时序: 本拍 vk_valid=1 且 vk_ready=1, KB_8042 在**同一个上升沿**
-                // 把 vk_data(= 队头)装进 OBF; 我们同时弹出一项 ⇒ 下一拍队头
-                // 前移 ⇒ 不会把同一字节再装一次。
-                // stalled 分支是死锁保护: 此时 8042 并没有真正收下, 这一字节会丢,
-                // 但队列得以推进, 链路不会永久失效。
-                rptr <= rptr + 1'b1;
+            // ---- 入队 ----
+            if (push_v && !push_m && !full_k) begin
+                mem_k[wptr_k[3:0]] <= push_d;
+                wptr_k             <= wptr_k + 1'b1;
             end
+            if (push_v &&  push_m && !full_m) begin
+                mem_m[wptr_m[3:0]] <= push_d;
+                wptr_m             <= wptr_m + 1'b1;
+            end
+
+            // ---- 出队(键盘) ----
+            if (empty_k || vk_ready) wait_k <= 20'd0;
+            else                     wait_k <= wait_k + 1'b1;
+            if (!empty_k && (vk_ready || stalled_k)) rptr_k <= rptr_k + 1'b1;
+
+            // ---- 出队(鼠标) ----
+            if (empty_m || vm_ready) wait_m <= 20'd0;
+            else                     wait_m <= wait_m + 1'b1;
+            if (!empty_m && (vm_ready || stalled_m)) rptr_m <= rptr_m + 1'b1;
         end
     end
 
-    assign vk_valid = ~empty;
-    assign vk_data  = mem[rptr[3:0]];
+    assign vk_valid = ~empty_k;
+    assign vk_data  = mem_k[rptr_k[3:0]];
+    assign vm_valid = ~empty_m;
+    assign vm_data  = mem_m[rptr_m[3:0]];
 
     // ========================================================================
-    // ★ ILA 探针组 A: EMIO 原始引脚(2026-10-10 恢复) ★
-    //   与 KB_8042.v 里的探针组 B 配对使用, 从上到下就是字节流过的**每一级**:
-    //     A: dbg_emio_data / dbg_emio_stb  ← PS 经 EMIO 送到 PL 的原始引脚(第 0 级)
-    //     B: dbg_vk_data                    ← 进入 8042 的字节(第 1 级)
-    //     B: dbg_s_data                     ← 装进输出缓冲的字节(第 2 级)
-    //     B: dbg_dout                       ← 80186 从端口 0x60 真正读到的(第 3 级)
-    //   哪一级开始与 0x24 不同, 故障就在那一级。PS 侧已用 `kbd_gpio_inject -V`
-    //   证明写 sysfs 再读回 9 根线逐位全对, 所以第 0 级这一组是关键对照。
-    //
-    //   电平采样而非边沿: 选通会被注入器保持约 12us(数百拍), 电平采样天然安全。
+    // ILA 探针(默认全部注释掉 —— 探针预算 200 bit 已偏紧, 需要时再开)
+    //   排查顺序建议: dbg_emio_data(第 0 级 PS 引脚) -> dbg_rx_data(进 8042 的键盘字节)
+    //                -> dbg_m_data(进 8042 的鼠标字节) -> KB_8042 内的 dbglog_*。
     // ========================================================================
-    (* mark_debug = "true", keep = "true" *) reg [7:0] dbg_emio_data = 8'h00;
-    (* mark_debug = "true", keep = "true" *) reg       dbg_emio_stb  = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg [7:0] dbg_rx_data   = 8'h00;
-    (* mark_debug = "true", keep = "true" *) reg       dbg_popped    = 1'b0;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_emio_data = 8'h00;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_rx_data   = 8'h00;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_m_data    = 8'h00;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg       dbg_push_m    = 1'b0;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [23:0]dbg_wcnt      = 24'd0;
 
     always @(posedge clk) begin
-        if (gpio_stb) dbg_emio_data <= gpio_data;   // 选通期间持续采样
-        dbg_emio_stb <= gpio_stb;
-        if (vk_valid) dbg_rx_data <= vk_data;       // 出队时锁存
-        dbg_popped   <= (!empty && vk_ready);       // 本拍是否真的交出去了
+        if (gpio_stb) dbg_emio_data <= gpio_data;
+        if (vk_valid) dbg_rx_data   <= vk_data;
+        if (vm_valid) dbg_m_data    <= vm_data;
+        dbg_push_m <= (push_v && push_m);
+        if (stb_fall) dbg_wcnt <= wcnt;
     end
 
 endmodule

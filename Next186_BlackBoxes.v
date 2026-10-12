@@ -659,30 +659,46 @@ module datamem16 (
 endmodule
 module opl3_mem (
     input  wire        clock,
-    input  wire        clock_a,
-    input  wire        clock_b,
     input  wire        wren_a,
     input  wire        wren_b,
-    input  wire [8:0]  address_a,
-    input  wire [8:0]  address_b,
-    input  wire [15:0] data_a,
+    input  wire [12:0] address_a,
+    input  wire [11:0] address_b,
+    input  wire [7:0]  data_a,
     input  wire [15:0] data_b,
-    output reg  [15:0] q_a,
+    output reg  [7:0]  q_a,
     output reg  [15:0] q_b
 );
-    reg [15:0] ram [511:0];
-    
-    // 自动兼容单时钟或独立双时钟
-    wire clk_a_real = (clock_a !== 1'bz) ? clock_a : clock;
-    wire clk_b_real = (clock_b !== 1'bz) ? clock_b : clock;
+    // 原 Quartus altsyncram 的真实布局：A 口是 8192x8 字节口，
+    // B 口是 4096x16 字口；两者共享同一片 8 KiB 存储。
+    // opl3.mem 每行一个字节，地址 0 对应 Z80 的地址 0。
+    reg [7:0] ram [0:8191];
 
-    always @(posedge clk_a_real) begin
-        if (wren_a) ram[address_a] <= data_a;
+    initial begin
+        $readmemh("opl3.mem", ram, 0, 8191);
+    end
+
+    // B 口地址是 16-bit word address：低字节在偶数 A 口地址，
+    // 高字节在奇数 A 口地址。这与原 OPL3 little-endian 数据布局一致。
+    wire [12:0] b_addr_lo = {address_b, 1'b0};
+    wire [12:0] b_addr_hi = {address_b, 1'b1};
+
+    // ★ Xilinx 移植修正（2026-10-11，已实测）：
+    //   原 Quartus altsyncram 是"异步读 + 真双口"（outdata_reg=UNREGISTERED），
+    //   7 系列做不到：BRAM 必须寄存读、LUTRAM 不支持双写口。
+    //   组合读会让 Vivado 报 [Synth 8-2913] Unsupported Dual Port Block-RAM template。
+    //   改为寄存读后推断为 2×RAMB36E1（OOC 综合验证 0 error）。
+    //   代价：A 口读延迟由 0 拍变 1 拍（B 口原本 address_reg_b=CLOCK0 即 1 拍）。
+    always @(posedge clock) begin
+        if (wren_a)
+            ram[address_a] <= data_a;
         q_a <= ram[address_a];
     end
-    
-    always @(posedge clk_b_real) begin
-        if (wren_b) ram[address_b] <= data_b;
-        q_b <= ram[address_b];
+
+    always @(posedge clock) begin
+        if (wren_b) begin
+            ram[b_addr_lo] <= data_b[7:0];
+            ram[b_addr_hi] <= data_b[15:8];
+        end
+        q_b <= {ram[b_addr_hi], ram[b_addr_lo]};
     end
 endmodule

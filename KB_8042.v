@@ -55,6 +55,33 @@
 //////////////////////////////////////////////////////////////////////////////////
 `timescale 1ns / 1ps
 
+// ============================================================================
+// KB_8042.v.mouse — KB_8042.v 的副本, 新增**虚拟鼠标**(PS EMIO GPIO 注入)
+// ----------------------------------------------------------------------------
+// 为什么要改这一层(根因, 从 BIOS_Next186.asm 反推得到):
+//   1) 原码在 vk_enable=1(虚拟键盘)时, 0x60 口写入分支仍然执行 `wr_mouse <= next_mouse`,
+//      也就是 **BIOS 发 0xD4+鼠标命令时, 8042 仍然去驱动物理 PS/2 鼠标**。
+//      物理鼠标没接 => PS2Interface 把 clk 拉低后等不到设备时钟 => data_in_ready 永久为 0
+//      => IBF(状态口 bit1) 永久为 1 => BIOS 的 sendps2byte 等到超时 => 走 nomouse 分支
+//      => 屏幕上看不到 "PS2 Mouse detected", 鼠标通路彻底死掉。
+//   2) 而且虚拟通路**根本不产生任何应答**(没有 0xFA/0xAA/0x00), 就算 IBF 通了也检测不到。
+//   本副本同时修掉这两点: 虚拟模式下不碰物理 PS/2, 并且**代答鼠标命令**。
+//
+// 鼠标初始化序列(从 BIOS_Next186.asm 第 352~376 行逐条读出来的, 不是猜的):
+//     out 64h, 0A8h        ; 使能鼠标口
+//     mousei0: getps2byte  ; 排空残留字节
+//     mov ah, 0FFh; CF=1   ; 复位鼠标 -> sendps2byte 写 0D4h 到 64h, 再写 FFh 到 60h
+//     sendcmd              ; 等 0FAh  ACK
+//     getps2byte -> AAh    ; BAT
+//     getps2byte -> 00h    ; 鼠标 ID(0 = 标准 3 字节包鼠标)
+//     => 三项都对才置 EquipmentWord bit2, 打印 "PS2 Mouse detected"
+//   之后 DOS 驱动通过 INT15h/C2h(或直驱 8042) 发 0F4h 打开数据上报,
+//   鼠标包经 MOBF -> I_MOUSE -> IRQ12(INT 74h)进 BIOS 的 int74 拼包。
+//
+// 新增端口: vm_enable / vm_valid / vm_data / vm_ready(与 vk_* 完全对称)。
+//   键盘与鼠标**共用** s_data 缓冲, 用 MOBF 区分来源(状态口 bit5),
+//   读 0x60 时两者一起清 —— 与原码对物理鼠标的处理一致。
+// ============================================================================
 module KB_Mouse_8042(
     input CS,
 	 input WR,
@@ -73,7 +100,12 @@ module KB_Mouse_8042(
 	 input      vk_enable,      // 1 = 启用虚拟键盘(屏蔽物理PS/2并代答自检)
 	 input      vk_valid,       // 1 拍: vk_data 为一个待注入字节
 	 input [7:0]vk_data,
-	 output     vk_ready        // 1 = 输出缓冲空, 可接收一个字节
+	 output     vk_ready,       // 1 = 输出缓冲空, 可接收一个字节
+	 // ---- 虚拟鼠标(同一组 EMIO GPIO, 由接收端按通道分流后送来) ----
+	 input      vm_enable,      // 1 = 启用虚拟鼠标(屏蔽物理PS/2鼠标并代答命令)
+	 input      vm_valid,       // 电平: vm_data 为一个待注入的鼠标字节
+	 input [7:0]vm_data,
+	 output     vm_ready        // 1 = 输出缓冲空, 可接收一个鼠标字节
     );
 	 
 //	status bit5 = MOBF (mouse to host buffer full - with OBF), bit4=INH, bit2(1-initialized ok), bit1(IBF-input buffer full - host to kb/mouse), bit0(OBF-output buffer full - kb/mouse to host)
@@ -89,6 +121,37 @@ module KB_Mouse_8042(
 	reg       vk_out_v = 1'b0;
 	// 0xFF 复位 -> FA,AA ; 0xF2 读ID -> FA,AB,83 ; 其它 -> FA
 	localparam VK_IDLE = 3'd0, VK_ACK = 3'd1, VK_BAT = 3'd2, VK_ID1 = 3'd3, VK_ID2 = 3'd4;
+
+	// ================= 虚拟鼠标(PS EMIO GPIO, 与键盘共用 8 位+选通) =================
+	// 与 vk_* 完全对称: 收到命令 -> 置 vm_cmd_seen -> 应答序列发生器逐拍吐出字节。
+	reg [7:0] vm_cmd = 8'h00;        // 最近收到的鼠标命令(BIOS 经 0xD4 送来的那一个字节)
+	reg       vm_cmd_seen = 1'b0;
+	reg [3:0] vm_state = 4'd0;
+	reg [7:0] vm_out = 8'h00;
+	reg       vm_out_v = 1'b0;
+	// 0xFF 复位 -> FA,AA,00 ; 0xF2 读ID -> FA,00 ; 0xE9 状态 -> FA,20,02,64
+	// 0xEB 读数据 -> FA,08,00,00 ; 其它 -> FA
+	localparam VM_IDLE = 4'd0, VM_BAT = 4'd1, VM_BATID = 4'd2, VM_ID = 4'd3,
+	           VM_ST1 = 4'd4, VM_ST2 = 4'd5, VM_ST3 = 4'd6,
+	           VM_PKT0 = 4'd7, VM_PKT1 = 4'd8, VM_PKT2 = 4'd9;
+	// ★ 数据上报使能: 真实鼠标只有在收到 0xF4 之后才主动发包。
+	//   POST 期间 BIOS 要严格按 FA->AA->00 的顺序取字节, 此时若灌进移动包,
+	//   BAT/ID 就会被"顶掉" => 检测不到鼠标。所以注入必须等 0xF4 之后才放行。
+	//   (想在上板第一时间做连通性冒烟测试, 可把初值改成 1'b1。)
+	reg vm_reporting = 1'b0;
+	// ★ 鼠标应答字节"已被装进输出缓冲"的脉冲(由主 always 块驱动, 应答器只读)。
+	//   存在的理由: 若应答器自己按固定节拍吐 FA->AA->00, 那么 FA 装进缓冲后
+	//   OBF/MOBF 立刻为 1, 下一拍的 AA 就因为 `if(~OBF & ~MOBF)` 不成立而**被丢掉**
+	//   (实测键盘自检就是这么丢的: 单拍脉冲 vs 缓冲握手, 天然竞态)。
+	//   键盘能凑合是因为 IRQ1 + int09 对序列不敏感; **鼠标初始化严格要求
+	//   FA -> AA -> 00 三次都收到**, 少一个就走 nomouse。所以这里改成
+	//   "电平 + 取走确认": vm_out_v 一直挂着, 收到 m_taken 才吐下一个字节。
+	reg m_taken = 1'b0;
+	// ★ 应答器"已开始应答某条命令"的脉冲(由应答器驱动, 主块只用来清 vm_cmd_seen)。
+	//   用它的原因: 若直接 `if(vm_out_v) vm_cmd_seen <= 0`, 那么"上一条应答还没发完
+	//   就来了新命令"时, 新命令会在下一拍被无条件清掉 => 命令丢失。改成按 ack 清,
+	//   新命令会一直挂到当前序列发完再被应答。
+	reg vm_cmd_ack = 1'b0;
 
 	/* ★ ILA 探针 */
 	reg wcfg = 1'b0;	// write config byte
@@ -126,6 +189,9 @@ module KB_Mouse_8042(
 	//   链路永久堵死(第 27 轮就是这么坏掉的)。而 OBF 空下来这件事是必然的
 	//   (DOS/BIOS 一定会来读端口 0x60), 所以只用 ~OBF & ~MOBF 即可, 不会死锁。
 	assign vk_ready = ~OBF & ~MOBF;
+	// 鼠标通道用的是**同一个**输出缓冲(s_data + MOBF 标记), 所以"可接收"条件与键盘一致。
+	// 注意: 这里只做流量控制; 是否真正接收还要看 vm_reporting(见下方入队优先级)。
+	assign vm_ready = ~OBF & ~MOBF;
 
 	/* ★★★ ILA 探针组 B: 8042 输出缓冲 —— 三层字节对账(2026-10-10 恢复) ★★★
 	   判据(干净重启后实测的错映射):
@@ -145,16 +211,16 @@ module KB_Mouse_8042(
 	         (0=s_data正常数据, 1=cmd状态口, 2=ctl_outb 命令字节)
 	   —— 之前怀疑过 dout 的三选一 mux 会把数据口读走, 这个信号能一次性证实或排除。
 	*/
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_vk_data = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_s_data  = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_dout    = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [1:0] dbg_sel_dout = 2'd0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_vk_valid = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_vk_ready = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_OBF      = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg       dbg_ctl_outb = 1'b0;
-	// 该字节是由哪条通路装进缓冲的: 0=vk_valid(注入) 1=vk_out_v(自检应答) 2=kb_data(物理键盘) 3=mouse_data(鼠标)
-	(* mark_debug = "true", keep = "true" *) reg [1:0] dbg_src     = 2'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_vk_data = 8'h00;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_s_data  = 8'h00;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_dout    = 8'h00;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [1:0] dbg_sel_dout = 2'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg       dbg_vk_valid = 1'b0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg       dbg_OBF      = 1'b0;
+	// 该字节是由哪条通路装进缓冲的: 0=vk_valid(键盘注入) 1=vk_out_v(键盘自检应答)
+	//                              2=kb_data(物理键盘)    3=mouse_data(物理鼠标)
+	//                              4=vm_out_v(鼠标命令应答) 5=vm_valid(鼠标移动包)
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [2:0] dbg_src     = 3'd0;
 
 	// ========================================================================
 	// ★ 事件日志(2026-10-10): 16 条循环记录, 取代"靠触发条件碰运气"
@@ -173,11 +239,38 @@ module KB_Mouse_8042(
 	//         就能看到最近 16 次入队的 {字节, 来源} —— 完全不需要对准时机。
 	// ========================================================================
 	localparam DBGLOG_N = 16;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbglog_data [0:DBGLOG_N-1];
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbglog_src  [0:DBGLOG_N-1];
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbglog_seq  [0:DBGLOG_N-1];
-	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbglog_wp   = 4'd0;
-	(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_evt_cnt  = 16'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbglog_data [0:DBGLOG_N-1];
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [5:0]  dbglog_src  [0:DBGLOG_N-1];
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [5:0]  dbglog_seq  [0:DBGLOG_N-1];
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]  dbglog_wp   = 4'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_evt_cnt  = 16'd0;
+
+	// ========================================================================
+	// ★★ 第 113 次：进 BIOS 那一刻的字节身份锁存（本次调查的核心探针）
+	//
+	//  为什么需要它 —— 一条决定性的纯离线推论：
+	//    BIOS KeyCode 表不是只到 row26。完整 dump（8KB 映像）显示 row 27 起还有
+	//    功能键 / 数字键 / 符号键，其中：
+	//        row 51 @0x1D12 首字节 = 0x34 = '4'   ← 屏幕上 j 显示的那个字符
+	//        row 52 @0x1D1A 首字节 = 0x33 = '3'
+	//    所以「j 显示成 '4'」对应的行号是 **51**，不是 20。
+	//    但 ILA 实测 xlat 输出是 0x14(=20) 完全正确 ⇒ 20 行怎么算出 51 行的字符？
+	//    ⇒ 只有一种可能：**进 BIOS 的扫描码不是 0x24**，而是某个映射到 row 51 的码。
+	//    （对照 KeyIndex 表：0x05→0x34 即行 52；51 的来源需实测。）
+	//
+	//  这三个探针直接回答"BIOS 到底收到了什么字节"，一步分开两种可能：
+	//    dbg_last_byte : 最后一次装进输出缓冲的字节（期望 0x24）
+	//    dbg_last_src  : 它的来源通路（0=注入 1=自检应答 2=物理键盘 3=鼠标）
+	//    dbg_take_pulse: 80186 从端口 0x60 取走缓冲那一拍的脉冲
+	//    dbg_take_byte : 被取走的字节（dout）——与 dbg_last_byte 必须相等
+	// ========================================================================
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_last_byte  = 8'h00;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [2:0]  dbg_last_src   = 3'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_take_pulse = 1'b0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_take_byte  = 8'h00;
+	// 字节指纹: 连续 3 次装缓冲若都拿到同一个"意外值"，就锁住它供 ILA 直接触发
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_bad_byte   = 8'h00;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_bad_cnt    = 8'd0;
 
 	// 日志写入点: 每次真正把字节装进输出缓冲时调用(宏而非 task, Verilog-2001
 	// 不允许在 always 块里调用 task)。
@@ -188,19 +281,45 @@ module KB_Mouse_8042(
 			dbglog_seq [dbglog_wp] <= dbg_evt_cnt[5:0];                             \
 			dbglog_wp <= dbglog_wp + 4'd1;                                          \
 			dbg_evt_cnt <= dbg_evt_cnt + 16'd1;                                     \
+			dbg_last_byte <= (DATA_);                                               \
+			dbg_last_src  <= (SRC_);                                                \
 		end
 
 	always @(posedge clk) begin
 		// vk_data 的"锁存值": vk_valid 为 1 的那一拍, 记下接收端发出的字节
 		if (vk_valid) dbg_vk_data <= vk_data;
 		dbg_vk_valid <= vk_valid;
-		dbg_vk_ready <= vk_ready;
 		// s_data 每次装缓冲时同步一次, 抓到的是"真正被 80186 读走的那一字节"
 		dbg_s_data   <= s_data;
 		dbg_dout     <= dout;
 		dbg_sel_dout <= cmd ? 2'd1 : (ctl_outb ? 2'd2 : 2'd0);
 		dbg_OBF      <= OBF;
-		dbg_ctl_outb <= ctl_outb;
+		// ★ 第 113 次: BIOS 取走输出缓冲那一拍的脉冲 + 它取到的字节。
+		//   ⚠ 必须整个信号只由**这一个** always 块驱动, 写成两个块(一个置 0
+		//     一个置 1)会触发 DRC MDRV-1 多驱动。因此这里用与主 always 块
+		//     读数据口分支完全相同的条件来重建该时刻:
+		//         CS & ~cmd & ~ctl_outb & (OBF | MOBF)
+		//   ⚠ 加上 (OBF|MOBF) 限定是必须的: BIOS 轮询状态口后会连续多次读
+		//     0x60, 若只判 CS&~cmd&~ctl_outb 则脉冲会连成多拍高电平,
+		//     ILA 上根本无法定位"到底哪一拍取走的"(台架已实测复现)。
+		dbg_take_pulse <= 1'b0;
+		if (CS && !cmd && !ctl_outb && (OBF || MOBF)) begin
+			dbg_take_pulse <= 1'b1;
+			dbg_take_byte  <= OBF ? s_data : mouse_data;
+		end
+		// 意外字节指纹: 连续 3 次装缓冲都拿到同一个值, 就把它锁住。
+		// 预期压 j 时 dbg_bad_byte 恒为 0(什么都不该锁);
+		// 若它停在某个非 0 值上 ⇒ 那个值就是被换进来的"冒充字节", 可直接当触发条件。
+		if (dbg_evt_cnt[1:0] == 2'b01) begin
+			if (dbg_last_byte != 8'h00) begin
+				if (dbg_last_byte == dbg_bad_byte)
+					dbg_bad_cnt <= dbg_bad_cnt + 8'd1;
+				else begin
+					dbg_bad_byte <= dbg_last_byte;
+					dbg_bad_cnt  <= 8'd1;
+				end
+			end
+		end
 	end
 
 	// 自检应答序列发生器(与 vk_cmd_seen 置位同处一个 always 块, 避免多驱动)
@@ -221,6 +340,47 @@ module KB_Mouse_8042(
 			VK_ID2:  begin vk_out <= 8'h83; vk_out_v <= 1'b1; vk_state <= VK_IDLE; end
 			default: vk_state <= VK_IDLE;
 		endcase
+	end
+	
+	// ---- 虚拟鼠标: 命令应答序列发生器(与 vm_cmd_seen 置位分开, 避免多驱动) ----
+	//  序列严格照 BIOS_Next186.asm 的期望来定:
+	//    0xFF 复位   -> FA, AA, 00     (BIOS 取 AA 判 BAT, 再取 00 判 ID)
+	//    0xF2 读 ID  -> FA, 00         (INT15h C2 的 gettype 用它定 3/4 字节包)
+	//    0xE9 状态   -> FA, 20, 02, 64 (stream 模式/已使能/1:1, 4 点/mm, 100 次/s)
+	//    0xEB 读数据 -> FA, 08, 00, 00 (远程模式下的一个包; 实际驱动多用 stream 模式)
+	//    其它(0xF3 采样率 / 0xE8 分辨率 / 0xE6/E7 缩放 / 0xF4/F5/F6) -> 只回 FA
+	//  ★ 0xF3/0xE8 的**参数字节**是 BIOS 用下一次 sendcmd 单独发的(见 asm 的 send2c/
+	//    send1c), 走的是同一条 0xD4 通路, 因此同样落到"其它 -> FA", 不需要额外状态。
+	always @(posedge clk) begin
+		vm_cmd_ack <= 1'b0;
+		if (m_taken & vm_out_v) begin
+			// 上一字节已被装进输出缓冲 -> 吐序列里的下一个字节(或结束)
+			case (vm_state)
+				VM_BAT:   begin vm_out <= 8'hAA; vm_out_v <= 1'b1; vm_state <= VM_BATID; end
+				VM_BATID: begin vm_out <= 8'h00; vm_out_v <= 1'b1; vm_state <= VM_IDLE;  end
+				VM_ID:    begin vm_out <= 8'h00; vm_out_v <= 1'b1; vm_state <= VM_IDLE;  end
+				VM_ST1:   begin vm_out <= 8'h20; vm_out_v <= 1'b1; vm_state <= VM_ST2;   end
+				VM_ST2:   begin vm_out <= 8'h02; vm_out_v <= 1'b1; vm_state <= VM_ST3;   end
+				VM_ST3:   begin vm_out <= 8'h64; vm_out_v <= 1'b1; vm_state <= VM_IDLE;  end
+				VM_PKT0:  begin vm_out <= 8'h08; vm_out_v <= 1'b1; vm_state <= VM_PKT1;  end
+				VM_PKT1:  begin vm_out <= 8'h00; vm_out_v <= 1'b1; vm_state <= VM_PKT2;  end
+				VM_PKT2:  begin vm_out <= 8'h00; vm_out_v <= 1'b1; vm_state <= VM_IDLE;  end
+				VM_IDLE:  begin vm_out_v <= 1'b0; end          // 序列发完
+				default:  begin vm_out_v <= 1'b0; vm_state <= VM_IDLE; end
+			endcase
+		end else if (vm_state == VM_IDLE && vm_enable && vm_cmd_seen) begin
+			// 新命令 -> 第一字节永远是 ACK
+			vm_cmd_ack <= 1'b1;
+			vm_out   <= 8'hFA;
+			vm_out_v <= 1'b1;
+			case (vm_cmd)
+				8'hff: vm_state <= VM_BAT;    // reset: AA, 00
+				8'hf2: vm_state <= VM_ID;     // get ID: 00
+				8'he9: vm_state <= VM_ST1;    // status: 3 bytes
+				8'heb: vm_state <= VM_PKT0;   // read data: 3 bytes
+				default: vm_state <= VM_IDLE; // 其它命令只回 ACK
+			endcase
+		end
 	end
 	
 	PS2Interface Keyboard
@@ -257,6 +417,8 @@ module KB_Mouse_8042(
 	
 	always @(posedge clk) begin
 		CPU_RST <= 0;
+		// ★ 鼠标应答"已取走"脉冲: 只由本块驱动(应答器只读它, 避免 MDRV-1 多驱动)
+		m_taken <= 1'b0;
 		if(~kb_data_in_ready) wr_kb <= 1'b0;
 		if(~kb_data_out_ready) rd_kb <= 1'b0;
 		if(~mouse_data_in_ready) wr_mouse <= 0;
@@ -273,12 +435,35 @@ module KB_Mouse_8042(
 			//   而 vk_valid 现在是电平, 会一直保持到被取走, 让路没关系。
 			//   若把 vk_valid 排在前面, 一个待发扫描码就会把 ACK 挤掉,
 			//   BIOS 会一直等 AckReceived ⇒ 键盘命令卡死。
-			//   下面四处 dbglog_push 就是"字节真正入队"的时刻, 也是日志的唯一写入点。
+			//   下面六处 dbglog_push 就是"字节真正入队"的时刻, 也是日志的唯一写入点。
 			if(vk_enable & vk_out_v) begin
 				OBF <= 1'b1;
 				s_data <= vk_out;
-				dbg_src <= 2'd1;
-				`DBGLOG_PUSH(vk_out, 2'd1);
+				dbg_src <= 3'd1;
+				`DBGLOG_PUSH(vk_out, 3'd1);
+			end else if(vm_enable & vm_out_v) begin
+				// ★ 鼠标命令应答(FA/AA/00/状态包): 与键盘自检应答同级, 必须优先于数据,
+				//   因为 BIOS 的 sendcmd 在**死等**这个 0xFA(等到 vblank 超时就判失败)。
+				//   用 MOBF 标记来源(真实硬件: 鼠标数据走辅助口, 状态口 bit5=1)。
+				//   vm_out_v 是**电平**(不是单拍脉冲), 收到 m_taken 才吐下一字节 ——
+				//   见下面应答器的说明: 单拍脉冲会因为"缓冲还没被 CPU 取走"而丢字节。
+				MOBF <= 1'b1;
+				s_data <= vm_out;
+				dbg_src <= 3'd4;
+				`DBGLOG_PUSH(vm_out, 3'd4);
+				m_taken <= 1'b1;
+			end else if(vm_enable & vm_valid & vm_reporting) begin
+				// ★ 鼠标移动包: 只在 0xF4 打开数据上报之后才放行(理由见 vm_reporting 注释)。
+				//   只置 MOBF, **不置 OBF**: OBF 为 1 会同时触发 IRQ1, BIOS 的 int09
+				//   会把移动包当成键盘扫描码解释(0x08..0x0F 正好是数字/退格等, 且没有
+				//   对应的 break => 按键粘死)。I_MOUSE = cmdbyte[1] & MOBF => IRQ12。
+				MOBF <= 1'b1;
+				s_data <= vm_data;
+				dbg_src <= 3'd5;
+				`DBGLOG_PUSH(vm_data, 3'd5);
+			// ★ 未开数据上报(还没收到 0xF4)时收到的鼠标字节在这里**不出现**:
+			//   它既不会被装进缓冲, 也不会挡住下面的键盘分支 —— 接收端看到 vm_ready
+			//   就会弹出, 所以"不处理"就等于丢弃, 且 FIFO 不会堵(键盘侧踩过的坑)。
 			end else if(vk_enable & vk_valid) begin
 				OBF <= 1'b1;
 				s_data <= vk_data;
@@ -307,6 +492,11 @@ module KB_Mouse_8042(
 			end
 		
 		if(kb_shift | mouse_shift) wr_data <= {1'b1, wr_data[9:1]};
+
+		// ★ 鼠标命令标志: 只在"应答器真的开始应答了"时才清(这样序列未完时来的新命令
+		//   不会被吃掉)。而且放在**写命令之前**: 同一 always 块内对同一 reg 的最后一次
+		//   赋值生效, 所以本拍刚写入的命令也不会被这条清掉。
+		if (vm_cmd_ack) vm_cmd_seen <= 1'b0;
 		
 		if(CS) 
 			if(WR)
@@ -325,15 +515,31 @@ module KB_Mouse_8042(
 					if(wcfg) cmdbyte <= {din[5:4], din[1:0]};
 					else begin
 						next_mouse <= 0;
-						wr_mouse <= next_mouse;
-						if(vk_enable) begin
-							// 虚拟键盘: 不发给物理 PS/2, 记录命令以便代答自检
-							wr_kb <= 1'b0;
-							if(!next_mouse) begin
+						if(vk_enable | vm_enable) begin
+							// ★ 虚拟模式: 键盘口和鼠标口都**不驱动物理 PS/2**。
+							//   原码这里无条件 `wr_mouse <= next_mouse`, 于是 BIOS 的
+							//   0xD4+命令会去驱动一个根本不存在的物理鼠标: PS2Interface
+							//   拉低时钟后等不到设备时钟, data_in_ready 永久为 0
+							//   => IBF 永久为 1 => BIOS 的 sendps2byte 超时 => nomouse。
+							//   这是"鼠标检测不到"的第一层根因, 这里直接掐掉。
+							wr_kb    <= 1'b0;
+							wr_mouse <= 1'b0;
+							if(next_mouse) begin
+								// 0xD4 之后的字节 = 鼠标命令 -> 交给虚拟鼠标应答器
+								if(vm_enable) begin
+									vm_cmd      <= din;
+									vm_cmd_seen <= 1'b1;
+									// 0xF4 使能数据上报 / 0xF5 关闭 / 0xF6 恢复默认(关闭)
+									if(din == 8'hf4)      vm_reporting <= 1'b1;
+									else if(din == 8'hf5) vm_reporting <= 1'b0;
+									else if(din == 8'hf6) vm_reporting <= 1'b0;
+								end
+							end else if(vk_enable) begin
 								vk_cmd      <= din;
 								vk_cmd_seen <= 1'b1;
 							end
 						end else begin
+							wr_mouse <= next_mouse;
 							wr_kb <= ~next_mouse;
 							wr_data <= {~^din, din, 1'b0};
 						end
@@ -341,7 +547,7 @@ module KB_Mouse_8042(
 					wcfg <= 0;
 				end
 			else 	// read data
-				if(~cmd) begin	
+				if(~cmd) begin
 					ctl_outb <= 1'b0;
 					if(!ctl_outb) begin
 						OBF <= 1'b0;

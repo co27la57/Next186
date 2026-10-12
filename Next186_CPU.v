@@ -1829,35 +1829,36 @@ function [5:0]ICODE;
 endfunction
 
 // ==========================================
-// ★ CPU 内部诊断探针
-// ==========================================
+// ★ CPU 内部诊断探针（第 113 次精简）
+// =========================================
+//  背景: 故障已收敛到"进 BIOS 的扫描码不对"(见文件末尾第 113 次说明)，
+//        因此 CPU 内部的取指/译码/中断/逃逸类探针对当前判读已无信息量,
+//        全部摘掉 mark_debug 属性(声明保留, 避免 Synth 8-36)。
+//        需要时把对应行的 mark_debug 加回即可。
 // 流水线状态
-(* mark_debug = "true", keep = "true" *) wire [6:0]  dbg_STAGE     = STAGE;
-(* mark_debug = "true", keep = "true" *) wire        dbg_IFETCH    = IFETCH;
+/*(* mark_debug = "true", keep = "true" *)*/ wire [6:0]  dbg_STAGE     = STAGE;
+/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_IFETCH    = IFETCH;
 reg        dbg_HALT;
 //
 //// 当前执行的指令
-(* mark_debug = "true", keep = "true" *) wire [7:0]  dbg_FETCH0    = FETCH[0];
-(* mark_debug = "true", keep = "true" *) wire [5:0]  dbg_ICODE1    = ICODE1;
+/*(* mark_debug = "true", keep = "true" *)*/ wire [7:0]  dbg_FETCH0    = FETCH[0];
+/*(* mark_debug = "true", keep = "true" *)*/ wire [5:0]  dbg_ICODE1    = ICODE1;
 //
 //// 指令指针
 reg [15:0] dbg_CS;
 reg [15:0] dbg_IP;
 reg [20:0] dbg_IADDR;
 
-// ★★ 2026-10-10：给这三个加 mark_debug，用于定位键盘映射失败的卡死指令。
-//   背景：抓包显示失败键(KeyCode 行号 >= 17)会让 CPU 停在 FETCH0=A3
-//         (8086 的 MOV AX,moffs16) 上 134 拍不动，而正常键很快 CF=IRET 返回。
-//         之前只有指令字节、没有地址，无法确定这条指令位于何处、bx 算成了什么。
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_CS_probe;
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_IP_probe;
-(* mark_debug = "true", keep = "true" *) reg [20:0] dbg_IADDR_probe;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_CS_probe;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_IP_probe;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [20:0] dbg_IADDR_probe;
 //
 //// 复位/中断状态
-(* mark_debug = "true", keep = "true" *) wire        dbg_SRST      = SRST;
-(* mark_debug = "true", keep = "true" *) wire        dbg_SINTR     = SINTR;
-(* mark_debug = "true", keep = "true" *) wire        dbg_IACK      = IACK;
-(* mark_debug = "true", keep = "true" *) wire        dbg_IRQ       = IRQ;
+/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_SRST      = SRST;
+/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_SINTR     = SINTR;
+/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_IACK      = IACK;
+/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_IRQ       = IRQ;
+
 //
 //// 内存/端口请求
 reg        dbg_MREQ;
@@ -1877,18 +1878,18 @@ reg        dbg_IORQ;
     //     （CS=0xF000 且 IP<0xFC00）= 崩点本身；并附"最后一次在代码窗内的 IP + 当时译码的 opcode"
     //     = 肇事指令。开头用 okcnt>=32 做门限，避免上电瞬间的瞬态误触发。
     reg        dbg_boot_seen = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_esc_seen  = 1'b0;
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_ip    = 16'd0;
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_esc_cs    = 16'd0;
-    (* mark_debug = "true", keep = "true" *) reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
-    (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
+    /*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_esc_seen  = 1'b0;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_esc_ip    = 16'd0;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_esc_cs    = 16'd0;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
     // ★ 崩点时的 BX —— 键盘查表正是靠 BX 定位 KeyCode 行, 抓这个最直接
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_bx   = 16'd0;
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
-    (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_bx   = 16'd0;
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
+    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
     reg [7:0]  dbg_bfe_cnt   = 8'd0;  // 对 0xFFBFE 的数据读次数（预期 3）
     reg        dbg_stale_popret = 1'b0; // pop(0xFFBFC)→ret(0xFFBFE) 读到同一数据
     reg [15:0] dbg_din_h1 = 16'd0;
@@ -1947,39 +1948,49 @@ reg        dbg_IORQ;
         dbg_IP_probe   <= IP;
         dbg_IADDR_probe<= IADDR;
     end
-(* mark_debug = "true", keep = "true" *) wire        dbg_WR        = WR;
+/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_WR        = WR;
 
 // ========================================================================
-// ★ 2026-10-10：XLAT(xlat) 取值探针 —— 定位键盘映射错位的关键
+// ★★ 2026-10-10（第 112 次）：抓 KeyCode 读指令的现场 —— 定位"j→4"的根因
 //
-//   背景：BIOS 的 int09 查表段已离线反汇编核对，机器码与源码完全一致：
-//       F000:E4F8  mov  bx,0FB09h        ; &KeyIndex
-//       F000:E4FB  xlat cs:[bx]           ; AL = KeyIndex[扫描码]  ← 行号
-//       F000:E4FD  xor  bx,bx
-//       ...        cmp  al,1Ah(26)        ; 行号 >26 走 NumLock 分支
-//       F000:E536  mov  ax,cs:[bx+0FB7Ah] ; 取字符
-//   台架逐指令模拟这段源码，18 个键（含板子上失败的 j/k/l/g/u）全部正确。
-//   所以唯一没被验证的一环就是【xlat 到底算出了什么】。
+//   ILA 实测已排除的假设（都有硬数据，不是猜）：
+//     ① xlat 通路正常：AL 0x24 → 0x14(=20=KeyIndex[0x24]) 精确正确
+//     ② shl ax,3 正常：0x14<<3 = 0xA0，与 ILA 看到的 AL=0xA0 吻合
+//     ③ 表数据正确：板端 devmem 扫 KeyCode 表 208 字节，row20 首字节=0x6A('j')
+//     ④ 16 位对齐读正确：row20 @0x080FFC1A 读回 0x246A
+//     ⑤ "读偏 N 字节"被穷举排除：全 8KB 映像内不存在任何 delta 使
+//        row20→0x34 且 row21→0x40 同时成立（0 命中）
+//     ⑥ 0x34 根本不在 KeyCode 表 208 字节内 ⇒ 不是"读到相邻字符"
 //
-//   dbg_xlat_pre : 执行 xlat 那一拍的 AL（= 扫描码，应等于我们注入的值）
-//   dbg_xlat_post: 下一拍的 AL（= xlat 结果，应等于 BIOS KeyIndex 里的行号）
-//   dbg_xlat_ip  : xlat 的指令地址（用于确认抓到的是 int09 里那一条）
-//   dbg_xlat_cnt : 累计触发次数（确认确实抓到了，而不是一直在空跑）
+//   ⇒ 只剩两种可能，一次抓完即可分开：
+//      (a) BX 不对  → 读到了别的地址（表外数据）
+//      (b) BX 对但 DIN 错 → 读通路/数据总线在该地址返回错数据
+//
+//   dbg_kc_bx   : 读指令执行时的 BX（期望 0x00A0 = 20*8）
+//   dbg_kc_din  : 该拍 CPU 实际收到的 16 位数据（期望 0x246A）
+//   dbg_kc_addr : 该拍总线物理地址（期望 0x080FFC1A）
+//   dbg_kc_ip   : 读指令的 IP（期望 0xE536 = 映像偏移 0x0536）
+//   dbg_kc_arm  : 置位脉冲，标记"这一拍就是那条读"，用于精确对齐
 // ========================================================================
-(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_xlat_pre  = 8'h00;
-(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_xlat_post = 8'h00;
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_xlat_ip   = 16'd0;
-(* mark_debug = "true", keep = "true" *) reg [15:0] dbg_xlat_cnt  = 16'd0;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_kc_bx   = 16'd0;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_kc_din  = 16'd0;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [20:0] dbg_kc_addr = 21'd0;
+/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_kc_ip   = 16'd0;
+/*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_kc_arm  = 1'b0;
 
+// 用总线地址锁定那一拍的数据读。
+// 注意 ADDR 是 **maddr**（21 位，不含 0x08000000 基址）：
+// 见本文件 1928 行既有实证 "SS:SP = 0xF000:0xFC00 ⇒ maddr 0xFFBFE"。
+// 故 F000:FC1A 对应 maddr = 0x0FFC1A，devmem 侧物理地址是 0x080FFC1A。
+wire dbg_kc_hit = (ADDR == 21'h0FFC1A) && MREQ && !WR && !IFETCH;
 always @(posedge CLK) begin
-    // ICODE1==17 即 XLAT（译码见 1718 行 8'b11010111 -> ICODE=17）
-    if (ICODE1 == 6'd17) begin
-        dbg_xlat_pre <= AX[7:0];      // 执行前 AL = 扫描码
-        dbg_xlat_ip  <= IP;
+    dbg_kc_arm <= dbg_kc_hit;
+    if (dbg_kc_hit) begin
+        dbg_kc_bx   <= BX;
+        dbg_kc_din  <= DIN;
+        dbg_kc_addr <= ADDR;
+        dbg_kc_ip   <= IP;
     end
-    dbg_xlat_post <= AX[7:0];         // 持续跟随，便于看执行后的新 AL
-    if (ICODE1 == 6'd17 && dbg_xlat_cnt != 16'hFFFF)
-        dbg_xlat_cnt <= dbg_xlat_cnt + 16'd1;
 end
 
 endmodule

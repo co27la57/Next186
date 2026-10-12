@@ -323,7 +323,20 @@ module top_zynq7010 (
 
                             if (ram_cmd == 2'b10 || ram_cmd == 2'b11) begin
                                 main_araddr  <= 32'h0800_0000 + {7'b0, ram_addr, 1'b0};
-                                main_arlen   <= 8'd15;
+                                // ★★★ 153rd 修复（2026-10-12，纯 AXI 接口侧，**功能等价**）：
+                                //   VGA 读（cmd=10）只发 8 拍 = 32 字节 = 16 个半字，
+                                //   正好等于 ddr_186.v 侧 col_counter 真正收下的量：
+                                //     VGA ack 时 col_counter <= {1'b0,max_read,1'b1} = 15，
+                                //     每个被接受的半字让 col_counter 减 1；第 17 个半字时
+                                //     col_counter[4]=1 把 wrreq 拉低 ⇒ 每个事务只收 16 个半字
+                                //     = 32 字节 = 8 个 32-bit 字。
+                                //   所以 8 拍与 16 拍“进 FIFO 的数据完全相同”（都是前 32 字节），
+                                //   但 16 拍会把 VGA 的 DDR 读流量白白浪费掉一半（取 64B 只用 32B）
+                                //   ⇒ FIFO 回填速度减半 ⇒ 水位被钉在下限附近来回漂 ⇒
+                                //     显示与取指的行相位随 DDR 竞争漂移（画面乱跳/撕裂/闪烁）。
+                                //   cache 填充（cmd=11）保持 16 拍 = 64 字节 = 一整条 cache 行，不动。
+                                //   回退：把下面这行改回 `8'd15;`（备份 sim/run/top_zynq7010.v.preVga8Beat）
+                                main_arlen   <= (ram_cmd == 2'b10) ? 8'd7 : 8'd15;
                                 main_arvalid <= 1'b1;
                                 state        <= AR_ADDR;
                             end

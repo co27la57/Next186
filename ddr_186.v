@@ -726,26 +726,43 @@ module system
 	wire I_MOUSE;
 	wire KB_RST;
 	// ================= 虚拟键盘(PS EMIO GPIO, 并行 8 位 + 选通) =================
+	// ★ 2026-10-12 新增鼠标通道: 同一组 8 位数据 + 选通, 由**选通高电平宽度**区分
+	//   通道(短 = 键盘, 长 = 鼠标), 因此**不需要新增 EMIO 引脚、不需要改 BD**。
+	//   详见 kbd_gpio_rx.v 文件头(键盘版备份: kbd_gpio_rx.v.bak.premouse)。
 	wire        vk_valid;
 	wire [7:0]  vk_data;
 	wire        vk_ready;
+	wire        vm_valid;
+	wire [7:0]  vm_data;
+	wire        vm_ready;
 
-	kbd_gpio_rx #(.DW(8)) kbd_gpio_rx_inst
+	kbd_gpio_rx #(
+		 .DW(8),
+		 .CLK_MHZ(25),              // clk_cpu = 25MHz (dcm_cpu: 50MHz * 18 / 36)
+		 .MOUSE_STB_MIN_US(1000),   // 选通高 >= 1ms 判为鼠标字节(发端用 3ms)
+		 .AUX_MODE(0)               // 0 = 用脉宽判通道(不改 BD)
+	) kbd_gpio_rx_inst
 	(
 		 .clk       (clk_cpu),
 		 .rst_n     (clk_cpu_locked),
 		 .gpio_data (KBD_GPIO_DATA),
 		 .gpio_stb  (KBD_GPIO_STB),
+		 .gpio_aux  (1'b0),         // AUX_MODE=0 时未使用(若要改用第 10 根 EMIO 再接)
 		 .vk_ready  (vk_ready),      // ★ 握手: 仅当 8042 缓冲空才出队, 防丢字节
 		 .vk_valid  (vk_valid),
-		 .vk_data   (vk_data)
+		 .vk_data   (vk_data),
+		 .vm_ready  (vm_ready),
+		 .vm_valid  (vm_valid),
+		 .vm_data   (vm_data)
 	);
 
 	// ★ 诊断(2026-10-10): 注入活动指示 —— 每收到一个注入字节翻转一次。
 	//   灯在闪 => 字节已进到 PL(接收端 + FIFO 出队正常) => 问题在 8042/80186 那段;
 	//   灯不闪 => 字节没进 PL => 位流没带注入 / EMIO 电平没到 / vk_ready 卡住(ctl_outb=1)。
+	// ★ 鼠标通道也共用这盏灯: 现阶段键盘已验证通过, 这盏灯主要用于确认
+	//   "鼠标字节确实进了 PL"。想只保留键盘指示就把下面的 || vm_valid 删掉。
 	reg vk_act_r = 1'b0;
-	always @(posedge clk_cpu) if (vk_valid) vk_act_r <= ~vk_act_r;
+	always @(posedge clk_cpu) if (vk_valid || vm_valid) vk_act_r <= ~vk_act_r;
 	assign VK_ACT = vk_act_r;
 
 	KB_Mouse_8042 KB_Mouse 
@@ -766,7 +783,12 @@ module system
 		 .vk_enable(KBD_VK_ENABLE),
 		 .vk_valid(vk_valid),
 		 .vk_data(vk_data),
-		 .vk_ready(vk_ready)
+		 .vk_ready(vk_ready),
+		 // ---- 虚拟鼠标(与键盘共用 EMIO, 由接收端分流) ----
+		 .vm_enable(KBD_VK_ENABLE),   // 暂与虚拟键盘同一个开关; 想单独关就把这里改 1'b0
+		 .vm_valid(vm_valid),
+		 .vm_data(vm_data),
+		 .vm_ready(vm_ready)
 	);
 	
 	wire [7:0]PIC_IVECT;

@@ -204,6 +204,7 @@ module cache_controller(
 	wire fit3 = ~r_flush && (cache_addr[3][index] == maddr[`ADDR-1:`LINE+`SETS]);
 	assign fit = {fit3, fit2, fit1, fit0};
 
+
 	// ★ Task #8 八次修复（2026-09-19 波形定案）：free 判脏路径移出 generate，改显式赋值。
 	//   波形矛盾：flush 脉冲后 2 拍探针仍显示 cache_dirty[0]=0001（way0 脏、tag=000 命中），
 	//   但扫描到 0x80(way0/idx0) 时判 clean 直进 STATE 100，ddr_wr 全程为 0。而 2 拍内代码上
@@ -687,7 +688,48 @@ module cache_controller(
 	//    安全性：填充期间 maddr 恒定 ⇒ 寄存输出恒等于原值，只是晚一拍生效。
 	reg         bios_region_r = 1'b0;
 	always @(posedge clk) bios_region_r <= (maddr[`ADDR-1:`LINE+`SETS] == 10'h1FF) && maddr[`LINE+`SETS-1];
-	wire        bios_fill  = (STATE == 3'b111) && bios_region_r;
+
+	// ========================================================================
+	// ★★★★★ 第 116 次修复（2026-10-11）：二段 BIOS 装入后改走 DDR
+	//
+	// 根因（sim/stage1_disasm.txt 全量反汇编 + ILA 抓包双重证实）：
+	//   一段(stage-1) 预置在 cache 里的那 1KB，覆盖 maddr 0x0FFC00..0x0FFFFF。
+	//   而一段的 FFD87/FFD8C/FFD91 会把二段 BIOS 装到**同一片地址**：
+	//       FFD87  mov  di,0xE000      ; ES:DI = F000:E000
+	//       FFD8C  mov  cx,0x1000      ; 4096 字 = 8192 字节
+	//       FFD91  rep  movsw         ; => 二段写入 maddr 0x0FE000..0x0FFFFF
+	//   ⇒ 这 8KB 里 index>=16 的 **64 行**（0x0FE400..0x0FFFC0）在 DDR 里
+	//     明明是二段的正确数据，cache 却仍按 bios_region_r 从 bios_rom 回填
+	//     （一段的旧代码）⇒ 读到错数据。
+	//
+	//   症状完全对应：KeyCode 表（映像偏移 0x1B7A）横跨 index 14/15 与 16/17：
+	//       row 1..16  → 0x1B82..0x1BFA  index 14/15 → 走 DDR → 正常
+	//       row 17..26 → 0x1C02..0x1C4A  index 16/17 → 走 ROM → 错误
+	//     失败键集合 {g,j,k,l,y,u,i,o,p,m} 恰为 row17..26。
+	//
+	// 切换判据（不需改 BIOS、不需外部信号）：
+	//   一段执行 `rep movsw` 装二段时，会往 maddr 0x0FE000 写入二段的头 4 字节，
+	//   即 ASCII "Next186 "（十六进制 4E 65 78 74 31 38 36 20）。
+	//   一段执行期间该地址尚无二段数据 ⇒ 特征不匹配 ⇒ 继续走 ROM（保住一段）。
+	//   二段写入完成后再访问该地址 ⇒ 特征命中 ⇒ stage2_ok 置 1 ⇒ 该区改走 DDR。
+	//
+	//   粘滞性：stage2_ok 一旦置位不再清零。二段不会被重新装载，故无需回退；
+	//   若将来需要重入一段，可在此加清零条件。
+	// ========================================================================
+	reg         stage2_ok = 1'b0;
+	always @(posedge clk) begin
+		// ★ 只用 mmreq 门控，**不要**加 st0（STATE==000）条件：
+		//   st0 是"等待 CPU 请求"的状态，而 rep movsw 写入二段是一次写事务，
+		//   其时序未必落在 st0。若加 st0 会导致特征永远检不到（台架已实测）。
+		//   mmreq 已是 CPU 请求本身(ce ? mreq : rmreq)，排除 flush 期间即可。
+		if (mmreq && !r_flush) begin
+			// maddr 0x0FE000 且读回数据低字节为 'N'(0x4E)、次低为 'e'(0x65)
+			if ((maddr == 21'h0FE000) && (din[7:0] == 8'h4E) && (din[15:8] == 8'h65))
+				stage2_ok <= 1'b1;
+		end
+	end
+
+	wire        bios_fill  = (STATE == 3'b111) && bios_region_r && !stage2_ok;
 	// ★★★ 时序修复（2026-10-10，第 37 轮）：把 BIOS 填充路径用的 index 在
 	//     **CPU 时钟域(clk, 25MHz)** 先寄存一级，切断 CPU→cache 的跨时钟组合长链。
 	//
@@ -1206,6 +1248,83 @@ module cache_controller(
 		end
 	end
 
+	// ========================================================================
+	// ★★★★★ 第 114 次（2026-10-10）：KeyCode 表读错 —— cache 侧直接取证
+	//
+	//  已用纯离线计算锁定的相关性（不需要任何硬件读数）：
+	//    cache 几何 = 64B 行 × 32 set × 2 way(4 way) = 4KB，index = addr[10:6]，tag = addr[20:11]
+	//    KeyCode 表物理基址 0x080FFB7A，所有行 tag 都是 0x1FF，但：
+	//        好键(行1..16)  → index 14, 15   (index[4]=0 → 被 stk_pin 保护, 永不被逐出)
+	//        坏键(行17..26) → index 16, 17   (index[4]=1 → 不受保护, 走 LRU 逐出)
+	//    交集为空、tag 相同、index 连续 ⇒ 故障是 cache 行为特征，不是扫描码问题。
+	//
+	//  这组探针要回答的三个问题：
+	//    ① CPU 到底访问了哪个 cache 行？   → dbg_x_maddr / dbg_x_index / dbg_x_tag
+	//    ② 命中了哪个 way，还是所有 way 都不命中？ → dbg_x_fit / dbg_x_hit / dbg_x_fblk
+	//    ③ 命中/未命中时 dout（CPU 实际拿到的数据）是什么？ → dbg_x_dout
+	//    ④ BIOS 区走的是 ROM 还是 DDR？       → dbg_x_bios_fill
+	//
+	//  判读：
+	//    maddr=0x0FFC1A & fit=0000 & dout≠0x246A  ⇒ miss 后填充回来的数据就是错的
+	//                                                 (⇒ 查 fill_data/bios_rom/DDR burst)
+	//    maddr=0x0FFC1A & fit≠0000 & dout≠0x246A  ⇒ **假命中**: tag 匹配但数据不是这一行
+	//                                                 (⇒ 查 cache_addr[]/cache_mem 多路冲突)
+	//    maddr≠0x0FFC1A                             ⇒ 地址生成/流水线滞后，不是 cache 命中问题
+	// ========================================================================
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [`ADDR-1:0] dbg_x_maddr    = 21'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [`SETS-1:0] dbg_x_index   = 5'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [9:0]     dbg_x_tag     = 10'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]     dbg_x_fit     = 4'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]     dbg_x_hit     = 4'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [1:0]     dbg_x_fblk    = 2'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [31:0]    dbg_x_dout    = 32'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]     dbg_x_dirty   = 4'd0;
+	/*(* mark_debug = "true", keep = "true" *)*/ wire         dbg_x_biosfill = dbg_x_biosfill_c;
+	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_arm     = 1'b0;
+	// ★ 对照基准：同一个字里同时锁住 row16(h, 好键, index15 被 stk_pin 保护)。
+	//   坏键(row20/index16)与好键(row16/index15) 唯一的差别就是 stk_pin 保护与否,
+	//   把两者放在同一次抓包里对照, 就能直接看出 cache 行为的分界。
+	//   row16 = 0x080FFB7A + 16*8 = 0x080FFBFA (maddr 0x0FFBFA)。
+	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_arm_ok  = 1'b0;
+	// 两行同时被读的间隔计数（用于确认一次按键里是否先后读了 row16 与 row20）
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0]   dbg_x_gap     = 16'd0;
+	// 第 116 次修复验证探针
+	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_s2ok    = 1'b0; // 二段特征已检出(=stage2_ok)
+	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_romused = 1'b0; // 本拍实际在用 ROM 回填
+	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]    dbg_x_stamp   = 8'h00; // 0x0FE000 读回的原始字节
+	// 修复效果判定：dbg_x_arm 那一拍若 dbg_x_dout==0x246A 即为修复成功
+
+	always @(posedge clk) begin
+		// 只观测"CPU 取数"的那些拍(排除 flush 扫描, 否则 index 会被 flushcount 覆盖)
+		if (mmreq && !r_flush) begin
+			dbg_x_maddr <= maddr;
+			dbg_x_index <= index;
+			dbg_x_tag   <= maddr[`ADDR-1:`LINE+`SETS];
+			dbg_x_fit   <= fit;
+			dbg_x_hit   <= {hit, ~|fit, fit[0] & ~hit, fit[0] & ~fit[1] & ~fit[2]};
+			dbg_x_fblk  <= fblk;
+			dbg_x_dout  <= dout;
+			dbg_x_dirty <= cache_dirty[index];
+			// ★ 置位条件 = "CPU 正在读 KeyCode 表 row20(j) 那个字"。
+			//   ⚠ 不能用 (index==16/17 && tag==0x1FF) —— 那个条件会被 **BIOS 代码取指**
+			//     自己满足（0x080FFC00 / 0x080FFC40 正好落在 index16/17 且 tag=0x1FF，
+			//     CPU 平时就一直执行那里），于是 dbg_x_arm 不停触发、抓到的全是取指，
+			//     根本不是读表。必须精确到地址。
+			//   row20 = KeyCode 基址 0x080FFB7A + 20*8 = 0x080FFC1A (maddr 0x0FFC1A)。
+			dbg_x_arm   <= (maddr == 21'h0FFC1A);
+			dbg_x_arm_ok <= (maddr == 21'h0FFBFA);
+			dbg_x_s2ok    <= stage2_ok;
+			dbg_x_romused <= bios_fill;
+			if (maddr == 21'h0FE000) dbg_x_stamp <= din[7:0];
+			// 两次"读 KeyCode 表"之间隔了多少拍：若间隔很短(几十拍)说明都在同一轮
+			// 查表里；若隔几千拍说明中间发生了大量逐出/填充(正是 cache 故障的signature)。
+			if (dbg_x_arm || dbg_x_arm_ok)
+				dbg_x_gap <= dbg_x_gap + 16'd1;
+		end
+	end
+	// bios_fill 是 ddr_clk 域信号, 直接组合观测(不跨时钟同步, 避免看到的是滞后一拍的值)
+	wire dbg_x_biosfill_c = bios_fill;
+
 endmodule
 
 module seg_map(
@@ -1237,5 +1356,6 @@ module seg_map(
 		end
 		cpurdata <= map[{1'b0, cpuaddr}]; // cpuaddr is constrained at 2T multicycle, but here it should be ready after 1T!!!
 	end
+
 
 endmodule

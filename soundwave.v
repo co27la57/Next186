@@ -86,8 +86,15 @@ module soundwave(
 	 reg [15:0]r_opl3right = 0;
 	 reg [15:0]r_midileft = 0;
 	 reg [15:0]r_midiright = 0;
-	 wire [16:0]lmix = {sample1[15], sample1[15:0]} + {r_opl3left[15], r_opl3left} + {r_midileft[15], r_midileft} + (speaker << `SPKVOL); // signed mixer left
-	 wire [16:0]rmix = {sample1[31], sample1[31:16]} + {r_opl3right[15], r_opl3right} + {r_midiright[15], r_midiright} + (speaker << `SPKVOL); // signed mixer right
+	 // ★ 诊断实验(2026-10-13)：把 OPL3 的混入量 -6dB（算术右移 1 位，保号），
+	 //   用于判定"声音嘶哑"是否来自 opl3seq 的 16bit 硬限幅(limAcc)。
+	 //   · 嘶哑明显改善 => 确认硬削波，后续在 opl3seq 给 rAcc 留余量/输出统一缩放
+	 //   · 完全无变化   => 不是削波，改查采样率/内存写时序
+	 //   回退：把 opl3l_att/opl3r_att 换回 r_opl3left/r_opl3right 即可。
+	 wire [15:0]opl3l_att = {r_opl3left[15],  r_opl3left[15:1]};
+	 wire [15:0]opl3r_att = {r_opl3right[15], r_opl3right[15:1]};
+	 wire [16:0]lmix = {sample1[15], sample1[15:0]} + {opl3l_att[15], opl3l_att} + {r_midileft[15], r_midileft} + (speaker << `SPKVOL); // signed mixer left
+	 wire [16:0]rmix = {sample1[31], sample1[31:16]} + {opl3r_att[15], opl3r_att} + {r_midiright[15], r_midiright} + (speaker << `SPKVOL); // signed mixer right
 	 wire [15:0]lclamp = (~|lmix[16:15] | &lmix[16:15]) ? {!lmix[15], lmix[14:0]} : {16{!lmix[16]}}; // clamp to [-32768..32767] and add 32878
 	 wire [15:0]rclamp = (~|rmix[16:15] | &rmix[16:15]) ? {!rmix[15], rmix[14:0]} : {16{!rmix[16]}};
 	 wire lsign = lval[31:16] < lclamp;

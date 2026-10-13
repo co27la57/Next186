@@ -89,6 +89,7 @@ module system
 	wire displ_on = !(hblnk | vblnk | !FifoStart);
 	wire [17:0]DAC_COLOR;
 	wire [8:0]fifo_wr_used_words;
+	wire [9:0]fifo_rd_used_words;
 	wire AlmostFull;
 	wire AlmostEmpty;
 	wire clk_cpu;
@@ -257,7 +258,8 @@ module system
 	wire [7:0]VGA_INDEX;						  
 	reg [3:0]exline = 4'b0000; 
 	wire vrdon = s_displ_on[~vga_hrzpan];
-	wire vrden = (vrdon || exline[3]) && ((vgatext[1] | half[1]) ? &hcount_pan[3:0] : (vga13[1] | planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0]);
+	wire vrden_req = (vrdon || exline[3]) && ((vgatext[1] | half[1]) ? &hcount_pan[3:0] : (vga13[1] | planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0]);
+	wire vrden = vrden_req && (fifo_rd_used_words != 10'd0);
 	reg s_vga_endline;
 	reg s_vga_endscanline = 1'b0;
 	reg s_vga_endframe;
@@ -501,8 +503,13 @@ module system
 
 // opl3 interface
     wire [7:0]opl32_data;
-    wire [15:0]opl3left;
-    wire [15:0]opl3right;
+    (* mark_debug = "true", keep = "true" *) wire [15:0]opl3left;
+    (* mark_debug = "true", keep = "true" *) wire [15:0]opl3right;
+    // ★ 2026-10-13 探针（纯调试）：opl3seq 当前处理槽位的 {TLL,AMmask}/volume/{OP,CH}。
+    //   等宽置换 dbg_opl3_probe24(24)+dbg_opl3_probe8(8)，ILA 总宽仍为 200 bit。
+    (* mark_debug = "true", keep = "true" *) wire [15:0]dbg_opl3_slot_tll;
+    (* mark_debug = "true", keep = "true" *) wire [9:0] dbg_opl3_slot_vol;
+    (* mark_debug = "true", keep = "true" *) wire [5:0] dbg_opl3_slot_id;
     wire [9:0] opl3_debug_qdata;
     wire [15:0] opl3_debug_cpu_addr;
     wire        opl3_debug_qempty;
@@ -566,6 +573,22 @@ module system
 	
     reg [3:0] fifo_rst_cnt = 4'd15;
     reg       fifo_rst     = 1'b1;
+
+    // VGA frame boundary is generated in the pixel-clock domain and carried
+    // across to clk_sdr as a toggle. A level crossing is unsafe here because
+    // vblank lasts hundreds of clk_25 cycles and can retrigger the reset FSM.
+    reg vga_frame_toggle = 1'b0;
+    reg vga_vblnk_d      = 1'b0;
+    always @(posedge clk_25) begin
+        vga_vblnk_d <= vblnk;
+        if (vblnk && !vga_vblnk_d)
+            vga_frame_toggle <= ~vga_frame_toggle;
+    end
+	reg [2:0] rs_sync = 3'b000;
+	reg [4:0] rs_cnt  = 5'd0;
+	wire rs_active = (rs_cnt != 5'd0);
+	wire fifo_rst_rs = rs_active && (rs_cnt <= 5'd20);
+
     always @(posedge CLK_50MHZ) begin
         if (!clk_sys_locked) begin
             fifo_rst_cnt <= 4'd15;
@@ -592,11 +615,12 @@ module system
 	  .rdclk(clk_25), 
 	  .data(sys_DOUT), 
 	  //.wrreq(!crw && sys_rd_data_valid), 
-	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4]),
+	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4] && !rs_active),
 	  .rdreq(vrden), 
 	  .q(fifo_dout32), 
 	  .wrusedw(fifo_wr_used_words),
-	  .rst(fifo_rst)
+	  .rdusedw(fifo_rd_used_words),
+	  .rst(fifo_rst | fifo_rst_rs)
 	);
 
 	VGA_SG VGA 
@@ -963,13 +987,13 @@ module system
 	// display-side state from fetch-side state at the same clk_sdr sample.
 	// This is observation-only; it does not participate in VGA control.
 	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_vga_mode_at_fs = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_vga_cfg_at_fs  = 24'h000000;
+    reg [23:0] dbg_vga_cfg_at_fs  = 24'h000000;
 	// Same mode packing sampled at the VGA DDR ACK.  The old row-reset mode slot
 	// is reused below for an 8-bit cache/DDR arbitration snapshot.
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_vga_mode_at_ack = 8'h00;
+    reg [7:0] dbg_vga_mode_at_ack = 8'h00;
 	// {s_prog_empty,s_prog_full,crw,cache_cmd_done,ddr_wr,ddr_rd,
 	//  cache_line_start,sys_cmd_ack[0]} at the most recent row-reset event.
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_vga_cache_at_reset = 8'h00;
+    reg [7:0] dbg_vga_cache_at_reset = 8'h00;
 	reg dbg_vga_fs_seen = 1'b0;
 	// ★ 2026-10-12: VGA DDR transaction audit (observation only).
 	//   The frame-start probes above tell us whether the FIFO phase moves.  These
@@ -1001,9 +1025,16 @@ module system
 	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_vga_rowreset_n = 5'h00;
 	// OPL3 chain probe slots reuse the retired VGA RAM-address/CDC/duplicate
 	// ACK slots. Total static ILA width remains 200 bits.
-	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_opl3_probe24 = 24'h0;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_opl3_probe8  = 8'h0;
+	// ★ 2026-10-13：probe24/probe8 已退役（等宽置换给 dbg_opl3_slot_tll/vol/id），
+	//   reg 本体保留（不再进 ILA）。
+	reg [23:0] dbg_opl3_probe24 = 24'h0;
+	reg [7:0]  dbg_opl3_probe8  = 8'h0;
 	(* mark_debug = "true", keep = "true" *) reg        dbg_opl3_hit      = 1'b0;
+	// VGA phase capture payload. This replaces the old OPL3-only ILA mapping
+	// when debugging scan-out; the payload is 199 bits and the separate trigger
+	// bit makes the static ILA total exactly 200 bits.
+	(* mark_debug = "true", keep = "true" *) reg [198:0] dbg_vga_probe = 199'h0;
+	(* mark_debug = "true", keep = "true" *) reg        dbg_vga_trigger = 1'b0;
 	reg        dbg_vga_cache_seen_live = 1'b0;
 	// Retained for source-level diagnostics; rowcol itself is already exposed
 	// and is the authoritative value at the reset event.
@@ -1024,6 +1055,18 @@ module system
 		                    opl3_debug_cpu_iorq, opl3_debug_cpu_wr,
 		                    rstcount[18], OPL3_CHANNEL_ACTIVE[0]};
 		dbg_opl3_hit <= |opl3_debug_channel_hit;
+		dbg_vga_probe <= {vga_ddr_row_col, vga_ddr_row_count,
+		                  vga_repln_count, vga_lnbytecount, sdraddr,
+		                  fifo_wr_used_words, vcount, hcount, hcount_pan[3:0],
+		                  vgatext[1:0], vga13[1:0], planar[1:0], half[1:0],
+		                  scraddr, vga_offset, sys_cmd_ack, sys_rd_data_valid,
+		                  sys_wr_data_valid, crw, col_counter, max_read,
+		                  s_vga_endscanline, s_vga_endline, s_vga_endframe,
+		                  dbg_vga_fs, dbg_vga_rowreset_evt, dbg_vga_fifo_at_fs,
+		                  dbg_vga_repln_at_fs, dbg_vga_lnb_at_fs,
+		                  dbg_vga_mode_at_fs, dbg_vga_cfg_at_fs,
+		                  dbg_vga_cache_seen_at_fs};
+		dbg_vga_trigger <= (vcount == 10'd0);
 		dbg_vga_scraddr <= scraddr;
 		dbg_vga_text    <= vgatext[1:0];
 		dbg_vga_13      <= vga13[1:0];
@@ -1279,7 +1322,10 @@ module system
         .debug_ready(opl3_debug_ready),
         .debug_cpu_iorq(opl3_debug_cpu_iorq),
         .debug_cpu_wr(opl3_debug_cpu_wr),
-        .debug_channel_hit(opl3_debug_channel_hit)
+        .debug_channel_hit(opl3_debug_channel_hit),
+        .dbg_slot_tll(dbg_opl3_slot_tll),
+        .dbg_slot_vol(dbg_opl3_slot_vol),
+        .dbg_slot_id(dbg_opl3_slot_id)
      );
 
 	mpu401 midi(
@@ -1320,6 +1366,15 @@ module system
 
 	always @ (posedge clk_sdr) begin
         sys_cmd_ack_d1 <= sys_cmd_ack;
+
+        // Synchronize the pixel-domain frame toggle. The three-stage pipe
+        // gives a single pulse for either toggle transition; unlike the old
+        // 2-bit level synchronizer it cannot retrigger during one vblank.
+        rs_sync <= {rs_sync[1:0], vga_frame_toggle};
+        if (rs_active)
+            rs_cnt <= (rs_cnt == 5'd31) ? 5'd0 : rs_cnt + 1'b1;
+        else if (rs_sync[1] ^ rs_sync[2])
+            rs_cnt <= 5'd1;
 
 // v6: page the DDR FSM actually consumed (sdraddr delayed 2 clk_sdr).
 //   sdraddr(k) = f(hiaddr(k-1)); the FSM samples sdraddr(k-1) at edge k.
@@ -1381,7 +1436,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 		    //   ★ 下溢安全：rowcol 最小 0xE000(57344) - 488 > 0。
 		    //   ★ 与旧的 -8(水平 16 字符相位) 是叠加关系：488 = 480(12行) + 8(水平)。
 		    //   若需回退，把 11'd488 改回 5'd8 即可（水平相位 1'b0 末位严格不动）。
-		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
+		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd0, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 			
@@ -1433,7 +1488,7 @@ dbg_ad_d1 <= sdraddr[14:5];
             endcase
         end
 				
-		if(s_vga_endscanline) begin
+		if(s_vga_endscanline && !rs_active) begin
 			col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
 			vga_lnbytecount <= 0;
 			s_vga_endscanline <= 1'b0;
@@ -1492,7 +1547,19 @@ dbg_ad_d1 <= sdraddr[14:5];
 				repln_graph[0] <= replnreq;
 				vga_ddr_row_count <= 0;
 			end else vga_ddr_row_count <= vga_ddr_row_count + 1'b1; 
-		end else s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
+		end else if(!rs_active) s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
+
+        // Complete the deterministic frame reset after the FIFO reset pulse.
+        // The display is still in vblank, so no pixel read can observe the
+        // transient empty queue.
+        if (rs_active && rs_cnt == 5'd31) begin
+            vga_ddr_row_col   <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
+            vga_lnbytecount   <= 8'd0;
+            vga_repln_count   <= 4'd0;
+            vga_ddr_row_count <= 9'd0;
+            s_vga_endscanline <= 1'b0;
+            col_counter       <= 5'd16;
+        end
 	end
 	
 	// ============================================================================

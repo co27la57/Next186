@@ -23,7 +23,11 @@ module ddr_pipe #(
     //     2 = {5'b00001, row_col + lnbytecount - 8, 1'b0}            (当前工作区, 末位=0)
     //     3 = {5'b00001, row_col + lnbytecount - 448, 1'b0}          (152nd, k=448)
     parameter [16:0] VGA_BASE_PARAM = 17'h0E000,
-    parameter integer VGA_ADDR_VAR  = 2
+    parameter integer VGA_ADDR_VAR  = 2,
+    // Mode 3 repeats 16 scanlines per character row; mode 13h uses the
+    // CRTC repeat bit (normally 0 or 1).  Keep this parameterized so the
+    // exact display harness can exercise both geometries.
+    parameter integer VGA_REPLN_PARAM = 15
 ) (
     input  wire        clk_cpu,
     input  wire        clk_sdr,
@@ -44,7 +48,14 @@ module ddr_pipe #(
     input  wire [31:0] frame_period,   // clk_cpu cycles per VGA frame; 0 = never flush
     input  wire [15:0] vblnk_len,      // vblnk high for this many clk_cpu cycles
     input  wire [7:0]  fifo_drain,     // VGA FIFO drain period in clk_sdr; 0 = old hand-driven model
-    // VGA scan-out geometry (text mode defaults: 6 / 40 / 400)
+    input  wire [3:0]  display_extra,  // text-mode exline pops after visible area (normally 8)
+    // Optional exact-display feedback for the row-sequence race bench.  When
+    // valid, this mirrors ddr_186.v's cross-domain `vcount == 0` rowcol reset;
+    // when clear, retain the self-contained flow model's end-of-fetch-frame
+    // reset so older harnesses remain source-compatible.
+    input  wire        model_vcount_valid,
+    input  wire [9:0]  model_vcount,
+    // VGA scan-out geometry (text mode defaults: 6 / 40 / 0x3ff)
     input  wire [4:0]  vga_lnend_cfg,  // ddr_186.v:176  text mode -> 6   (8-byte groups per line)
     input  wire [16:0] vga_stride,     // words advanced per character row (text mode -> 40)
     input  wire [9:0]  vga_lcr,        // scanline count at which vga_ddr_row_col wraps
@@ -152,6 +163,10 @@ module ddr_pipe #(
     output wire [31:0] o_pe_hi,
     output wire [31:0] o_pe_lo,
     output wire [31:0] o_underr_n
+    ,output wire        o_vga_fifo_wr
+    ,output wire [15:0] o_vga_fifo_wr_data
+    ,output wire        o_vga_fifo_rd
+    ,output wire [9:0]  o_vga_fifo_level
 );
 
     // =================================================================
@@ -278,7 +293,7 @@ module ddr_pipe #(
     reg         s_vga_endline = 1'b0;
     reg         s_vga_endscanline = 1'b0;
     wire [4:0]  vga_lnend     = vga_lnend_cfg;          // ddr_186.v:176
-    wire [3:0]  vga_repln     = 4'd15;                  // ddr_186.v:174  (vgatext && ~half)
+    wire [3:0]  vga_repln     = VGA_REPLN_PARAM[3:0];  // ddr_186.v:174
     wire        vga_end_frame = (vga_ddr_row_count == 9'd479);   // ddr_186.v:172 (v240=1)
     reg  [15:0] vga_burst_n   = 16'd0;
     reg  [16:0] vga_rowcol_last = 17'h0;
@@ -311,6 +326,10 @@ module ddr_pipe #(
     //   => pops only happen after FifoStart and only inside the visible part of a line.
     localparam [10:0] LINE_LEN_M = 11'd1600;   // 800 pixel clocks * 2 clk_sdr (25 MHz dot clock)
     localparam [10:0] VIS_LEN_M  = 11'd1280;   // 640 visible pixels   * 2 clk_sdr
+    wire [11:0] display_pop_end = {1'b0, VIS_LEN_M} +
+                                   ({8'b0, display_extra} * fifo_drain);
+    wire model_vga_frame_start = model_vcount_valid ?
+                                  (model_vcount == 10'd0) : vga_end_frame;
     reg  [10:0] line_cnt   = 11'd0;
     reg         fstart     = 1'b0;             // FifoStart: latch once at lvl>=64, never cleared
     reg  [31:0] fstart_cyc = 32'd0;
@@ -322,6 +341,32 @@ module ddr_pipe #(
     wire vga_acc_ok = (vga_acc <= {1'b0, vga_max_m});
     wire fifo_wr_m = (!crw_m && sys_rd_data_valid && !col_counter[4]) &&
                      (!fix_100[0] || vga_acc_ok);   // [102nd] A: cap accepts at max_read+1
+    // The real FIFO is an async 16-bit-write/32-bit-read queue.  These four
+    // observability ports let the phase harness reconstruct the data stream
+    // without changing the RTL under test: one write pulse is one accepted
+    // halfword; one read pulse is one display-side 32-bit pop.  Register the
+    // pulses at the sampling edge: exposing the raw combinational request
+    // after NBA updates would shift every accepted word by one clk_sdr.
+    wire fifo_rd_m = (fifo_drain != 8'd0) && fstart && (line_cnt < display_pop_end) &&
+                     (drain_cnt >= fifo_drain - 1'b1) && (lvl_m >= 10'd2);
+    reg        fifo_wr_obs = 1'b0;
+    reg [15:0] fifo_wr_data_obs = 16'h0000;
+    reg        fifo_rd_obs = 1'b0;
+    reg [9:0]  fifo_level_obs = 10'd0;
+
+    always @(posedge clk_sdr) begin
+        if (rst) begin
+            fifo_wr_obs      <= 1'b0;
+            fifo_wr_data_obs <= 16'h0000;
+            fifo_rd_obs      <= 1'b0;
+            fifo_level_obs   <= 10'd0;
+        end else begin
+            fifo_wr_obs      <= fifo_wr_m;
+            fifo_wr_data_obs <= sys_DOUT;
+            fifo_rd_obs      <= fifo_rd_m;
+            fifo_level_obs   <= lvl_m;
+        end
+    end
 
     always @(posedge clk_sdr) begin
         if (rst) begin
@@ -365,7 +410,7 @@ module ddr_pipe #(
                 col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
                 vga_lnbytecount <= 8'd0;
                 s_vga_endscanline <= 1'b0;
-                if (vga_end_frame)                             vga_ddr_row_col <= VGA_TEXT_BASE;
+                if (model_vga_frame_start)                      vga_ddr_row_col <= VGA_TEXT_BASE;
                 else if ({1'b0, vga_ddr_row_count} == vga_lcr)  vga_ddr_row_col <= VGA_TEXT_BASE;
                 else if (s_vga_endline)                        vga_ddr_row_col <= vga_ddr_row_col + vga_stride;
                 if (s_vga_endline) vga_repln_count <= 4'd0;
@@ -377,17 +422,32 @@ module ddr_pipe #(
             // ---- [102nd] FAITHFUL copy of ddr_186.v:983-990 + the fifo wrapper ----
             //   水位单位 = 16-bit WRITE words; 排空 1 次 = 1 个 32-bit read word = -2 write words.
             if (fifo_drain != 8'd0) begin
-                // fills (1 per accepted halfword)
-                if (fifo_wr_m && fifo_used < 10'd1023) fifo_used <= fifo_used + 1'b1;
-
                 // pops: only while the display is ON (FifoStart) and inside the visible window
-                if (fstart && (line_cnt < VIS_LEN_M)) begin
+                if (fstart && (line_cnt < display_pop_end)) begin
                     if (drain_cnt >= fifo_drain - 1'b1) begin
                         drain_cnt <= 8'd0;
-                        if (lvl_m >= 10'd2) fifo_used <= fifo_used - 10'd2;
+                        // A real async FIFO can write one halfword and pop one
+                        // 32-bit word on the same clk_sdr edge.  Resolve that
+                        // simultaneous case explicitly; two independent NBA
+                        // assignments would otherwise let the -2 pop overwrite
+                        // the +1 fill and bias the scheduler by one halfword.
+                        if (lvl_m >= 10'd2) begin
+                            if (fifo_wr_m) fifo_used <= fifo_used - 10'd1;
+                            else           fifo_used <= fifo_used - 10'd2;
+                        end
                         else underr_n <= underr_n + 1'b1;      // pop on empty -> display starves
                     end else drain_cnt <= drain_cnt + 1'b1;
-                end else drain_cnt <= 8'd0;
+                end else begin
+                    drain_cnt <= 8'd0;
+                end
+
+                // If no pop completed on this edge, a fill contributes one
+                // write word.  The branch above already accounts for the
+                // simultaneous fill+pop case.
+                if (!(fstart && (line_cnt < display_pop_end) &&
+                      (drain_cnt >= fifo_drain - 1'b1) && (lvl_m >= 10'd2)) &&
+                    fifo_wr_m && fifo_used < 10'd1023)
+                    fifo_used <= fifo_used + 1'b1;
 
                 // line timing (1600 clk_sdr per scanline, 1280 of them visible)
                 if (line_cnt >= LINE_LEN_M - 1'b1) line_cnt <= 11'd0;
@@ -866,6 +926,10 @@ module ddr_pipe #(
     assign o_underr_n   = underr_n;
     assign o_pe_n = pe_n;
     assign o_pf_n = pf_n;
+    assign o_vga_fifo_wr      = fifo_wr_obs;
+    assign o_vga_fifo_wr_data = fifo_wr_data_obs;
+    assign o_vga_fifo_rd      = fifo_rd_obs;
+    assign o_vga_fifo_level   = fifo_level_obs;
 
     // ---- v4 data-side probe (same logic as the on-board one) ----
     reg       v4_fill_arm = 1'b0, v4_wb_arm = 1'b0, v4_wb_pcnt = 1'b0;

@@ -1,8 +1,5 @@
 // sim/tb/opl3_dbg.v — opl3 调试包装层（仅离线仿真用）
-// 把 opl3 内部关键信号暴露出来，用于定位"186 侧命令没进去"断在哪一环：
-//   * Z80 总线活动(CPU_ADDR / MREQ / IORQ / WR)  -> Z80 有没有在跑
-//   * 命令 FIFO 状态(qempty / qdata)             -> 我的写入有没有进队列、Z80 有没有取走
-//   * opl3seq ready                              -> 合成引擎状态
+// 暴露内部信号，用于定位"命令通路"与"硬削波"两类问题。
 module opl3_dbg(
     input  wire        clk,
     input  wire        cpu_clk,
@@ -16,25 +13,30 @@ module opl3_dbg(
     input  wire        stb44100,
     input  wire        reset,
 
-    output wire [15:0] dbg_cpu_addr,
-    output wire        dbg_cpu_mreq,
-    output wire        dbg_cpu_iorq,
-    output wire        dbg_cpu_wr,
-    output wire        dbg_qempty,
-    output wire [15:0] dbg_qdata,
-    output wire        dbg_ready
+    output wire [3:0]  dbg_channel_active,
+    output wire [15:0] dbg_limacc,
+    output wire signed [18:0] dbg_racc,
+    output wire [5:0]  dbg_seq_state,
+    output wire [4:0]  dbg_sample_ch,
+    output wire [15:0] dbg_seq_rdata,
+    // ★ 2026-10-13 槽位参数探针（opl3seq STATE 12/13 锁存）
+    output wire [15:0] dbg_slot_tll,
+    output wire [9:0]  dbg_slot_vol,
+    output wire [5:0]  dbg_slot_id
 );
     opl3 u (
         .clk(clk), .cpu_clk(cpu_clk), .addr(addr), .din(din), .dout(dout),
         .ce(ce), .wr(wr), .left(left), .right(right),
-        .stb44100(stb44100), .reset(reset)
+        .stb44100(stb44100), .reset(reset),
+        .channel_active(dbg_channel_active)
     );
 
-    assign dbg_cpu_addr = u.CPU_ADDR;
-    assign dbg_cpu_mreq = u.CPU_MREQ;
-    assign dbg_cpu_iorq = u.CPU_IORQ;
-    assign dbg_cpu_wr   = u.CPU_WR;
-    assign dbg_qempty   = u.qempty;
-    assign dbg_qdata    = u.qdata;
-    assign dbg_ready    = u.ready;
+    assign dbg_limacc    = u.opl3seq_inst.limAcc;
+    assign dbg_racc      = u.opl3seq_inst.rAcc;
+    assign dbg_seq_state = u.opl3seq_inst.STATE;
+    assign dbg_sample_ch = u.opl3seq_inst.s_ram_CHindex;
+    assign dbg_seq_rdata = u.seq_rdata;
+    assign dbg_slot_tll  = u.opl3seq_inst.dbg_slot_tll;
+    assign dbg_slot_vol  = u.opl3seq_inst.dbg_slot_vol;
+    assign dbg_slot_id   = u.opl3seq_inst.dbg_slot_id;
 endmodule

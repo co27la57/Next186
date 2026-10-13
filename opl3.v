@@ -65,7 +65,11 @@ module opl3(
     output wire debug_ready,
     output wire debug_cpu_iorq,
     output wire debug_cpu_wr,
-    output wire [3:0]debug_channel_hit
+    output wire [3:0]debug_channel_hit,
+    // ★ 2026-10-13 探针（纯调试）：透传 opl3seq 的槽位参数锁存
+    output wire [15:0]dbg_slot_tll,
+    output wire [9:0]dbg_slot_vol,
+    output wire [5:0]dbg_slot_id
     );
 	 
 	wire seq_wr;
@@ -136,7 +140,10 @@ module opl3(
 		.ram_addr(seq_addr), 
 		.ram_rdata(seq_rdata), 
 		.ram_wdata(seq_wdata),
-        .channel_sample_hit(channel_sample_hit)
+        .channel_sample_hit(channel_sample_hit),
+        .dbg_slot_tll(dbg_slot_tll),
+        .dbg_slot_vol(dbg_slot_vol),
+        .dbg_slot_id(dbg_slot_id)
 	);
 
     // LEDs 0..3 follow actual channel 0..3 synthesis output, before panning.

@@ -86,8 +86,20 @@ module soundwave(
 	 reg [15:0]r_opl3right = 0;
 	 reg [15:0]r_midileft = 0;
 	 reg [15:0]r_midiright = 0;
-	 wire [16:0]lmix = {sample1[15], sample1[15:0]} + {r_opl3left[15], r_opl3left} + {r_midileft[15], r_midileft} + (speaker << `SPKVOL); // signed mixer left
-	 wire [16:0]rmix = {sample1[31], sample1[31:16]} + {r_opl3right[15], r_opl3right} + {r_midiright[15], r_midiright} + (speaker << `SPKVOL); // signed mixer right
+	 // ★ 诊断(2026-10-13)：把 MIDI(I2S 输入解码)那一路在混音里强制为 0，
+	 //   用于判定"待机持续沙沙声"是否来自 i2s_decoder。
+	 //   背景：CLKBD/WSBD/DABD 三个 I2S 输入脚在工程里【没有任何 XDC 约束】
+	 //        （Network.srcs/constrs_1/new/Network.xdc 里无 pin、无上下拉），
+	 //        而板上未接 MIDI 源 ⇒ 引脚悬空 ⇒ i2s_decoder 收随机位
+	 //        ⇒ left_out/right_out 随机 ⇒ 与是否播放无关的沙沙声。
+	 //   判读：沙沙消失 ⇒ 命中 i2s_decoder；
+	 //        仍有       ⇒ 再依次把 sample1 / opl3 那两路置 0 试。
+	 //   回退：把 midi_l_term/midi_r_term 换回
+	 //        {r_midileft[15], r_midileft} / {r_midiright[15], r_midiright} 即可。
+	 wire [16:0]midi_l_term = 17'b0;
+	 wire [16:0]midi_r_term = 17'b0;
+	 wire [16:0]lmix = {sample1[15], sample1[15:0]} + {r_opl3left[15], r_opl3left} + midi_l_term + (speaker << `SPKVOL); // signed mixer left
+	 wire [16:0]rmix = {sample1[31], sample1[31:16]} + {r_opl3right[15], r_opl3right} + midi_r_term + (speaker << `SPKVOL); // signed mixer right
 	 wire [15:0]lclamp = (~|lmix[16:15] | &lmix[16:15]) ? {!lmix[15], lmix[14:0]} : {16{!lmix[16]}}; // clamp to [-32768..32767] and add 32878
 	 wire [15:0]rclamp = (~|rmix[16:15] | &rmix[16:15]) ? {!rmix[15], rmix[14:0]} : {16{!rmix[16]}};
 	 wire lsign = lval[31:16] < lclamp;

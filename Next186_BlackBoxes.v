@@ -18,7 +18,6 @@ module fifo (
     input  wire        rdreq,
     output wire [31:0] q,
     output wire [8:0]  wrusedw,
-    output wire [9:0]  rdusedw,
     input  wire        rst
 );
     wire wr_busy;
@@ -41,7 +40,6 @@ module fifo (
         .rd_en(rdreq & ~rd_busy),
         .dout(q),
         .wr_data_count(full_wrusedw),
-        .rd_data_count(rdusedw),
         .wr_rst_busy(wr_busy),
         .rd_rst_busy(rd_busy),
         .sleep(1'b0),

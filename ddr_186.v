@@ -89,7 +89,6 @@ module system
 	wire displ_on = !(hblnk | vblnk | !FifoStart);
 	wire [17:0]DAC_COLOR;
 	wire [8:0]fifo_wr_used_words;
-	wire [9:0]fifo_rd_used_words;
 	wire AlmostFull;
 	wire AlmostEmpty;
 	wire clk_cpu;
@@ -258,8 +257,7 @@ module system
 	wire [7:0]VGA_INDEX;						  
 	reg [3:0]exline = 4'b0000; 
 	wire vrdon = s_displ_on[~vga_hrzpan];
-	wire vrden_req = (vrdon || exline[3]) && ((vgatext[1] | half[1]) ? &hcount_pan[3:0] : (vga13[1] | planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0]);
-	wire vrden = vrden_req && (fifo_rd_used_words != 10'd0);
+	wire vrden = (vrdon || exline[3]) && ((vgatext[1] | half[1]) ? &hcount_pan[3:0] : (vga13[1] | planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0]);
 	reg s_vga_endline;
 	reg s_vga_endscanline = 1'b0;
 	reg s_vga_endframe;
@@ -574,21 +572,6 @@ module system
     reg [3:0] fifo_rst_cnt = 4'd15;
     reg       fifo_rst     = 1'b1;
 
-    // VGA frame boundary is generated in the pixel-clock domain and carried
-    // across to clk_sdr as a toggle. A level crossing is unsafe here because
-    // vblank lasts hundreds of clk_25 cycles and can retrigger the reset FSM.
-    reg vga_frame_toggle = 1'b0;
-    reg vga_vblnk_d      = 1'b0;
-    always @(posedge clk_25) begin
-        vga_vblnk_d <= vblnk;
-        if (vblnk && !vga_vblnk_d)
-            vga_frame_toggle <= ~vga_frame_toggle;
-    end
-	reg [2:0] rs_sync = 3'b000;
-	reg [4:0] rs_cnt  = 5'd0;
-	wire rs_active = (rs_cnt != 5'd0);
-	wire fifo_rst_rs = rs_active && (rs_cnt <= 5'd20);
-
     always @(posedge CLK_50MHZ) begin
         if (!clk_sys_locked) begin
             fifo_rst_cnt <= 4'd15;
@@ -615,12 +598,11 @@ module system
 	  .rdclk(clk_25), 
 	  .data(sys_DOUT), 
 	  //.wrreq(!crw && sys_rd_data_valid), 
-	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4] && !rs_active),
+	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4]),
 	  .rdreq(vrden), 
 	  .q(fifo_dout32), 
 	  .wrusedw(fifo_wr_used_words),
-	  .rdusedw(fifo_rd_used_words),
-	  .rst(fifo_rst | fifo_rst_rs)
+	  .rst(fifo_rst)
 	);
 
 	VGA_SG VGA 
@@ -1367,15 +1349,6 @@ module system
 	always @ (posedge clk_sdr) begin
         sys_cmd_ack_d1 <= sys_cmd_ack;
 
-        // Synchronize the pixel-domain frame toggle. The three-stage pipe
-        // gives a single pulse for either toggle transition; unlike the old
-        // 2-bit level synchronizer it cannot retrigger during one vblank.
-        rs_sync <= {rs_sync[1:0], vga_frame_toggle};
-        if (rs_active)
-            rs_cnt <= (rs_cnt == 5'd31) ? 5'd0 : rs_cnt + 1'b1;
-        else if (rs_sync[1] ^ rs_sync[2])
-            rs_cnt <= 5'd1;
-
 // v6: page the DDR FSM actually consumed (sdraddr delayed 2 clk_sdr).
 //   sdraddr(k) = f(hiaddr(k-1)); the FSM samples sdraddr(k-1) at edge k.
 dbg_pg_d1 <= sdraddr[23:15];
@@ -1436,7 +1409,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 		    //   ★ 下溢安全：rowcol 最小 0xE000(57344) - 488 > 0。
 		    //   ★ 与旧的 -8(水平 16 字符相位) 是叠加关系：488 = 480(12行) + 8(水平)。
 		    //   若需回退，把 11'd488 改回 5'd8 即可（水平相位 1'b0 末位严格不动）。
-		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd0, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
+		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // 恢复旧版水平相位窗口，先隔离 43bd6dc 的帧复位改动。
 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
 			
@@ -1488,7 +1461,7 @@ dbg_ad_d1 <= sdraddr[14:5];
             endcase
         end
 				
-		if(s_vga_endscanline && !rs_active) begin
+		if(s_vga_endscanline) begin
 			col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
 			vga_lnbytecount <= 0;
 			s_vga_endscanline <= 1'b0;
@@ -1547,19 +1520,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 				repln_graph[0] <= replnreq;
 				vga_ddr_row_count <= 0;
 			end else vga_ddr_row_count <= vga_ddr_row_count + 1'b1; 
-		end else if(!rs_active) s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
-
-        // Complete the deterministic frame reset after the FIFO reset pulse.
-        // The display is still in vblank, so no pixel read can observe the
-        // transient empty queue.
-        if (rs_active && rs_cnt == 5'd31) begin
-            vga_ddr_row_col   <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
-            vga_lnbytecount   <= 8'd0;
-            vga_repln_count   <= 4'd0;
-            vga_ddr_row_count <= 9'd0;
-            s_vga_endscanline <= 1'b0;
-            col_counter       <= 5'd16;
-        end
+		end else s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
 	end
 	
 	// ============================================================================

@@ -57,7 +57,15 @@ module opl3(
     output [15:0]left,
     output [15:0]right,
     input stb44100,
-    input reset
+    input reset,
+    output wire [3:0]channel_active,
+    output wire [9:0]debug_qdata,
+    output wire [15:0]debug_cpu_addr,
+    output wire debug_qempty,
+    output wire debug_ready,
+    output wire debug_cpu_iorq,
+    output wire debug_cpu_wr,
+    output wire [3:0]debug_channel_hit
     );
 	 
 	wire seq_wr;
@@ -72,10 +80,19 @@ module opl3(
     wire CPU_IORQ; 
     reg [1:0]read = 2'b00;
     wire ready;
+    wire [3:0]channel_sample_hit;
     reg CE = 1'b0;
     wire [9:0]qdata;
     wire qempty;
     reg [2:0]status = 3'b000;
+
+    assign debug_qdata       = qdata;
+    assign debug_cpu_addr    = CPU_ADDR;
+    assign debug_qempty      = qempty;
+    assign debug_ready       = ready;
+    assign debug_cpu_iorq    = CPU_IORQ;
+    assign debug_cpu_wr      = CPU_WR;
+    assign debug_channel_hit = channel_sample_hit;
     reg [4:0]tmr_cnt_50 = 0;
     reg [1:0]tmr_cnt_smp = 2'b00;
     reg [7:0]tmr_cnt = 0;
@@ -99,6 +116,7 @@ module opl3(
 	
     opl3_in in_queue (  // fall through
         .wrclk(cpu_clk),
+        .rst(reset),
         .data({addr, din}),
         .wrreq(ce && wr),
         .rdclk(clk),
@@ -117,8 +135,28 @@ module opl3(
 		.ram_wr(seq_wr), 
 		.ram_addr(seq_addr), 
 		.ram_rdata(seq_rdata), 
-		.ram_wdata(seq_wdata)
+		.ram_wdata(seq_wdata),
+        .channel_sample_hit(channel_sample_hit)
 	);
+
+    // LEDs 0..3 follow actual channel 0..3 synthesis output, before panning.
+    // Hold each detected sample for 2205 audio ticks (~50 ms at 44.1 kHz),
+    // so short notes and waveform zero crossings remain visible on the board.
+    genvar led_channel;
+    generate
+        for (led_channel = 0; led_channel < 4; led_channel = led_channel + 1) begin : channel_led
+            reg [11:0]hold_samples = 12'd0;
+            always @(posedge clk) begin
+                if (reset)
+                    hold_samples <= 12'd0;
+                else if (channel_sample_hit[led_channel])
+                    hold_samples <= 12'd2205;
+                else if (read == 2'b01 && hold_samples != 0)
+                    hold_samples <= hold_samples - 1'b1;
+            end
+            assign channel_active[led_channel] = !reset && (hold_samples != 0);
+        end
+    endgenerate
    
    NextZ80 Z80 (
       .DI(CPU_IORQ ? InPort : CPU_DIN), 

@@ -59,6 +59,7 @@ endmodule
 module sndfifo (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [15:0] data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -89,6 +90,7 @@ endmodule
 module q16 (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [7:0]  data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -129,6 +131,7 @@ endmodule
 module qdsp (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [15:0] data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -158,6 +161,7 @@ endmodule
 module opl3_in (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [15:0] data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -173,6 +177,7 @@ module opl3_in (
 
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("auto"), 
+        .READ_MODE("fwft"),
         .READ_DATA_WIDTH(16), 
         .WRITE_DATA_WIDTH(16), 
         .FIFO_WRITE_DEPTH(256)

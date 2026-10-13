@@ -31,6 +31,7 @@ module Next186_SoC (
     output wire        VGA_HSYNC,
     
     output wire        SDLED,
+    output wire [3:0]  OPL3_CHANNEL_ACTIVE,
     input  wire        BTN_SOUTH,
     input  wire        BTN_WEST,
     
@@ -110,6 +111,7 @@ module Next186_SoC (
         // 声音接口
         .AUD_L          (AUDIO_L),
         .AUD_R          (AUDIO_R),
+        .OPL3_CHANNEL_ACTIVE (OPL3_CHANNEL_ACTIVE),
         
         // PS/2 键盘鼠标接口
         .PS2_CLK1       (PS2_CLKA),

@@ -76,7 +76,8 @@ module opl3seq(
 	output reg ram_wr,
 	output [11:0]ram_addr,
 	input [15:0]ram_rdata,
-	output reg [15:0]ram_wdata
+	output reg [15:0]ram_wdata,
+    output wire [3:0]channel_sample_hit
   );
    parameter OPL3Struct_base = 12'h000;
 
@@ -130,6 +131,20 @@ module opl3seq(
    reg cy;
 	reg [2:0]phase;
 	wire [25:0]mul1 = tmp1[9:0] * ram_rdata_lo;
+
+   // Observe the completed channel samples before stereo panning. During
+   // STATE 21, synchronous RAM returns the previous channel's chanout;
+   // s_ram_CHindex is already one channel ahead (1 means channel 0).
+   // Ignore tiny residual samples around zero. This is observation only.
+   wire channel_sample_nonzero = ($signed(ram_rdata) >= 16'sd16) ||
+                                 ($signed(ram_rdata) <= -16'sd16);
+   genvar led_channel;
+   generate
+      for (led_channel = 0; led_channel < 4; led_channel = led_channel + 1) begin : channel_monitor
+         assign channel_sample_hit[led_channel] = (STATE == 6'd21) &&
+             (s_ram_CHindex == (led_channel + 1)) && channel_sample_nonzero;
+      end
+   endgenerate
 
 // tmp1 adder   
 	reg [3:0]tmp1op;

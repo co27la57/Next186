@@ -104,6 +104,7 @@ module top_zynq7010 (
     wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
     wire        SDLED;
     wire        VK_ACT;      // ★ 诊断: 虚拟键盘注入活动(每收一个字节翻转一次)
+    wire [3:0]  opl3_channel_active;
 
     reg [25:0] blink_cnt = 0;
     always @(posedge m_axi_aclk) blink_cnt <= blink_cnt + 1'b1;
@@ -236,6 +237,7 @@ module top_zynq7010 (
         .VGA_VSYNC  (VGA_VSYNC), .VGA_HSYNC  (VGA_HSYNC),
         .SDLED      (SDLED),        .BTN_SOUTH  (next186_reset_trigger),
         .VK_ACT     (VK_ACT),
+        .OPL3_CHANNEL_ACTIVE (opl3_channel_active),
         .BTN_WEST   (1'b0),
         .PS2_CLKA   (PS2_CLKA), .PS2_DATA   (PS2_DATA),
         .PS2_CLKB   (PS2_CLKB), .PS2_DATB   (PS2_DATB),
@@ -442,12 +444,7 @@ module top_zynq7010 (
     //   → 寄存 1 拍后 W_H 拍 q_a=word n），FSM 直接 main_wdata<=ram_wdata，与停顿无关。
     assign ram_wr_valid = (state == W_L) || (state == W_H);
 
-    assign test_led[0] = init_done && !init_fail;
-    // ★★★ 诊断(2026-10-10): 原 test_led[1] = init_done && init_fail, 但 `init_fail` 在本文件里
-    //   **从未被赋值**(只有声明), 所以这盏灯永远不亮 —— 现在把它改造成"配置完成后是否又复位过"的粘滞标志。
-    //   用途: 上电跑起来后, 若 40 秒左右真的发生了一次复位, 这盏灯会**亮起并保持**,
-    //         一眼即可回答"到底有没有复位"(不用 ILA)。
-    //   判据源: m_axi_aresetn(= PS 的 FCLK_RESET0_N 经 proc_sys_reset) 在 init 完成后被拉低过。
+    // Retain the existing reset-history diagnostics for optional observation.
     reg init_was_done = 1'b0;
     reg rst_seen      = 1'b0;
     reg autorst_seen  = 1'b0;
@@ -456,28 +453,10 @@ module top_zynq7010 (
         if (init_was_done && !m_axi_aresetn) rst_seen <= 1'b1;   // 配置完成后又复位 -> 粘滞
         if (init_was_done && auto_rst_reg)   autorst_seen <= 1'b1; // init 后 auto_rst 又抬升(=给 SoC 一次复位)
     end
-    // test_led[1] 亮 = init 之后发生过复位(任一路), 且粘滞保持到断电。
-    assign test_led[1] = rst_seen | autorst_seen;
-    assign test_led[2] = blink_cnt[25];
-    // ★ test_led[3] 暂改为"虚拟键盘注入活动"指示(每收一个注入字节翻转一次)。
-    //   原为 SDLED(SD 片选调试); 本次诊断优先, 用完可改回: assign test_led[3] = SDLED;
-    assign test_led[3] = VK_ACT;
-
-    // ========================================================================
-    // ★ 键盘字节观测: 已从 LED 方案改为纯 ILA 方案(2026-10-10)
-    //
-    //   曾试过让 4 个 LED 直接显示 KBD_GPIO[3:0] 的低 4 位(方案 A), 但:
-    //     1) test_led 只有 4 位, 要显示字节得占掉全部 4 盏灯, 代价太大;
-    //     2) test_led[0] 与下面的整体赋值会造成 MDRV-1 多驱动(实测报错)。
-    //   所以恢复 4 个 LED 各自的原职, 字节对账完全交给 ILA 的四层探针:
-    //     组A(kbd_gpio_rx.v): dbg_emio_data / dbg_emio_stb / dbg_rx_data / dbg_popped
-    //     组B(KB_8042.v)    : dbg_vk_data / dbg_s_data / dbg_dout / dbg_sel_dout
-    //                         dbg_vk_valid / dbg_vk_ready / dbg_OBF / dbg_ctl_outb / dbg_src
-    //   触发与判读表见 sim/BOARD-TEST-110th-键盘字节四层对账探针.md
-    //
-    //   下面这行整体赋值已删除 —— 它与逐位 assign test_led[N] 冲突:
-    //       [DRC MDRV-1] Net .../test_led[0] has multiple drivers
-    // ========================================================================
+    // OPL3 activity, active high: LED0..3 = logical channels 0..3.
+    // The existing test_led pin constraints and VGA ILA stay in place.
+    // A lit LED means |channel sample| >= 16 within the last ~50 ms.
+    assign test_led = opl3_channel_active;
 
     // ========================================================================
     // ★ 方案 A 验证粘滞计数（2026-09-20，纯观测，不影响主逻辑）

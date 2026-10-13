@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 module xpm_fifo_async #(
     parameter integer FIFO_MEMORY_TYPE = "auto",
-    parameter integer READ_MODE         = 1,
+    parameter READ_MODE                 = "fwft",
     parameter integer FIFO_WRITE_DEPTH  = 256,
     parameter integer WRITE_DATA_WIDTH  = 16,
     parameter integer READ_DATA_WIDTH   = 16,

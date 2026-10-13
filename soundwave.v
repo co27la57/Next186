@@ -52,6 +52,7 @@
 module soundwave(
 		input CLK,
 		input CLK44100x256,
+		input reset,
 		input CLK_I2S,
 		input [15:0]data,
 		input we,
@@ -99,6 +100,7 @@ module soundwave(
 	 
 	 sndfifo sndfifo_inst 
 	 (
+	  .rst(reset),
 	  .wrclk(CLK), // input wr_clk
 	  .rdclk(CLK44100x256), // input rd_clk
 	  .data(wdata), // input [31 : 0] din

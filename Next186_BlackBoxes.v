@@ -59,6 +59,7 @@ endmodule
 module sndfifo (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [15:0] data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -89,6 +90,7 @@ endmodule
 module q16 (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [7:0]  data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -127,6 +129,7 @@ endmodule
 module qdsp (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [15:0] data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -156,6 +159,7 @@ endmodule
 module opl3_in (
     input  wire        wrclk,
     input  wire        rdclk,
+    input  wire        rst,
     input  wire [15:0] data,
     input  wire        wrreq,
     input  wire        rdreq,
@@ -171,6 +175,10 @@ module opl3_in (
 
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("auto"), 
+        // opl3.v consumes qdata during the same Z80 I/O read cycle and the
+        // original Quartus FIFO was fall-through. XPM defaults to std mode,
+        // which returns the first word only after rd_en and loses that read.
+        .READ_MODE("fwft"),
         .READ_DATA_WIDTH(16), 
         .WRITE_DATA_WIDTH(16), 
         .FIFO_WRITE_DEPTH(256)

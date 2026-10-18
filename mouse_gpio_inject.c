@@ -348,6 +348,31 @@ static int ascii_to_sc(char c, uint8_t *sc, int *shift) {
         case '\\': *sc = 0x2b; return 1;
         case '\'': *sc = 0x28; return 1;
         case '`':  *sc = 0x29; return 1;
+        /* ---- 需要 Shift 的符号(US 键盘布局): 基码与对应无 Shift 键相同 ----
+         * 2026-10-19 修复: 老表只收录无 Shift 标点, 这些符号全落 default 被跳过
+         * (用户实测 ':' 打不出来; 大小写正常是因为 A-Z 单独走 *shift=1 分支)。
+         * 数字行符号用 sc_0_9[] 取基码, 与板上 BIOS 键位表保持一致。 */
+        case ':':  *sc = 0x27; *shift = 1; return 1;   /* Shift+; */
+        case '"':  *sc = 0x28; *shift = 1; return 1;   /* Shift+' */
+        case '{':  *sc = 0x1a; *shift = 1; return 1;   /* Shift+[ */
+        case '}':  *sc = 0x1b; *shift = 1; return 1;   /* Shift+] */
+        case '|':  *sc = 0x2b; *shift = 1; return 1;   /* Shift+\ */
+        case '<':  *sc = 0x33; *shift = 1; return 1;   /* Shift+, */
+        case '>':  *sc = 0x34; *shift = 1; return 1;   /* Shift+. */
+        case '?':  *sc = 0x35; *shift = 1; return 1;   /* Shift+/ */
+        case '~':  *sc = 0x29; *shift = 1; return 1;   /* Shift+` */
+        case '_':  *sc = 0x0c; *shift = 1; return 1;   /* Shift+- */
+        case '+':  *sc = 0x0d; *shift = 1; return 1;   /* Shift+= */
+        case '!':  *sc = sc_0_9[1]; *shift = 1; return 1;   /* Shift+1 */
+        case '@':  *sc = sc_0_9[2]; *shift = 1; return 1;   /* Shift+2 */
+        case '#':  *sc = sc_0_9[3]; *shift = 1; return 1;   /* Shift+3 */
+        case '$':  *sc = sc_0_9[4]; *shift = 1; return 1;   /* Shift+4 */
+        case '%':  *sc = sc_0_9[5]; *shift = 1; return 1;   /* Shift+5 */
+        case '^':  *sc = sc_0_9[6]; *shift = 1; return 1;   /* Shift+6 */
+        case '&':  *sc = sc_0_9[7]; *shift = 1; return 1;   /* Shift+7 */
+        case '*':  *sc = sc_0_9[8]; *shift = 1; return 1;   /* Shift+8 */
+        case '(':  *sc = sc_0_9[9]; *shift = 1; return 1;   /* Shift+9 */
+        case ')':  *sc = sc_0_9[0]; *shift = 1; return 1;   /* Shift+0 */
         default: return 0;
     }
 }

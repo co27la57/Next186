@@ -77,13 +77,7 @@ module opl3seq(
 	output [11:0]ram_addr,
 	input [15:0]ram_rdata,
 	output reg [15:0]ram_wdata,
-    output wire [3:0]channel_sample_hit,
-    // ★ 2026-10-13 探针（纯调试、不影响音频通路）：锁存音序器当前处理槽位的
-    //   {TLL,AMmask} 字 / volume 字 / {OPindex,CHindex}，供 ILA 观测
-    //   "特定乐器特别大"是否因槽位 TL 停在 0（OPL3Struct 上电全零）。
-    output reg [15:0]dbg_slot_tll,
-    output reg [9:0]dbg_slot_vol,
-    output reg [5:0]dbg_slot_id
+    output wire [3:0]channel_sample_hit
   );
    parameter OPL3Struct_base = 12'h000;
 
@@ -192,15 +186,6 @@ module opl3seq(
    );
 
    always @(posedge clk) begin
-      // ★ 探针锁存（纯调试）：STATE 11/12 的地址指向当前槽位的 AMmask({TLL,AMmask})
-      //   与 volume 字；BRAM 寄存读晚一拍有效，故在 STATE 12/13 锁存 ram_rdata。
-      //   STATE 11~13 期间 s_ram_CHindex/s_ram_OPindex 不被修改，可唯一标识该槽位。
-      if(STATE == 12) begin
-         dbg_slot_tll <= ram_rdata;
-         dbg_slot_id  <= {s_ram_OPindex, s_ram_CHindex};
-      end
-      if(STATE == 13) dbg_slot_vol <= ram_rdata[9:0];
-
       STATE <= nextSTATE;
       s_ram_CHindex <= ram_CHindex;
       s_ram_OPindex <= ram_OPindex;

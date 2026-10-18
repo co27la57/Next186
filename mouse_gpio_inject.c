@@ -371,6 +371,87 @@ static void type_string(const char *s) {
     }
 }
 
+/* ===========================================================================
+ * 终端转义序列解码 (2026-10-19)
+ * ---------------------------------------------------------------------------
+ * 背景: SSH 终端把功能键发成多字节序列, 老代码只认 ESC [ A/B/C/D(方向键),
+ *   其余序列被"跳过 ESC 再把剩余字节当字母打" => F1 变成 "op", F2 变 "oq"...
+ *   (Windows 3.0 安装程序因此完全没法用 F 键)
+ *
+ * 支持的序列(覆盖 xterm / PuTTY / Linux 控制台三种常见形态):
+ *   F1-F4   = ESC O P / Q / R / S            (SS3)
+ *   F1-F5   = ESC [ [ A / B / C / D / E      (Linux 控制台)
+ *   F1-F12  = ESC [ 11~ .. ESC [ 24~         (xterm CSI ~; 注意无 16/22)
+ *   Insert  = ESC [ 2~   Delete = ESC [ 3~
+ *   PgUp    = ESC [ 5~   PgDn   = ESC [ 6~
+ *   Home    = ESC [ H 或 ESC [ 1~   End = ESC [ F 或 ESC [ 4~
+ *   Shift+Tab = ESC [ Z
+ * 方向键 ESC [ A/B/C/D 仍由调用方映射(默认模式=鼠标, -k 模式=光标键)。
+ * ===========================================================================*/
+
+/* 读 ESC 之后的序列字节(不含 ESC): 每个字节最多等 50ms。
+ * 终端一次性把整个序列写进 pty, 所以后续字节的 poll 都会立即成功。
+ * 返回读到的字节数(0 = 真的是单独的 ESC 键)。 */
+static int read_esc_seq(char *seq, int max) {
+    struct pollfd pf = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
+    int n = 0;
+    while (n < max) {
+        if (poll(&pf, 1, 50) != 1 || !(pf.revents & POLLIN)) break;
+        if (read(STDIN_FILENO, &seq[n], 1) != 1) break;
+        n++;
+        if (seq[n-1] == '~') break;                              /* CSI ~ 型结束 */
+        if (n == 2 && seq[0] == 'O') break;                      /* ESC O x 型结束 */
+        if (n == 2 && seq[0] == '[' && strchr("ABCDHFPQRSZ", seq[1])) break;
+        if (n == 3 && seq[0] == '[' && seq[1] == '[') break;     /* ESC [ [ x 型 */
+    }
+    return n;
+}
+
+/* 序列 -> PS/2 set-1 make 扫描码; 0 = 不认识 */
+static int esc_seq_to_sc(const char *s, int n) {
+    if (n == 2 && s[0] == 'O') {                                 /* SS3: F1-F4 */
+        switch (s[1]) {
+            case 'P': return 0x3B; case 'Q': return 0x3C;
+            case 'R': return 0x3D; case 'S': return 0x3E;
+        }
+        return 0;
+    }
+    if (n >= 2 && s[0] == '[') {
+        if (s[1] == '[' && n == 3) {                             /* Linux 控制台 F1-F5 */
+            switch (s[2]) {
+                case 'A': return 0x3B; case 'B': return 0x3C; case 'C': return 0x3D;
+                case 'D': return 0x3E; case 'E': return 0x3F;
+            }
+            return 0;
+        }
+        if (s[n-1] == '~') {                                     /* CSI <num> ~ */
+            int num = 0;
+            for (int i = 1; i < n-1; i++) {
+                if (s[i] < '0' || s[i] > '9') return 0;
+                num = num * 10 + (s[i] - '0');
+            }
+            switch (num) {
+                case  1: return 0x47;   /* Home   */
+                case  2: return 0x52;   /* Insert */
+                case  3: return 0x53;   /* Delete */
+                case  4: return 0x4F;   /* End    */
+                case  5: return 0x49;   /* PgUp   */
+                case  6: return 0x51;   /* PgDn   */
+                case 11: return 0x3B; case 12: return 0x3C; case 13: return 0x3D;
+                case 14: return 0x3E; case 15: return 0x3F; case 17: return 0x40;
+                case 18: return 0x41; case 19: return 0x42; case 20: return 0x43;
+                case 21: return 0x44; case 23: return 0x57; case 24: return 0x58;
+            }
+            return 0;
+        }
+        if (n == 2) {                                            /* Home/End 单字节型 */
+            if (s[1] == 'H') return 0x47;
+            if (s[1] == 'F') return 0x4F;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int pin0 = DEFAULT_BASE;   /* EMIO 内的引脚序号(0..117), 默认 54 */
     int i, test_mode = 0, keymap_check = 0, sweep_mode = 0, sweep_from = 0, verify_mode = 0;
@@ -644,30 +725,44 @@ int main(int argc, char **argv) {
     while (read(STDIN_FILENO, &c, 1) == 1) {
         if ((unsigned char)c == 0x1d) break;      /* Ctrl+] */
 
-        /* ---- 鼠标: ESC [ A/B/C/D 方向键 ---- */
-        if (!kbd_only && (unsigned char)c == 0x1b) {
-            struct pollfd pf = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
-            if (poll(&pf, 1, 50) == 1 && (pf.revents & POLLIN)) {
-                char c2 = 0;
-                if (read(STDIN_FILENO, &c2, 1) == 1 && c2 == '[') {
-                    if (poll(&pf, 1, 50) == 1 && (pf.revents & POLLIN)) {
-                        char c3;
-                        if (read(STDIN_FILENO, &c3, 1) == 1) {
-                            if      (c3 == 'A') { send_mouse_packet(0,  step, 0); continue; }
-                            else if (c3 == 'B') { send_mouse_packet(0, -step, 0); continue; }
-                            else if (c3 == 'C') { send_mouse_packet( step, 0, 0); continue; }
-                            else if (c3 == 'D') { send_mouse_packet(-step, 0, 0); continue; }
-                        }
-                    }
-                    continue;    /* 其它 ESC[ 序列(功能键等): 忽略 */
+        /* ---- 终端转义序列: 功能键/导航键 -> PS/2 扫描码; 方向键 -> 鼠标(-k 模式=光标键) ---- */
+        if ((unsigned char)c == 0x1b) {
+            char seq[8];
+            int n = read_esc_seq(seq, sizeof(seq));
+            if (n == 0) {                                    /* 50ms 内无后续 = 真的是 ESC 键 */
+                uint8_t e; int sh;
+                if (ascii_to_sc(0x1b, &e, &sh)) send_key(e);
+                continue;
+            }
+            if (n == 2 && seq[0] == '[' &&
+                (seq[1]=='A' || seq[1]=='B' || seq[1]=='C' || seq[1]=='D')) {
+                if (kbd_only) {                              /* -k 纯键盘: 方向键=光标键 */
+                    static const uint8_t cur[4] = {0x48, 0x50, 0x4B, 0x4D}; /* 上/下/左/右 */
+                    send_key(cur[seq[1] - 'A']);
+                } else {                                     /* 默认: 方向键=鼠标 */
+                    if      (seq[1]=='A') send_mouse_packet(0,  step, 0);
+                    else if (seq[1]=='B') send_mouse_packet(0, -step, 0);
+                    else if (seq[1]=='C') send_mouse_packet( step, 0, 0);
+                    else                 send_mouse_packet(-step, 0, 0);
                 }
-                /* 不是 '[' => 不是方向键序列: 先把 ESC 本身发出去, 再处理这个字节 */
-                if (c2) {
-                    uint8_t e; int sh;
-                    if (!kbd_only && ascii_to_sc(0x1b, &e, &sh)) send_key(e);
-                    c = c2;
+                continue;
+            }
+            if (n == 3 && seq[0]=='[' && seq[1]=='[' && seq[2]=='Z') {   /* Shift+Tab */
+                send_byte(0x2a); send_key(0x0f); send_shift_release();
+                continue;
+            }
+            {
+                int sc = esc_seq_to_sc(seq, n);
+                if (sc) {
+                    send_key((uint8_t)sc);
+                    if (verbose) fprintf(stderr, "[fkey] %d 字节序列 -> sc=0x%02x\n", n, sc);
+                } else if (verbose) {
+                    fprintf(stderr, "[fkey] 未识别序列(%d 字节):", n);
+                    for (int i = 0; i < n; i++) fprintf(stderr, " %02x", (unsigned char)seq[i]);
+                    fprintf(stderr, "\n");
                 }
             }
+            continue;
         }
         /* ---- 鼠标: 按键单击(用 Ctrl+字母, 这些字节不在打字表里, 不会冲突) ---- */
         if (!kbd_only) {

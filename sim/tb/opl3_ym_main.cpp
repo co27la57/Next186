@@ -6,7 +6,7 @@
 //   ③ 出样周期 ≈ 50MHz/49716Hz ≈ 1005 拍（验证 14.318MHz 时钟与出样率）。
 // 跑法（cwd=imports/）：
 //   python sim/build.py --top opl3_ym --out sim/run/opl3_ym --run \
-//     opl3_ym.v ymf262.v ym_lib.v sim/tb/opl3_ym_main.cpp
+//     opl3_ym.v ymf262.sv ym_lib.sv sim/tb/opl3_ym_main.cpp
 // ---------------------------------------------------------------------------
 #include "Vopl3_ym.h"
 #include "verilated.h"

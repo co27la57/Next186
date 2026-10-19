@@ -48,7 +48,11 @@ module opl3_ym #(
     output wire [15:0] left,
     output wire [15:0] right,
     // ---- 通道发声指示（LED 用）----
-    output wire [3:0]  keyon
+    output wire [3:0]  keyon,
+    // ---- 运行时音量（0x38C）----
+    input  wire        vol_ce,       // 音量写选通 = IORQ & CPU_CE & OPL3_VOL_PORT
+    output wire [3:0]  att,          // 当前衰减位数（供上层读回）
+    output wire        vol_hit       // sticky：是否曾收到过音量写（诊断用）
 );
 
     // ========================================================================
@@ -172,8 +176,34 @@ module opl3_ym #(
         o_smpac <= ymf_smpac; o_smpbd  <= ymf_smpbd;
     end
 
-    assign left  = ym_left;
-    assign right = ym_right;
+    // ========================================================================
+    // 6. 运行时音量（0x38C）：**必须用 mclk 域的边沿检测**
+    //    ★ 教训：原来在 ddr_186 里用 `always @(posedge clk_cpu)` 采样
+    //      IORQ & CPU_CE & WR & 端口译码，结果写永远不生效（ID=A 说明位流是新的、
+    //      读回通路也通，但 att 一直是 0）。原因：CPU_CE 在 I/O 周期里的有效窗口
+    //      可能只有半个 clk_cpu 周期，正好落在两个 25MHz 上升沿之间被完全漏掉。
+    //      这里复用与 OPL3 寄存器写完全相同的那套 50MHz 边沿检测，已被证明可靠。
+    // ========================================================================
+    (* ASYNC_REG = "TRUE" *) reg vol_d1 = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg vol_d2 = 1'b0;
+    reg [3:0] vol_att  = 4'd0;
+    reg       vol_hit_r = 1'b0;
+
+    always @(posedge mclk) begin
+        vol_d1 <= vol_ce;
+        vol_d2 <= vol_d1;
+        if (vol_d1 & ~vol_d2) begin
+            vol_att   <= (cpu_din[3:0] > 4'd8) ? 4'd8 : cpu_din[3:0];
+            vol_hit_r <= 1'b1;
+        end
+    end
+
+    assign att     = vol_att;
+    assign vol_hit = vol_hit_r;
+
+    // 算术右移：att=0 时不衰减，att=3 为 ÷8
+    assign left  = $signed(ym_left)  >>> vol_att;
+    assign right = $signed(ym_right) >>> vol_att;
 
     // ========================================================================
     // 5. LED 通道指示（核心内部的 key-on 状态，层次引用；与用户原 IP 一致）

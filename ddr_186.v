@@ -510,6 +510,10 @@ module system
     wire [7:0]opl32_data;
     wire [15:0]opl3left;
     wire [15:0]opl3right;
+    // 运行时音量：寄存器本体在 opl3_ym 里（50MHz 域），这里只做选通和读回
+    wire        opl3_vol_ce;
+    wire [3:0]  opl3_att_val;
+    wire        opl3_vol_hit;
     wire [9:0] opl3_debug_qdata;
     wire [15:0] opl3_debug_cpu_addr;
     wire        opl3_debug_qempty;
@@ -542,14 +546,11 @@ module system
 		({8{JOYSTICK}} & GPIOState) |
 		({8{I2C_SELECT}} & i2cdout);
 
-	// ★ OPL3 音量寄存器（端口 0x38C）：声明必须在 PORT_IN 复用之前，
-	//   否则 Verilog 会建 1 bit 隐式网把 4 位值截断。
-	reg [3:0] opl3_att = 4'd0;
-	// 与第 460 行 dbg_dbg* 那组调试寄存器完全同一种写法（电平触发，已验证可用）
-	always @(posedge clk_cpu) begin
-		if(IORQ & CPU_CE & WR & OPL3_VOL_PORT)
-			opl3_att <= (CPU_DOUT[3:0] > 4'd8) ? 4'd8 : CPU_DOUT[3:0];
-	end
+	// ★ OPL3 音量：寄存器本体在 opl3_ym 内（mclk=50MHz 域，复用 OPL3 写那条已验证的
+	//   边沿检测）。这里只产生写选通，供上层例化连接。
+	//   ★ 之前把寄存器放在这里用 `posedge clk_cpu` 采样，写永远不生效：
+	//     CPU_CE 的有效窗口可能只有半个 25MHz 周期，落在两个上升沿之间被漏掉。
+	assign opl3_vol_ce = IORQ & CPU_CE & WR & OPL3_VOL_PORT;
 
 	assign PORT_IN[7:0] = 
 							 ({8{VGA_DAC_OE}} & VGA_DAC_DATA) |
@@ -568,8 +569,8 @@ module system
 							 ({8{COM1_PORT}} & COM1_DOUT) | 
 							 ({8{MPU401_OE}} & MPU401_DOUT) |
 							 ({8{OPL3_PORT}} & opl32_data) |
-							 ({8{OPL3_VOL_PORT}} & {4'b0000, opl3_att}) |
-							 ({8{OPL3_ID_PORT}}  & 8'h41);
+							 ({8{OPL3_VOL_PORT}} & {4'b0000, opl3_att_val}) |
+							 ({8{OPL3_ID_PORT}}  & {7'b0100000, opl3_vol_hit});
 
 	dcm dcm_system 
 	(
@@ -1232,13 +1233,9 @@ module system
 		 .out2(timer_spk)
     );
 	 
-    // ★★ OPL3 音量：**运行时**通过 DOS 端口 0x38C 调整，写完立即生效，不用重建位流。
-    //   值 = 右移位数：0=不衰减(默认)，1=÷2，2=÷4，3=÷8，4=÷16 …… 上限 8。
-    //   用法（DOS 下）：DEBUG  然后  o 38C 3  回车，再 q 退出。读 0x38C 可回读当前值。
-    //   背景：混音级 soundwave 是直接相加（lmix = DSS + OPL3 + MIDI + speaker）没有分压，
-    //         而新核 4 个通道 TL=0 就能顶到 ±32672(99.7%FS)，与其它音源叠加容易削波。
-    wire signed [15:0] opl3_att_l = $signed(opl3left)  >>> opl3_att;
-    wire signed [15:0] opl3_att_r = $signed(opl3right) >>> opl3_att;
+    // ★★ OPL3 音量：运行时通过端口 0x38C 调整（衰减在 opl3_ym 内部完成），
+    //   值 = 右移位数 0..8。用法：DOS 下运行 tools/oplvol.com  `OPLVOL 3`。
+    //   0x38D 读回 0x40|vol_hit：'A'=从未收到过音量写，'B'=收到过。
 
 	 soundwave sound_gen
 	 (
@@ -1249,8 +1246,8 @@ module system
 		.we(IORQ & CPU_CE & WR & PARALLEL_PORT),
 		.word(WORD),
 		.speaker(speaker_on & timer_spk),
-		.opl3left(opl3_att_l),
-      .opl3right(opl3_att_r),
+		.opl3left(opl3left),
+      .opl3right(opl3right),
       .stb44100(stb44100),
 		.full(sq_full),
 		.dss_full(dss_full),
@@ -1308,7 +1305,11 @@ module system
         .cpu_dout (opl32_data),
         .left     (opl3left),
         .right    (opl3right),
-        .keyon    (OPL3_CHANNEL_ACTIVE)
+        .keyon    (OPL3_CHANNEL_ACTIVE),
+        // 运行时音量（0x38C）：寄存器在核内 50MHz 域，vol_hit 用于诊断写是否被看到
+        .vol_ce   (opl3_vol_ce),
+        .att      (opl3_att_val),
+        .vol_hit  (opl3_vol_hit)
      );
 
     // 旧 opl3 模块的内部调试线不再有驱动源；保留常量以免上层探针引用悬空。

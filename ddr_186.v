@@ -121,8 +121,13 @@ module system
 	wire CPU32_PORT = PORT_ADDR[15:1] == (16'h0002 >> 1); 
 	wire COM1_PORT = PORT_ADDR[15:3] == (16'h03f8 >> 3);
 	wire OPL3_PORT = PORT_ADDR[15:2] == (16'h0388 >> 2); 
-	// ★ 运行时 OPL3 音量寄存器（真机 OPL3 只用到 0x388..0x38B，0x38C 空闲）
-	wire OPL3_VOL_PORT = PORT_ADDR[15:2] == (16'h038C >> 2); 
+	// ★ 运行时 OPL3 音量寄存器 + 版本标识（真机 OPL3 只用到 0x388..0x38B）
+	//   0x38C 读/写 = 衰减位数 0..8；0x38D 读 = 固定 0x41('A') 作为"新位流"标识。
+	//   加 0x38D 的原因：未译码的端口读出来也是 0，光看 V=0 分不清
+	//   "写入没生效" 和 "这个位流里根本没这段逻辑"。
+	wire OPL3_AUX_PORT = PORT_ADDR[15:2] == (16'h038C >> 2);
+	wire OPL3_VOL_PORT = OPL3_AUX_PORT && (PORT_ADDR[1:0] == 2'b00);
+	wire OPL3_ID_PORT  = OPL3_AUX_PORT && (PORT_ADDR[1:0] == 2'b01); 
 	wire NMI_IORQ_PORT = PORT_ADDR[15:1] == (16'h0006 >> 1); 
  	wire [7:0]VGA_DAC_DATA;
 	wire [7:0]VGA_CRT_DATA;
@@ -540,10 +545,9 @@ module system
 	// ★ OPL3 音量寄存器（端口 0x38C）：声明必须在 PORT_IN 复用之前，
 	//   否则 Verilog 会建 1 bit 隐式网把 4 位值截断。
 	reg [3:0] opl3_att = 4'd0;
-	reg       opl3_vol_wr_d = 1'b0;
+	// 与第 460 行 dbg_dbg* 那组调试寄存器完全同一种写法（电平触发，已验证可用）
 	always @(posedge clk_cpu) begin
-		opl3_vol_wr_d <= IORQ & CPU_CE & WR & OPL3_VOL_PORT;
-		if (IORQ & CPU_CE & WR & OPL3_VOL_PORT & ~opl3_vol_wr_d)
+		if(IORQ & CPU_CE & WR & OPL3_VOL_PORT)
 			opl3_att <= (CPU_DOUT[3:0] > 4'd8) ? 4'd8 : CPU_DOUT[3:0];
 	end
 
@@ -564,7 +568,8 @@ module system
 							 ({8{COM1_PORT}} & COM1_DOUT) | 
 							 ({8{MPU401_OE}} & MPU401_DOUT) |
 							 ({8{OPL3_PORT}} & opl32_data) |
-							 ({8{OPL3_VOL_PORT}} & {4'b0000, opl3_att});
+							 ({8{OPL3_VOL_PORT}} & {4'b0000, opl3_att}) |
+							 ({8{OPL3_ID_PORT}}  & 8'h41);
 
 	dcm dcm_system 
 	(

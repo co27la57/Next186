@@ -18,7 +18,9 @@ module opl3_ym_probe #(
     output wire        dbg_smpac,   // 右声道采样锁存脉冲
     output wire        dbg_sy,      // DAC 串行帧同步
     output wire        dbg_clk14,   // 内部 14.318MHz CLK
-    output wire [31:0] dbg_phase    // 相位累加器
+    output wire [31:0] dbg_phase,   // 相位累加器
+    output wire [10:0] dbg_wptr,    // 写 FIFO 写指针（统计实际入队字节数）
+    output wire [10:0] dbg_rptr     // 写 FIFO 读指针
 );
 
     opl3_ym #(.INC_14M(INC_14M)) u (
@@ -33,5 +35,7 @@ module opl3_ym_probe #(
     assign dbg_sy    = u.ymf_sy;
     assign dbg_clk14 = u.clk_14m;
     assign dbg_phase = u.phase_acc;
+    assign dbg_wptr  = u.wptr;
+    assign dbg_rptr  = u.rptr;
 
 endmodule

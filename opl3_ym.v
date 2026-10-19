@@ -30,8 +30,11 @@ module opl3_ym #(
     // 14.318 MHz 相位累加步进：50MHz 基 -> 1229922297；100MHz 基 -> 614948834
     //   ★ 别用 307474417：那是 14.318MHz 的 1/4（3.58MHz），会让整片慢 4 倍、音高全错。
     parameter [31:0] INC_14M = 32'd1229922297,
-    // 重放半周期拍数：4 us 对应的 MCLK 拍数（50MHz -> 200；60MHz -> 240）
-    parameter [10:0] REP_CYC = 11'd200
+    // 重放半周期拍数。一个字节 = REP_CYC 拍 CS/WR 有效 + REP_CYC 拍间隔。
+    //   50MHz 下 REP_CYC=100 -> 2us + 2us = 4us/字节 = 250K 字节/秒。
+    //   ★ 实测边界：2us/字节 完全失效（输出只剩 8~12），4us/字节 满幅正常，
+    //     8us/字节 也正常。取 4us 兼顾吞吐与可靠，不要再往下压。
+    parameter [10:0] REP_CYC = 11'd100
 ) (
     input  wire        mclk,         // MCLK = CLK_50MHZ（核心只需 >=~50MHz；见文件头说明）
     input  wire        rst,          // 低有效复位（接 rstcount[18]：复位期间为 0）
@@ -73,22 +76,33 @@ module opl3_ym #(
     (* ASYNC_REG = "TRUE" *) reg io_wr_d1 = 1'b0;
     (* ASYNC_REG = "TRUE" *) reg io_wr_d2 = 1'b0;
 
-    reg  [9:0] wfifo [0:63];                  // {addr[1:0], data[7:0]}
-    reg  [6:0] wptr = 7'd0, rptr = 7'd0;
+    // ★★ 深度必须够深：186 的 OUT 周期只有 ~320ns（3M 字节/秒），而重放只有
+    //    125K~250K 字节/秒。DOS 游戏初始化 OPL3 常常连写 200~400 个寄存器，
+    //    64 深 FIFO 会被瞬间填满并丢弃 60% 以上的 patch 参数 —— 被丢掉的正是
+    //    TL/ADSR，而未写到的通道 TLL 保持 0（= 最大音量）⇒ "部分乐器特别大"。
+    //    实测（sim/tb/opl3_ym_burst_main.cpp）：64 深时 200 字节突发只进 71 个。
+    //    ⇒ 加到 1024 深（10bit×1024，推断为分布式 RAM，约 160 LUT）。
+    //   ★ 必须强制 distributed：读口是**组合读**（rep_d 直接驱动核心的地址/数据），
+    //     若让 Vivado 推断成 BRAM，读端口会变成 1 拍同步、并且同址读写会冲突，
+    //     硬件行为与仿真不一致。实测不写属性时 Vivado 确实推成了 1x RAMB18E1。
+    localparam FIFO_AW = 10;                       // 1024 深
+    (* ram_style = "distributed" *)
+    reg  [9:0] wfifo [0:(1<<FIFO_AW)-1];           // {addr[1:0], data[7:0]}
+    reg [FIFO_AW:0] wptr = 0, rptr = 0;            // 多 1 bit 做整圈标志
     wire wfifo_empty = (wptr == rptr);
-    wire wfifo_full  = (wptr[5:0] == rptr[5:0]) && (wptr[6] != rptr[6]);
+    wire wfifo_full  = (wptr[FIFO_AW-1:0] == rptr[FIFO_AW-1:0]) && (wptr[FIFO_AW] != rptr[FIFO_AW]);
 
     always @(posedge mclk) begin
         io_wr_d1 <= io_wr;
         io_wr_d2 <= io_wr_d1;
         if (io_wr_d1 & ~io_wr_d2 && !wfifo_full) begin
-            wfifo[wptr[5:0]] <= {cpu_addr, cpu_din};
+            wfifo[wptr[FIFO_AW-1:0]] <= {cpu_addr, cpu_din};
             wptr <= wptr + 1'b1;
         end
     end
 
-    // 重放节奏：0..REP_CYC-1 拍 CS/WR 有效(4us)，REP_CYC..2*REP_CYC-1 拍间隔(4us)，
-    //           合计 8us/字节。REP_CYC 按 MCLK 频率换算（50MHz -> 200 拍）。
+    // 重放节奏：0..REP_CYC-1 拍 CS/WR 有效，REP_CYC..2*REP_CYC-1 拍间隔。
+    //   一个字节 = 2*REP_CYC 拍。50MHz 下 REP_CYC=100 -> 4us/字节 = 250K 字节/秒。
     // ★ 核心的写信号链是 write0_sr -> write0_l -> write0_l2 三级、每级 2 个 clk 相位，
     //   写脉冲在 io_write 上升后约 1.1us 才出现；地址/数据必须在这段时间内保持不变，
     //   否则脉冲会落到下一条目上（实测 1us 周期时 ra_address_latch 抓到了下一条的数据）。
@@ -102,7 +116,7 @@ module opl3_ym #(
         end else rep_cnt <= 11'd0;
     end
     wire       rep_run = (rep_cnt < rep_half) && !wfifo_empty;
-    wire [9:0] rep_d   = wfifo[rptr[5:0]];
+    wire [9:0] rep_d   = wfifo[rptr[FIFO_AW-1:0]];
 
     // 读口(状态 0x388)直通；写口走重放
     wire [1:0] core_addr = io_rd ? cpu_addr : rep_d[9:8];

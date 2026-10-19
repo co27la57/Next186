@@ -1214,6 +1214,13 @@ module system
 		 .out2(timer_spk)
     );
 	 
+    // ★ OPL3 音量微调：混音级 soundwave 是直接相加（lmix = DSS + OPL3 + MIDI + speaker），
+    //   没有分压。若某套游戏下 OPL3 仍偏响，把 OPL3_ATT 改成 1(÷2) / 2(÷4) 重建即可。
+    //   0 = 不衰减（与旧 opl3 核的输出幅度语义对齐：单算子满幅同为 ±4084/4095）。
+    localparam OPL3_ATT = 0;
+    wire signed [15:0] opl3_att_l = (OPL3_ATT == 0) ? $signed(opl3left)  : ($signed(opl3left)  >>> OPL3_ATT);
+    wire signed [15:0] opl3_att_r = (OPL3_ATT == 0) ? $signed(opl3right) : ($signed(opl3right) >>> OPL3_ATT);
+
 	 soundwave sound_gen
 	 (
 		.CLK(clk_cpu),
@@ -1223,8 +1230,8 @@ module system
 		.we(IORQ & CPU_CE & WR & PARALLEL_PORT),
 		.word(WORD),
 		.speaker(speaker_on & timer_spk),
-		.opl3left(opl3left),
-      .opl3right(opl3right),
+		.opl3left(opl3_att_l),
+      .opl3right(opl3_att_r),
       .stb44100(stb44100),
 		.full(sq_full),
 		.dss_full(dss_full),
@@ -1272,7 +1279,7 @@ module system
     //   ★ MCLK 直接挂 CLK_50MHZ：核心是「单时钟 + CLK 相位使能」结构，出样率只由内部
     //     14.318MHz CLK 决定，与 MCLK 频率无关（100/71.4/62.5/50MHz 扫描结果逐位相同）。
     //     原 opl3 核本来就跑 CLK_50MHZ，沿用同一时钟域，不必新增 100MHz 域。
-    opl3_ym #(.INC_14M(32'd1229922297), .REP_CYC(11'd200)) opl3_inst (  // 50MHz 基 -> 14.3182MHz
+    opl3_ym #(.INC_14M(32'd1229922297), .REP_CYC(11'd100)) opl3_inst (  // 50MHz 基 -> 14.3182MHz；4us/字节
         .mclk     (CLK_50MHZ),
         .rst      (rstcount[18]),               // IC 低有效：复位期间 rstcount 为 0
         .cpu_ce   (IORQ & CPU_CE & OPL3_PORT),  // 端口译码（clk_cpu 域，内部 2FF 同步）

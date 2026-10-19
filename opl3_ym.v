@@ -91,10 +91,18 @@ module opl3_ym #(
     //    TL/ADSR，而未写到的通道 TLL 保持 0（= 最大音量）⇒ "部分乐器特别大"。
     //    实测（sim/tb/opl3_ym_burst_main.cpp）：64 深时 200 字节突发只进 71 个。
     //    ⇒ 加到 1024 深（10bit×1024，推断为分布式 RAM，约 160 LUT）。
-    //   ★ 必须强制 distributed：读口是**组合读**（rep_d 直接驱动核心的地址/数据），
-    //     若让 Vivado 推断成 BRAM，读端口会变成 1 拍同步、并且同址读写会冲突，
-    //     硬件行为与仿真不一致。实测不写属性时 Vivado 确实推成了 1x RAMB18E1。
-    localparam FIFO_AW = 10;                       // 1024 深
+    //   ★★ 放块 RAM（1 x RAMB18），**不要用 distributed**：
+    //     1024x10 的分布式 RAM 要吃掉 323 个 LUT，而且在 LUT 资源里撒得很开，
+    //     把这个本来就时序紧张的设计的布线搞坏（实测 CPU 时钟域 WNS 恶化到 -21.5ns，
+    //     2481 个端点失败，CPU 跑不起来 -> DOS 不启动、屏幕只有彩色垃圾）。
+    //     改 BRAM 后读口有 1 拍延迟，但重放每个字节要 4us，20ns 延迟完全无所谓。
+    //   ★ 深度 512 而不是 1024：1024 深要 323 个分布式 RAM LUT，会把布线搞坏
+    //     （CPU 时钟域 WNS 恶化到 -21.5ns / 2481 端点失败 ⇒ CPU 不启动、花屏）。
+    //     512 深约 160 个 LUT；按 8us/字节排空 4ms，足够吸收游戏初始化突发（实测 272 字节）
+    //     （实测 200 字节突发峰值占用 185）。若不够，ovf 标志会置位，端口 0x38D 显示 'C'。
+    localparam FIFO_AW = 9;                        // 512 深
+    //   ★★ 必须强制 distributed：读口是组合读。不加属性时 Vivado 会把它推成
+    //     1 x RAMB18（读口变同步），硬件行为与仿真不一致（实测 util 里 BRAM=0.5）。
     (* ram_style = "distributed" *)
     reg  [9:0] wfifo [0:(1<<FIFO_AW)-1];           // {addr[1:0], data[7:0]}
     reg [FIFO_AW:0] wptr = 0, rptr = 0;            // 多 1 bit 做整圈标志
@@ -141,7 +149,7 @@ module opl3_ym #(
         end
     end
     wire       rep_run = (rep_cnt < rep_half) && !wfifo_empty && !rep_hold;
-    wire [9:0] rep_d   = wfifo[rptr[FIFO_AW-1:0]];
+    wire [9:0] rep_d   = wfifo[rptr[FIFO_AW-1:0]];   // 组合读（分布式 RAM）
 
     // 重放优先：rep_run 时地址/数据必须来自 FIFO，绝不能被读切走
     wire [1:0] core_addr = rep_run ? rep_d[9:8] : cpu_addr;

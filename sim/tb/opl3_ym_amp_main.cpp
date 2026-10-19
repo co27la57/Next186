@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
     printf("峰值幅度 = %d  (占 16bit 满幅 %.2f%%)\n",
            (Lmax > -Lmin ? Lmax : -Lmin),
            100.0 * (Lmax > -Lmin ? Lmax : -Lmin) / 32767.0);
+    printf("ovf(丢字节)=%d  vol_hit=%d\n", (int)dut->ovf, (int)dut->vol_hit);
     printf("非零样本 %.1f%%   left 变化 %lld 次 / %lld 样本\n",
            100.0 * nz / (double)n, changes, n);
     printf("------------------------------------------\n");

@@ -8,7 +8,12 @@
 // 关键设计点：
 //  1) 时钟：MCLK = CLK_50MHZ；CLK = 14.318 MHz 由相位累加器生成
 //     （真实 YMF262 出样率 = CLK/288 = 49716 Hz；14.318 MHz 才能保证音高正确）。
-//     50 MHz * 307474417/2^32 = 14.3181 MHz。
+//     50 MHz * 1229922297/2^32 = 14.3182 MHz（CLK14 实测 14.3182MHz）。
+//     ★ 2026-10-19 实测结论：MCLK 频率**不影响**出样率（核心是「单时钟 + c1/c2 相位使能」
+//       结构，CLK 才是决定音高/速度的）。四频点扫描 100 / 71.4 / 62.5 / 50 MHz 结果逐位相同：
+//       CLK14=14.3182MHz、SMPBD=49720Hz、CLK14/采样=287.98、峰值 ±4085。
+//       ⇒ 所以用 50 MHz 即可（原 opl3 核本来也跑 CLK_50MHZ），无需独立的 100MHz 域。
+//       100MHz 在 xc7z010-1 上时序不收敛：门级模型关键路径 13.5ns/15级逻辑（WNS=-3.99ns）。
 //  2) 寄存器接口：与真实芯片一致 —— ADDRESS[1:0] 取 0x388..0x38B 的低 2 位，
 //     CS/WR/RD **低有效**，写数据在 MCLK 上锁存。
 //     186 侧总线在 clk_cpu(25MHz) 域，这里用 2FF 同步 + 把写脉冲展宽到 >=2 个 MCLK，
@@ -22,10 +27,13 @@
 `timescale 1ns / 1ps
 
 module opl3_ym #(
-    // 14.318 MHz 相位累加步进：50MHz 基 -> 307474417；100MHz 基 -> 614948834
-    parameter [31:0] INC_14M = 32'd614948834
+    // 14.318 MHz 相位累加步进：50MHz 基 -> 1229922297；100MHz 基 -> 614948834
+    //   ★ 别用 307474417：那是 14.318MHz 的 1/4（3.58MHz），会让整片慢 4 倍、音高全错。
+    parameter [31:0] INC_14M = 32'd1229922297,
+    // 重放半周期拍数：4 us 对应的 MCLK 拍数（50MHz -> 200；60MHz -> 240）
+    parameter [10:0] REP_CYC = 11'd200
 ) (
-    input  wire        mclk,         // MCLK = 100 MHz（核心要求 MCLK >= 4*CLK；50MHz 会慢 4 倍）
+    input  wire        mclk,         // MCLK = CLK_50MHZ（核心只需 >=~50MHz；见文件头说明）
     input  wire        rst,          // 低有效复位（接 rstcount[18]：复位期间为 0）
     // ---- 186 I/O 总线（clk_cpu 域）----
     input  wire        cpu_ce,       // 端口译码有效 = IORQ & CPU_CE & OPL3_PORT
@@ -79,18 +87,21 @@ module opl3_ym #(
         end
     end
 
-    // 重放节奏：0..399 拍 CS/WR 有效(4us)，400..799 拍间隔(4us)，共 8us/字节（判定实验）
+    // 重放节奏：0..REP_CYC-1 拍 CS/WR 有效(4us)，REP_CYC..2*REP_CYC-1 拍间隔(4us)，
+    //           合计 8us/字节。REP_CYC 按 MCLK 频率换算（50MHz -> 200 拍）。
     // ★ 核心的写信号链是 write0_sr -> write0_l -> write0_l2 三级、每级 2 个 clk 相位，
     //   写脉冲在 io_write 上升后约 1.1us 才出现；地址/数据必须在这段时间内保持不变，
     //   否则脉冲会落到下一条目上（实测 1us 周期时 ra_address_latch 抓到了下一条的数据）。
-    reg [9:0] rep_cnt = 10'd0;
+    reg [10:0] rep_cnt = 11'd0;
+    wire [10:0] rep_half = REP_CYC;
+    wire [10:0] rep_full = REP_CYC + REP_CYC - 11'd1;
     always @(posedge mclk) begin
         if (!wfifo_empty) begin
-            if (rep_cnt < 10'd799) rep_cnt <= rep_cnt + 1'b1;
-            else begin rep_cnt <= 10'd0; rptr <= rptr + 1'b1; end
-        end else rep_cnt <= 10'd0;
+            if (rep_cnt < rep_full) rep_cnt <= rep_cnt + 1'b1;
+            else begin rep_cnt <= 11'd0; rptr <= rptr + 1'b1; end
+        end else rep_cnt <= 11'd0;
     end
-    wire       rep_run = (rep_cnt < 10'd400) && !wfifo_empty;
+    wire       rep_run = (rep_cnt < rep_half) && !wfifo_empty;
     wire [9:0] rep_d   = wfifo[rptr[5:0]];
 
     // 读口(状态 0x388)直通；写口走重放

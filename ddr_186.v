@@ -560,7 +560,6 @@ module system
 		.c2(sdr_CLK_out),
 		.c3(CLK44100x256),
 		.c4(CLK14745600),
-		.c5(clk_100m),              // ★ OPL3(YMF262) 的 MCLK
 		.locked(clk_sys_locked)
     );
     assign clk_sdr = CLK_50MHZ; 
@@ -1270,8 +1269,11 @@ module system
     //   替换原作者那套「命令 FIFO + 内部 Z80 + opl3.mem 固件 + opl3seq」实现。
     //   核直接吃真实芯片寄存器写（0x388/0x389，A1=bank），音频仍走 soundwave 混音。
     //   旧的 opl3.v / opl3seq.v 不再被例化（Vivado 自动裁掉，连同 opl3_mem/opl3_in/opl3.mem）。
-    opl3_ym #(.INC_14M(32'd614948834)) opl3_inst (   // 100MHz 基 -> 14.318MHz
-        .mclk     (clk_100m),
+    //   ★ MCLK 直接挂 CLK_50MHZ：核心是「单时钟 + CLK 相位使能」结构，出样率只由内部
+    //     14.318MHz CLK 决定，与 MCLK 频率无关（100/71.4/62.5/50MHz 扫描结果逐位相同）。
+    //     原 opl3 核本来就跑 CLK_50MHZ，沿用同一时钟域，不必新增 100MHz 域。
+    opl3_ym #(.INC_14M(32'd1229922297), .REP_CYC(11'd200)) opl3_inst (  // 50MHz 基 -> 14.3182MHz
+        .mclk     (CLK_50MHZ),
         .rst      (rstcount[18]),               // IC 低有效：复位期间 rstcount 为 0
         .cpu_ce   (IORQ & CPU_CE & OPL3_PORT),  // 端口译码（clk_cpu 域，内部 2FF 同步）
         .cpu_wr   (WR),

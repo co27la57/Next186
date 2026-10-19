@@ -20,14 +20,18 @@ module opl3_ym_probe #(
     output wire        dbg_clk14,   // 内部 14.318MHz CLK
     output wire [31:0] dbg_phase,   // 相位累加器
     output wire [10:0] dbg_wptr,    // 写 FIFO 写指针（统计实际入队字节数）
-    output wire [10:0] dbg_rptr     // 写 FIFO 读指针
+    output wire [10:0] dbg_rptr,    // 写 FIFO 读指针
+    output wire [3:0]  dbg_att      // 运行时音量衰减位数
 );
 
     opl3_ym #(.INC_14M(INC_14M)) u (
         .mclk(mclk), .rst(rst),
         .cpu_ce(cpu_ce), .cpu_wr(cpu_wr), .cpu_addr(cpu_addr),
         .cpu_din(cpu_din), .cpu_dout(cpu_dout),
-        .left(left), .right(right), .keyon(keyon)
+        .left(left), .right(right), .keyon(keyon),
+        .vol_ce(1'b0),                 // 探针台架不测音量通路
+        .att(dbg_att),
+        .vol_hit()
     );
 
     assign dbg_smpbd = u.ymf_smpbd;

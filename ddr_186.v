@@ -589,6 +589,12 @@ module system
     );
     assign clk_sdr = CLK_50MHZ; 
 	
+	reg [1:0] vb_sync = 2'b00;
+	reg       vb_d    = 1'b0;
+	reg [5:0] vb_win  = 6'd0;
+	wire      vb_rise = vb_sync[1] & ~vb_d;
+	wire      vb_resync = (vb_win != 6'd0);
+
     reg [3:0] fifo_rst_cnt = 4'd15;
     reg       fifo_rst     = 1'b1;
     always @(posedge CLK_50MHZ) begin
@@ -599,7 +605,9 @@ module system
             fifo_rst_cnt <= fifo_rst_cnt - 1'b1;
             fifo_rst     <= 1'b1;
         end else begin
-            fifo_rst     <= 1'b0;
+            // ★ 帧同步重同步窗口内也保持复位：丢弃在途 burst 与上帧残留数据，
+            //   保证窗口释放后 FIFO 里第一个字就是"帧缓冲行 0 首字"。
+            fifo_rst     <= vb_resync;
         end
     end
 
@@ -1367,8 +1375,33 @@ module system
 	
     reg [1:0] sys_cmd_ack_d1 = 2'b00;
 
+	// ============================================================================
+	// ★★★ 帧同步重同步（frame-locked resync）—— 修"水平滚动 / 尾部重复 / 开机两字符垃圾"
+	//
+	//   根因（结构性问题，不是参数问题）：
+	//     显示侧（clk_25, vrden 取 FIFO）与取指侧（clk_sdr, sdraddr 取 DDR）之间只有 FIFO，
+	//     没有帧/行级同步。屏幕第 k 行显示帧缓冲哪一行，取决于 **FIFO 水位 - 取指行相位**。
+	//     而原来的帧首复位写成：
+	//         if(s_vga_endscanline) begin ... if(vcount == 10'd0) vga_ddr_row_col <= ...; end
+	//     `vcount==0` 是**显示侧**事件，`s_vga_endscanline` 是**取指侧**事件 ——
+	//     两者不同源，帧首复位只在"两者恰好同时为真"的那一拍才生效 ⇒ **帧边界成竞态**，
+	//     每帧偏 ±1 行。一行 = 40/80 字符 ⇒ 表现为水平整体位移并累积成滚动/尾部回绕。
+	//
+	//   修法：每帧在 **vblank 上升沿**（显示侧不取数，安全）开一个 64 拍窗口，窗口内：
+	//     · 取指行相位清零（vga_ddr_row_col / vga_lnbytecount / vga_repln_count）
+	//     · FIFO 保持复位（丢弃在途 burst 与上帧残留）
+	//   窗口结束后取指从"帧首"重新开始；vblank 共 40 行(~1.28ms)，足够把 FIFO 预取满，
+	//   到 vcount==0 显示开始时数据已就位 ⇒ **相位 Δ 恒为 0，与 FIFO 水位无关**。
+	// ============================================================================
 	always @ (posedge clk_sdr) begin
         sys_cmd_ack_d1 <= sys_cmd_ack;
+
+		// 帧同步重同步窗口：vblank 上升沿开窗 64 拍（1.28us @50MHz）
+		vb_sync <= {vb_sync[0], vblnk};
+		vb_d    <= vb_sync[1];
+		if (vb_rise)            vb_win <= 6'd63;
+		else if (vb_win != 0)   vb_win <= vb_win - 1'b1;
+
 
 // v6: page the DDR FSM actually consumed (sdraddr delayed 2 clk_sdr).
 //   sdraddr(k) = f(hiaddr(k-1)); the FSM samples sdraddr(k-1) at edge k.
@@ -1482,7 +1515,13 @@ dbg_ad_d1 <= sdraddr[14:5];
             endcase
         end
 				
-		if(s_vga_endscanline) begin
+		if(vb_resync) begin
+			// 帧同步重同步：强行把取指行相位归零到帧首，与 FIFO 水位无关
+			vga_ddr_row_col  <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
+			vga_lnbytecount  <= 8'd0;
+			vga_repln_count  <= 4'd0;
+			s_vga_endscanline <= 1'b0;
+		end else if(s_vga_endscanline) begin
 			col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
 			vga_lnbytecount <= 0;
 			s_vga_endscanline <= 1'b0;
@@ -1520,8 +1559,10 @@ dbg_ad_d1 <= sdraddr[14:5];
 			//     根因是**行序错**而非内容缺，故正确做法是修行序、保持地址窗口不变。
 			//   ★ row_count 自己的复位(s_vga_endframe，见本块下方)保持不动，两者互不干扰。
 			//   若需回退：把 vcount == 10'd0 改回 s_vga_endframe 即可。
-			if(vcount == 10'd0) vga_ddr_row_col <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
-			else if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? VGA_TEXT_ROWCOL : VGA_GRAPH_ROWCOL; 
+			// ★★★ 帧首复位已移出本分支（见下方 vb_resync 最高优先级分支）：
+			//   原来写成 if(vcount==0) 只在本分支内执行，而本分支由取指侧
+			//   s_vga_endscanline 使能 ⇒ 帧边界成竞态，每帧偏 ±1 行 ⇒ 水平滚动。
+			if({1'b0, vga_ddr_row_count} == lcr) vga_ddr_row_col <= vgatext[0] ? VGA_TEXT_ROWCOL : VGA_GRAPH_ROWCOL; 
 				 else if(s_vga_endline) vga_ddr_row_col <= vga_ddr_row_col + (vgatext[0] ? 40 : {vga_offset, 1'b0});   // 146th 钳位已回退（回到"上下颠倒"基线）
 			
 			if(s_vga_endline) vga_repln_count <= 0;

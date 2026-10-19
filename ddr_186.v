@@ -121,6 +121,8 @@ module system
 	wire CPU32_PORT = PORT_ADDR[15:1] == (16'h0002 >> 1); 
 	wire COM1_PORT = PORT_ADDR[15:3] == (16'h03f8 >> 3);
 	wire OPL3_PORT = PORT_ADDR[15:2] == (16'h0388 >> 2); 
+	// ★ 运行时 OPL3 音量寄存器（真机 OPL3 只用到 0x388..0x38B，0x38C 空闲）
+	wire OPL3_VOL_PORT = PORT_ADDR[15:2] == (16'h038C >> 2); 
 	wire NMI_IORQ_PORT = PORT_ADDR[15:1] == (16'h0006 >> 1); 
  	wire [7:0]VGA_DAC_DATA;
 	wire [7:0]VGA_CRT_DATA;
@@ -535,6 +537,16 @@ module system
 		({8{JOYSTICK}} & GPIOState) |
 		({8{I2C_SELECT}} & i2cdout);
 
+	// ★ OPL3 音量寄存器（端口 0x38C）：声明必须在 PORT_IN 复用之前，
+	//   否则 Verilog 会建 1 bit 隐式网把 4 位值截断。
+	reg [3:0] opl3_att = 4'd0;
+	reg       opl3_vol_wr_d = 1'b0;
+	always @(posedge clk_cpu) begin
+		opl3_vol_wr_d <= IORQ & CPU_CE & WR & OPL3_VOL_PORT;
+		if (IORQ & CPU_CE & WR & OPL3_VOL_PORT & ~opl3_vol_wr_d)
+			opl3_att <= (CPU_DOUT[3:0] > 4'd8) ? 4'd8 : CPU_DOUT[3:0];
+	end
+
 	assign PORT_IN[7:0] = 
 							 ({8{VGA_DAC_OE}} & VGA_DAC_DATA) |
 							 ({8{VGA_FONT_OE}}& VGA_FONT_DATA) |
@@ -551,7 +563,8 @@ module system
 							 ({8{CPU32_PORT}} & cpu32_data[7:0]) | 
 							 ({8{COM1_PORT}} & COM1_DOUT) | 
 							 ({8{MPU401_OE}} & MPU401_DOUT) |
-							 ({8{OPL3_PORT}} & opl32_data) ;
+							 ({8{OPL3_PORT}} & opl32_data) |
+							 ({8{OPL3_VOL_PORT}} & {4'b0000, opl3_att});
 
 	dcm dcm_system 
 	(
@@ -1214,12 +1227,13 @@ module system
 		 .out2(timer_spk)
     );
 	 
-    // ★ OPL3 音量微调：混音级 soundwave 是直接相加（lmix = DSS + OPL3 + MIDI + speaker），
-    //   没有分压。若某套游戏下 OPL3 仍偏响，把 OPL3_ATT 改成 1(÷2) / 2(÷4) 重建即可。
-    //   0 = 不衰减（与旧 opl3 核的输出幅度语义对齐：单算子满幅同为 ±4084/4095）。
-    localparam OPL3_ATT = 0;
-    wire signed [15:0] opl3_att_l = (OPL3_ATT == 0) ? $signed(opl3left)  : ($signed(opl3left)  >>> OPL3_ATT);
-    wire signed [15:0] opl3_att_r = (OPL3_ATT == 0) ? $signed(opl3right) : ($signed(opl3right) >>> OPL3_ATT);
+    // ★★ OPL3 音量：**运行时**通过 DOS 端口 0x38C 调整，写完立即生效，不用重建位流。
+    //   值 = 右移位数：0=不衰减(默认)，1=÷2，2=÷4，3=÷8，4=÷16 …… 上限 8。
+    //   用法（DOS 下）：DEBUG  然后  o 38C 3  回车，再 q 退出。读 0x38C 可回读当前值。
+    //   背景：混音级 soundwave 是直接相加（lmix = DSS + OPL3 + MIDI + speaker）没有分压，
+    //         而新核 4 个通道 TL=0 就能顶到 ±32672(99.7%FS)，与其它音源叠加容易削波。
+    wire signed [15:0] opl3_att_l = $signed(opl3left)  >>> opl3_att;
+    wire signed [15:0] opl3_att_r = $signed(opl3right) >>> opl3_att;
 
 	 soundwave sound_gen
 	 (

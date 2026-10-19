@@ -60,7 +60,6 @@ module soundwave(
 		input speaker,
 		input [15:0]opl3left,
 		input [15:0]opl3right,
-		input [3:0] master_att,	// 整机总音量：混音后右移位数（给 PDM 留余量）
 		input [15:0]midi_left,
 		input [15:0]midi_right,
 		output stb44100,
@@ -87,30 +86,10 @@ module soundwave(
 	 reg [15:0]r_opl3right = 0;
 	 reg [15:0]r_midileft = 0;
 	 reg [15:0]r_midiright = 0;
-	 // ★ 2026-10-19 修：原设计 lmix/rmix 只有 **17 位**，但四路 16bit 有符号相加
-	 //   最大可达 +-(32767*3 + 2048) = +-100349，17 位装不下 ⇒ **溢出回绕**，
-	 //   而且回绕后的值看起来"在范围内"，下面的钳位不会生效 ⇒ 输出突跳到反相的爆音。
-	 //   现在先用 19 位做完整求和，再做饱和，最后转偏移码。
-	 //   （原注释写 "add 32878" 是笔误，实际是偏移码，即加 32768）
-	 wire signed [18:0]lmix = {{3{sample1[15]}}, sample1[15:0]}
-	                        + {{3{r_opl3left[15]}}, r_opl3left}
-	                        + {{3{r_midileft[15]}}, r_midileft}
-	                        + (speaker ? 19'sd2048 : 19'sd0);
-	 wire signed [18:0]rmix = {{3{sample1[31]}}, sample1[31:16]}
-	                        + {{3{r_opl3right[15]}}, r_opl3right}
-	                        + {{3{r_midiright[15]}}, r_midiright}
-	                        + (speaker ? 19'sd2048 : 19'sd0);
-	 // 总音量：先右移留余量，再饱和。
-	 // ★ 这块板用的是 1-bit PDM 输出（AUDIO_L/R），满幅意味着占空比顶到 0%/100%，
-	 //   RC 滤波后贴电源轨，功放会进保护 => 听起来"大声时直接静音"。留几 dB 余量即可避免。
-	 wire signed [18:0]lmixv = lmix >>> master_att;
-	 wire signed [18:0]rmixv = rmix >>> master_att;
-	 wire [15:0]lclamp = (lmixv >  19'sd32767) ? 16'hFFFF :
-	                     (lmixv < -19'sd32768) ? 16'h0000 :
-	                     {~lmixv[15], lmixv[14:0]};
-	 wire [15:0]rclamp = (rmixv >  19'sd32767) ? 16'hFFFF :
-	                     (rmixv < -19'sd32768) ? 16'h0000 :
-	                     {~rmixv[15], rmixv[14:0]};
+	 wire [16:0]lmix = {sample1[15], sample1[15:0]} + {r_opl3left[15], r_opl3left} + {r_midileft[15], r_midileft} + (speaker << `SPKVOL); // signed mixer left
+	 wire [16:0]rmix = {sample1[31], sample1[31:16]} + {r_opl3right[15], r_opl3right} + {r_midiright[15], r_midiright} + (speaker << `SPKVOL); // signed mixer right
+	 wire [15:0]lclamp = (~|lmix[16:15] | &lmix[16:15]) ? {!lmix[15], lmix[14:0]} : {16{!lmix[16]}}; // clamp to [-32768..32767] and add 32878
+	 wire [15:0]rclamp = (~|rmix[16:15] | &rmix[16:15]) ? {!rmix[15], rmix[14:0]} : {16{!rmix[16]}};
 	 wire lsign = lval[31:16] < lclamp;
 	 wire rsign = rval[31:16] < rclamp;
 	 wire [11:0]wrusedw;

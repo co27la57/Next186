@@ -60,6 +60,7 @@ module soundwave(
 		input speaker,
 		input [15:0]opl3left,
 		input [15:0]opl3right,
+		input [3:0] master_att,	// 整机总音量：混音后右移位数（给 PDM 留余量）
 		input [15:0]midi_left,
 		input [15:0]midi_right,
 		output stb44100,
@@ -99,12 +100,17 @@ module soundwave(
 	                        + {{3{r_opl3right[15]}}, r_opl3right}
 	                        + {{3{r_midiright[15]}}, r_midiright}
 	                        + (speaker ? 19'sd2048 : 19'sd0);
-	 wire [15:0]lclamp = (lmix >  19'sd32767) ? 16'hFFFF :
-	                     (lmix < -19'sd32768) ? 16'h0000 :
-	                     {~lmix[15], lmix[14:0]};
-	 wire [15:0]rclamp = (rmix >  19'sd32767) ? 16'hFFFF :
-	                     (rmix < -19'sd32768) ? 16'h0000 :
-	                     {~rmix[15], rmix[14:0]};
+	 // 总音量：先右移留余量，再饱和。
+	 // ★ 这块板用的是 1-bit PDM 输出（AUDIO_L/R），满幅意味着占空比顶到 0%/100%，
+	 //   RC 滤波后贴电源轨，功放会进保护 => 听起来"大声时直接静音"。留几 dB 余量即可避免。
+	 wire signed [18:0]lmixv = lmix >>> master_att;
+	 wire signed [18:0]rmixv = rmix >>> master_att;
+	 wire [15:0]lclamp = (lmixv >  19'sd32767) ? 16'hFFFF :
+	                     (lmixv < -19'sd32768) ? 16'h0000 :
+	                     {~lmixv[15], lmixv[14:0]};
+	 wire [15:0]rclamp = (rmixv >  19'sd32767) ? 16'hFFFF :
+	                     (rmixv < -19'sd32768) ? 16'h0000 :
+	                     {~rmixv[15], rmixv[14:0]};
 	 wire lsign = lval[31:16] < lclamp;
 	 wire rsign = rval[31:16] < rclamp;
 	 wire [11:0]wrusedw;

@@ -31,10 +31,12 @@ module opl3_ym #(
     //   ★ 别用 307474417：那是 14.318MHz 的 1/4（3.58MHz），会让整片慢 4 倍、音高全错。
     parameter [31:0] INC_14M = 32'd1229922297,
     // 重放半周期拍数。一个字节 = REP_CYC 拍 CS/WR 有效 + REP_CYC 拍间隔。
-    //   50MHz 下 REP_CYC=100 -> 2us + 2us = 4us/字节 = 250K 字节/秒。
-    //   ★ 实测边界：2us/字节 完全失效（输出只剩 8~12），4us/字节 满幅正常，
-    //     8us/字节 也正常。取 4us 兼顾吞吐与可靠，不要再往下压。
-    parameter [10:0] REP_CYC = 11'd100
+    //   50MHz 下 REP_CYC=200 -> 4us + 4us = 8us/字节 = 125K 字节/秒。
+    //   ★ 实测边界：2us/字节 完全失效（输出只剩 8~12）；4us 单音正常，但核心写链
+    //     延迟实测约 1.1us，2us 的 CS 窗口只剩 0.9us 余量，长序列里可能**间歇丢写**
+    //     （表现为某个通道参数偶发错乱 / key-off 丢失）。8us 窗口余量充足，取 8us。
+    //     吞吐 125K 字节/秒仍远高于 DOS 音乐的写入速率（~50K），FIFO 1024 深吸收突发。
+    parameter [10:0] REP_CYC = 11'd200
 ) (
     input  wire        mclk,         // MCLK = CLK_50MHZ（核心只需 >=~50MHz；见文件头说明）
     input  wire        rst,          // 低有效复位（接 rstcount[18]：复位期间为 0）
@@ -50,9 +52,12 @@ module opl3_ym #(
     // ---- 通道发声指示（LED 用）----
     output wire [3:0]  keyon,
     // ---- 运行时音量（0x38C）----
-    input  wire        vol_ce,       // 音量写选通 = IORQ & CPU_CE & OPL3_VOL_PORT
-    output wire [3:0]  att,          // 当前衰减位数（供上层读回）
-    output wire        vol_hit       // sticky：是否曾收到过音量写（诊断用）
+    input  wire        vol_ce,       // 0x38C 写选通（OPL3 单独衰减）
+    input  wire        mst_ce,       // 0x38E 写选通（整机总音量）
+    output wire [3:0]  att,          // OPL3 衰减位数（供上层读回）
+    output wire [3:0]  mst,          // 总音量衰减位数
+    output wire        vol_hit,      // sticky：是否曾收到过音量写（诊断用）
+    output wire        ovf           // sticky：写 FIFO 是否溢出丢过字节（会导致配对错位）
 );
 
     // ========================================================================
@@ -96,12 +101,19 @@ module opl3_ym #(
     wire wfifo_empty = (wptr == rptr);
     wire wfifo_full  = (wptr[FIFO_AW-1:0] == rptr[FIFO_AW-1:0]) && (wptr[FIFO_AW] != rptr[FIFO_AW]);
 
+    reg ovf_r = 1'b0;                  // sticky：是否发生过写丢弃
     always @(posedge mclk) begin
         io_wr_d1 <= io_wr;
         io_wr_d2 <= io_wr_d1;
-        if (io_wr_d1 & ~io_wr_d2 && !wfifo_full) begin
-            wfifo[wptr[FIFO_AW-1:0]] <= {cpu_addr, cpu_din};
-            wptr <= wptr + 1'b1;
+        if (io_wr_d1 & ~io_wr_d2) begin
+            if (!wfifo_full) begin
+                wfifo[wptr[FIFO_AW-1:0]] <= {cpu_addr, cpu_din};
+                wptr <= wptr + 1'b1;
+            end else begin
+                // ★ 丢一个字节会让"地址/数据"配对整体错位 ⇒ 数据写到相邻寄存器，
+                //   典型后果是 key-off 丢失、fnum 错乱（通道卡住发声）。
+                ovf_r <= 1'b1;
+            end
         end
     end
 
@@ -113,18 +125,27 @@ module opl3_ym #(
     reg [10:0] rep_cnt = 11'd0;
     wire [10:0] rep_half = REP_CYC;
     wire [10:0] rep_full = REP_CYC + REP_CYC - 11'd1;
+    // ★★ 读/写共用核心的 ADDRESS 口，原实现有竞态：
+    //   core_addr = io_rd ? cpu_addr : rep_d[9:8]，wr_n = ~rep_run。
+    //   重放某字节的 CS 窗口内若 CPU 来读状态口（游戏会频繁轮询 0x388），
+    //   地址被瞬间切走而 wr_n 仍然有效 ⇒ 约 1.1us 后出现的写脉冲落到**错误的寄存器**
+    //   ⇒ key-off 丢失 / fnum 写错 ⇒ 某通道卡在发声，演奏结束还在响、音高异常。
+    //   现在：读期间冻结重放（rep_cnt 不前进、rep_run 拉低），读完从原处继续，条目不变。
+    wire rep_hold = io_rd;
+
     always @(posedge mclk) begin
-        if (!wfifo_empty) begin
+        if (wfifo_empty) rep_cnt <= 11'd0;
+        else if (!rep_hold) begin
             if (rep_cnt < rep_full) rep_cnt <= rep_cnt + 1'b1;
             else begin rep_cnt <= 11'd0; rptr <= rptr + 1'b1; end
-        end else rep_cnt <= 11'd0;
+        end
     end
-    wire       rep_run = (rep_cnt < rep_half) && !wfifo_empty;
+    wire       rep_run = (rep_cnt < rep_half) && !wfifo_empty && !rep_hold;
     wire [9:0] rep_d   = wfifo[rptr[FIFO_AW-1:0]];
 
-    // 读口(状态 0x388)直通；写口走重放
-    wire [1:0] core_addr = io_rd ? cpu_addr : rep_d[9:8];
-    wire [7:0] core_din  = io_rd ? cpu_din  : rep_d[7:0];
+    // 重放优先：rep_run 时地址/数据必须来自 FIFO，绝不能被读切走
+    wire [1:0] core_addr = rep_run ? rep_d[9:8] : cpu_addr;
+    wire [7:0] core_din  = rep_run ? rep_d[7:0]  : cpu_din;
 
     // 真实芯片低有效：CS 在读或写期间拉低；WR 仅写有效；RD 仅读有效
     wire cs_n = ~(rep_run | io_rd);
@@ -187,7 +208,10 @@ module opl3_ym #(
     (* ASYNC_REG = "TRUE" *) reg vol_d1 = 1'b0;
     (* ASYNC_REG = "TRUE" *) reg vol_d2 = 1'b0;
     reg [3:0] vol_att  = 4'd0;
+    reg [3:0] mst_att  = 4'd0;
     reg       vol_hit_r = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg mst_d1 = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg mst_d2 = 1'b0;
 
     always @(posedge mclk) begin
         vol_d1 <= vol_ce;
@@ -196,10 +220,19 @@ module opl3_ym #(
             vol_att   <= (cpu_din[3:0] > 4'd8) ? 4'd8 : cpu_din[3:0];
             vol_hit_r <= 1'b1;
         end
+        // 总音量：整机混音后的衰减（给 PDM 留余量，避免占空比顶到 0%/100% 触发功放保护）
+        mst_d1 <= mst_ce;
+        mst_d2 <= mst_d1;
+        if (mst_d1 & ~mst_d2) begin
+            mst_att   <= (cpu_din[3:0] > 4'd8) ? 4'd8 : cpu_din[3:0];
+            vol_hit_r <= 1'b1;
+        end
     end
 
     assign att     = vol_att;
+    assign mst     = mst_att;
     assign vol_hit = vol_hit_r;
+    assign ovf     = ovf_r;
 
     // 算术右移：att=0 时不衰减，att=3 为 ÷8
     assign left  = $signed(ym_left)  >>> vol_att;

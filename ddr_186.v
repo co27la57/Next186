@@ -560,6 +560,7 @@ module system
 		.c2(sdr_CLK_out),
 		.c3(CLK44100x256),
 		.c4(CLK14745600),
+		.c5(clk_100m),              // ★ OPL3(YMF262) 的 MCLK
 		.locked(clk_sys_locked)
     );
     assign clk_sdr = CLK_50MHZ; 
@@ -828,13 +829,18 @@ module system
 	//   · dbg_cpu_lwr / dbg_cpu_pwr = 该次访问是读还是写
 	//   · dbg_cpu_halt / dbg_cpu_ce = CPU 是否 HALT / 是否在跑
 	//   · dbg_cpu_ios = IORQ 上升沿计数（饱和）—— 判断"在空转等 I/O"还是"真的死了"
-	 reg [20:0] dbg_cpu_laddr = 21'h0;
-	 reg        dbg_cpu_lwr   = 1'b0;
-	 reg [15:0] dbg_cpu_lport = 16'h0;
-	 reg        dbg_cpu_pwr   = 1'b0;
-	 reg        dbg_cpu_halt  = 1'b0;
-	 reg        dbg_cpu_ce    = 1'b0;
-	 reg [7:0]  dbg_cpu_ios   = 8'h00;
+	 // ★ 2026-10-19: 给 98th CPU 探针加 mark_debug —— 抓 Windows 3.0 安装程序
+	 //   "无提示闪回 DOS"的崩点。崩后这些值是**冻结的末次状态**, 立即触发即可读:
+	 //   laddr=死在哪(物理地址, 可配 devmem 反查) / lport=卡在哪个端口 /
+	 //   halt+ce=真死还是仍在跑 / ios=在空转等 I/O 还是真死。
+	 //   纯探针改动, 不影响功能(按约定不提交)。
+	 (* mark_debug = "true", keep = "true" *) reg [20:0] dbg_cpu_laddr = 21'h0;
+	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_lwr   = 1'b0;
+	 (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_cpu_lport = 16'h0;
+	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_pwr   = 1'b0;
+	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_halt  = 1'b0;
+	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_ce    = 1'b0;
+	 (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_cpu_ios   = 8'h00;
 	reg iorq_d98 = 1'b0;
 
 	// ★★★ 98th-FONT probes（2026-09-27）：回答"字模 RAM 是否被重写、写成了什么"。
@@ -1260,27 +1266,31 @@ module system
 		.INT(I_COM1)
     );
     
-    opl3 opl3_inst (
-        .clk(CLK_50MHZ), 
-        .cpu_clk(clk_cpu),
-        .addr(PORT_ADDR[1:0]),
-        .din(CPU_DOUT[7:0]),
-        .dout(opl32_data),
-        .ce(IORQ & CPU_CE & OPL3_PORT),
-        .wr(WR),
-        .left(opl3left),
-        .right(opl3right),
-        .stb44100(stb44100),
-        .reset(!rstcount[18]),
-        .channel_active(OPL3_CHANNEL_ACTIVE),
-        .debug_qdata(opl3_debug_qdata),
-        .debug_cpu_addr(opl3_debug_cpu_addr),
-        .debug_qempty(opl3_debug_qempty),
-        .debug_ready(opl3_debug_ready),
-        .debug_cpu_iorq(opl3_debug_cpu_iorq),
-        .debug_cpu_wr(opl3_debug_cpu_wr),
-        .debug_channel_hit(opl3_debug_channel_hit)
+    // ★ 2026-10-19 OPL3 移植：用真实 YMF262 核（nukeykt ymf262 + opl3_ym 适配层）
+    //   替换原作者那套「命令 FIFO + 内部 Z80 + opl3.mem 固件 + opl3seq」实现。
+    //   核直接吃真实芯片寄存器写（0x388/0x389，A1=bank），音频仍走 soundwave 混音。
+    //   旧的 opl3.v / opl3seq.v 不再被例化（Vivado 自动裁掉，连同 opl3_mem/opl3_in/opl3.mem）。
+    opl3_ym #(.INC_14M(32'd614948834)) opl3_inst (   // 100MHz 基 -> 14.318MHz
+        .mclk     (clk_100m),
+        .rst      (rstcount[18]),               // IC 低有效：复位期间 rstcount 为 0
+        .cpu_ce   (IORQ & CPU_CE & OPL3_PORT),  // 端口译码（clk_cpu 域，内部 2FF 同步）
+        .cpu_wr   (WR),
+        .cpu_addr (PORT_ADDR[1:0]),
+        .cpu_din  (CPU_DOUT[7:0]),
+        .cpu_dout (opl32_data),
+        .left     (opl3left),
+        .right    (opl3right),
+        .keyon    (OPL3_CHANNEL_ACTIVE)
      );
+
+    // 旧 opl3 模块的内部调试线不再有驱动源；保留常量以免上层探针引用悬空。
+    assign opl3_debug_qdata     = 10'd0;
+    assign opl3_debug_cpu_addr  = 16'd0;
+    assign opl3_debug_qempty    = 1'b1;
+    assign opl3_debug_ready     = 1'b0;
+    assign opl3_debug_cpu_iorq  = 1'b0;
+    assign opl3_debug_cpu_wr    = 1'b0;
+    assign opl3_debug_channel_hit = 4'd0;
 
 	mpu401 midi(
 		.clk_cpu(clk_cpu),

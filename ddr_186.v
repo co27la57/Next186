@@ -219,14 +219,8 @@ module system
 	wire vga_end_frame = vga_ddr_row_count == (v240[0] ? 479 : 399);
 	reg [3:0]vga_repln_count = 0; 
 	wire [3:0]vga_repln = vgatext[0] ? (half[0] ? 7 : 15) : {3'b000, repln_graph[0]};
-	// ★★★ 第 154 次修复（2026-10-20，Verilator 台架 sim/vga_path 实测确定）：
-	//   行内取指地址计数器。单位 = 半字(=1 个字符)，每个 16 拍突发必须前进 16。
-	//   宽度 8→9 位：图形模式 21×16=336 > 255，原 8 位会溢出回绕。
-	reg [8:0]vga_lnbytecount = 0; 
-	// 行内取指长度判据，单位 = 8 个半字（与 vga_lnbytecount[8:3] 比较）。
-	// 步进翻倍后必须同步翻倍：6→12 / 11→22 / 21→42，否则 endscanline 提前一半触发
-	// ⇒ 行/帧指针跑得比扫描快 ⇒ 画面全黑（2026-09-27 那次回退正是漏了这一步）。
-	wire [5:0]vga_lnend = (vgatext[0] | half[0]) ? 6'd12 : (vga13[0] | planar[0]) ? 6'd22 : 6'd42; 
+	reg [7:0]vga_lnbytecount = 0; 
+	wire [4:0]vga_lnend = (vgatext[0] | half[0]) ? 6 : (vga13[0] | planar[0]) ? 11 : 21; 
 	reg [11:0]vga_font_counter = 0;
 	reg [7:0]vga_attr;
 	reg [4:0]RTCDIV25 = 0;
@@ -1096,7 +1090,7 @@ module system
 			// [3] is the configured graphics repeat bit; [2:0] is the
 			// live fetch-side repeat counter at the frame-start sample.
 			dbg_vga_repln_at_fs <= {repln_graph[0], vga_repln_count[2:0]};
-			dbg_vga_lnb_at_fs   <= vga_lnbytecount[7:0];   // 154th: 计数器已 9 位, 探针保持 8 位(文本模式 ≤96 无截断; 图形 21 模式会截高位)
+			dbg_vga_lnb_at_fs   <= vga_lnbytecount;
 			dbg_vga_mode_at_fs <= {vgatext[1], vgatext[0], vga13[1], vga13[0],
 			                       planar[1], planar[0], half[1], half[0]};
 			dbg_vga_cfg_at_fs  <= {scraddr, vga_offset};
@@ -1116,7 +1110,7 @@ module system
 
 		// ---- 第 118b：只锁存 sdraddr / lnbyte（纯赋值，无比较器）----
 		dbg_vga_sdraddr <= sdraddr;
-		dbg_vga_lnbyte  <= vga_lnbytecount[7:0];   // 154th: 同上, 探针保持 8 位
+		dbg_vga_lnbyte  <= vga_lnbytecount;
 
 		// ---- 第 119 次：一帧内累积计数（整帧重置，无越界风险：30 次 << 255）----
 		dbg_cr_prev <= char_row;                       // 先记上一拍
@@ -1509,30 +1503,13 @@ dbg_ad_d1 <= sdraddr[14:5];
                 2'b10: begin
                     crw <= 1'b0;	
                     col_counter <= {1'b0, max_read, 1'b1};
-                    // ★★★ 第 154 次修复（2026-10-20）：地址步进 8 → 16。
-                    //
-                    //   根因（Verilator 台架 sim/vga_path 实测，非推断）：
-                    //     本处 col_counter 装载 = {1'b0,max_read,1'b1} = 15，之后 FIFO 收
-                    //     `max_read+1 = 8` 个半字（fifo_wr 的门控是 `!col_counter[4]`，实际
-                    //     收 16 个）；而 top_zynq7010.v:328 `main_arlen <= 8'd15` 使 AXI 每
-                    //     突发固定返回 **16** 个半字。于是「取回 16 半字、地址只前进 8 半字」
-                    //     ⇒ 每突发后一半与前一半重叠 ⇒ 屏上每 16 字符块右 8 字 = 左 8 字
-                    //     （8 字符重复）。
-                    //   台架证据：
-                    //     · 每行写 96 半字(6×16)、读 48 次×2=96 半字，与板上 ILA 的
-                    //       WR=0x60(96) 完全吻合 —— 证明硬件确实是按 16 半字/突发入 FIFO。
-                    //     · 消费地址流为 +2,+2,...,-6 循环（每 16 半字只前进 8 半字）。
-                    //     · 把本行改成 +16（且 vga_lnend 同步 ×2）后，消费地址流变为完全连续
-                    //       （每行除回卷外全部 +2），屏上每 16 字符的 8 字重复彻底消失
-                    //       （每行首个跳变从 col8/-55 变为只剩 1 个取指区回卷接缝）。
-                    //
-                    //   ★ 注意：2026-09-27 曾改成 2*(max_read+1) 后回退，原因是**只改了步进
-                    //     没改 vga_lnend** —— 判据 `vga_lnbytecount[7:3] == vga_lnend` 的
-                    //     [7:3] 变成只走偶数 ⇒ 行结束提前一半 ⇒ 画面全黑。本次两处同时改。
-                    //   ★ 原注释"限制 FIFO 每事务接受 max_read+1 个半字"的方向是**错的**：
-                    //     那样每行只入 48 半字 = 48 字符，喂不满 80 列会欠取；且与 ILA 的
-                    //     WR=96 = 6×16 直接矛盾。
-                    vga_lnbytecount <= vga_lnbytecount + {5'b00000, max_read, 1'b0} + 9'd2;  // = 2*(max_read+1) = 16
+                    // ★ 已回退（2026-09-27）：曾把步进改成 2*(max_read+1)，但 `vga_lnbytecount`
+                    //   同时是「扫描行长度判据」的计数器（见 :1064 `s_vga_endscanline <=
+                    //   (vga_lnbytecount[7:3] == vga_lnend)`，文本模式 vga_lnend=6）。步进翻倍后
+                    //   [7:3] 跳着走（偶数）⇒ 行结束判据提前一半触发
+                    //   ⇒ 行/帧指针跑得比实际扫描快 ⇒ **画面全黑**。
+                    //   正确方向：保持本行语义不变，改为限制 FIFO 每事务接受量 = max_read+1 个半字（待验证）。
+                    vga_lnbytecount <= vga_lnbytecount + max_read + 1'b1;
                 end					
                 2'b01, 2'b11: crw <= 1'b1;		
             endcase
@@ -1541,11 +1518,10 @@ dbg_ad_d1 <= sdraddr[14:5];
 		if(vb_resync) begin
 			// 帧同步重同步：强行把取指行相位归零到帧首，与 FIFO 水位无关
 			vga_ddr_row_col  <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
-			vga_lnbytecount  <= 9'd0;
+			vga_lnbytecount  <= 8'd0;
 			vga_repln_count  <= 4'd0;
 			s_vga_endscanline <= 1'b0;
 		end else if(s_vga_endscanline) begin
-			// 154th: 步进为 16 后 vga_lnbytecount[2:0] 恒为 0, 本行残余补偿自动失效(保留以防步进回退)
 			col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
 			vga_lnbytecount <= 0;
 			s_vga_endscanline <= 1'b0;
@@ -1606,7 +1582,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 				repln_graph[0] <= replnreq;
 				vga_ddr_row_count <= 0;
 			end else vga_ddr_row_count <= vga_ddr_row_count + 1'b1; 
-		end else s_vga_endscanline <= (vga_lnbytecount[8:3] == vga_lnend);
+		end else s_vga_endscanline <= (vga_lnbytecount[7:3] == vga_lnend);
 	end
 	
 	// ============================================================================

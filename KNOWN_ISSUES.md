@@ -1,13 +1,19 @@
 # Known issues
 
 Open bugs in this port, with reproduction notes and current status.
-Last updated: 2026-10-06.
+Last updated: 2026-10-21.
+
+**VGA update:** the user has confirmed that the current text/graphics display
+problems are completely fixed by `d237a4f`. Use tag `vga-stable-20261021` as the
+board-verified VGA baseline. The older VGA symptoms and proposed experiments
+below are retained as history; see [the current status](sim/CODEX-VGA-STATUS.md)
+and [the repair report](sim/vga_verify/README.md) before changing VGA logic.
 
 ---
 
 ## 1. VGA text mode: top/bottom half of the screen is swapped
 
-**Status:** open, pre-existing (predates the Zynq port work)
+**Status:** historical VGA issue; superseded by the board-verified `d237a4f` baseline.
 **Severity:** cosmetic — text renders correctly, but the vertical order of
 scanlines is wrong; the console occupies the bottom half of the screen and the
 upper half shows the lower part of the frame.
@@ -223,7 +229,7 @@ both directories or fix the project's source list. See the note in
 
 ## 5. VGA text mode: screen content is cyclically rotated by 7 rows
 
-**Status:** open
+**Status:** historical VGA issue; superseded by the board-verified `d237a4f` baseline.
 **Severity:** cosmetic — all characters render correctly and are in the right
 column order; only the vertical assignment of rows is shifted.
 

@@ -208,9 +208,10 @@ core sources work across memory sizes.
 
 ## Known issues
 
-See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for open bugs, including the
-currently-open keyboard-injection mapping bug (`j` → `4`, Enter/Backspace
-locking the console) and the VGA top/bottom-half vertical swap.
+See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for issue history and current status.
+The user confirmed the VGA text/graphics repair in `d237a4f` on hardware on
+2026-10-21. Preserve tag **`vga-stable-20261021`** as the VGA baseline; see
+[the repair report](sim/vga_verify/README.md) for the changes and validation.
 
 ---
 

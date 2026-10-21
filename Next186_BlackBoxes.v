@@ -18,11 +18,13 @@ module fifo (
     input  wire        rdreq,
     output wire [31:0] q,
     output wire [8:0]  wrusedw,
-    input  wire        rst
+    input  wire        rst,
+    output wire        reset_busy
 );
     wire wr_busy;
     wire rd_busy;
     wire [10:0] full_wrusedw;
+    assign reset_busy=wr_busy;
 
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("auto"),

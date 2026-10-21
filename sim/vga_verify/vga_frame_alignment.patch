@@ -1,0 +1,181 @@
+--- a/ddr_186.v
++++ b/ddr_186.v
+@@ -265,7 +265,23 @@
+ 	wire [7:0]VGA_INDEX;						  
+ 	reg [3:0]exline = 4'b0000; 
+ 	wire vrdon = s_displ_on[~vga_hrzpan];
+-	wire vrden = (vrdon || exline[3]) && ((vgatext[1] | half[1]) ? &hcount_pan[3:0] : (vga13[1] | planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0]);
++    reg [7:0] vga_line_reads=0;
++    reg vga_line_active=0;
++    wire [7:0] vga_line_quota=(vgatext[1] || half[1]) ? 8'd48 :
++                              (vga13[1] || planar[1]) ? 8'd88 : 8'd168;
++    wire vga_read_cadence=(vgatext[1] || half[1]) ? &hcount_pan[3:0] :
++                          (vga13[1] || planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0];
++    wire vrden=(vrdon || vga_line_active) &&
++               (vga_line_reads<vga_line_quota) && vga_read_cadence;
++    always @(posedge clk_25) begin
++        if(vblnk || hcount==10'd799) begin
++            vga_line_reads<=0;
++            vga_line_active<=0;
++        end else begin
++            if(vrdon) vga_line_active<=1;
++            if(vrden) vga_line_reads<=vga_line_reads+1'b1;
++        end
++    end
+ 	reg s_vga_endline;
+ 	reg s_vga_endscanline = 1'b0;
+ 	reg s_vga_endframe;
+@@ -591,9 +607,14 @@
+ 	
+ 	reg [1:0] vb_sync = 2'b00;
+ 	reg       vb_d    = 1'b0;
+-	reg [5:0] vb_win  = 6'd0;
++    localparam [1:0] VGA_FS_RUN=0, VGA_FS_DRAIN=1,
++                     VGA_FS_RESET=2, VGA_FS_READY=3;
++    reg [1:0] vga_frame_state=VGA_FS_RUN;
++    reg [6:0] vga_flush_count=0;
++    wire vga_fifo_reset_busy;
+ 	wire      vb_rise = vb_sync[1] & ~vb_d;
+-	wire      vb_resync = (vb_win != 6'd0);
++    wire vb_resync=(vga_frame_state!=VGA_FS_RUN) || vb_rise;
++    wire vga_fifo_reset_phase=(vga_frame_state==VGA_FS_RESET);
+ 
+     reg [3:0] fifo_rst_cnt = 4'd15;
+     reg       fifo_rst     = 1'b1;
+@@ -607,7 +628,7 @@
+         end else begin
+             // ★ 帧同步重同步窗口内也保持复位：丢弃在途 burst 与上帧残留数据，
+             //   保证窗口释放后 FIFO 里第一个字就是"帧缓冲行 0 首字"。
+-            fifo_rst     <= vb_resync;
++            fifo_rst <= vga_fifo_reset_phase;
+         end
+     end
+ 
+@@ -625,11 +646,12 @@
+ 	  .rdclk(clk_25), 
+ 	  .data(sys_DOUT), 
+ 	  //.wrreq(!crw && sys_rd_data_valid), 
+-	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4]),
++	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4] && !vb_resync),
+ 	  .rdreq(vrden), 
+ 	  .q(fifo_dout32), 
+ 	  .wrusedw(fifo_wr_used_words),
+-	  .rst(fifo_rst)
++	  .rst(fifo_rst),
++      .reset_busy(vga_fifo_reset_busy)
+ 	);
+ 
+ 	VGA_SG VGA 
+@@ -1399,8 +1421,34 @@
+ 		// 帧同步重同步窗口：vblank 上升沿开窗 64 拍（1.28us @50MHz）
+ 		vb_sync <= {vb_sync[0], vblnk};
+ 		vb_d    <= vb_sync[1];
+-		if (vb_rise)            vb_win <= 6'd63;
+-		else if (vb_win != 0)   vb_win <= vb_win - 1'b1;
++        // Retire the current bridge transaction before resetting the FIFO.
++        // crw retains a transaction TYPE; it is deliberately not an idle test.
++        if (!clk_sys_locked) begin
++            vga_frame_state<=VGA_FS_DRAIN;
++            vga_flush_count<=0;
++        end else case(vga_frame_state)
++            VGA_FS_RUN: if(vb_rise) begin
++                vga_frame_state<=VGA_FS_DRAIN;
++                vga_flush_count<=0;
++            end
++            VGA_FS_DRAIN: begin
++                if(sys_cmd_ack!=0 || sys_rd_data_valid) vga_flush_count<=0;
++                else if(vga_flush_count==5) begin
++                    vga_frame_state<=VGA_FS_RESET;
++                    vga_flush_count<=0;
++                end else vga_flush_count<=vga_flush_count+1'b1;
++            end
++            VGA_FS_RESET: begin
++                if(vga_flush_count==63) begin
++                    vga_frame_state<=VGA_FS_READY;
++                    vga_flush_count<=0;
++                end else vga_flush_count<=vga_flush_count+1'b1;
++            end
++            // XPM write reset busy includes its read-domain reset handshake.
++            VGA_FS_READY: if(!fifo_rst && !vga_fifo_reset_busy)
++                vga_frame_state<=VGA_FS_RUN;
++            default: vga_frame_state<=VGA_FS_DRAIN;
++        endcase
+ 
+ 
+ // v6: page the DDR FSM actually consumed (sdraddr delayed 2 clk_sdr).
+@@ -1463,7 +1511,7 @@
+ 		    //   ★ 下溢安全：rowcol 最小 0xE000(57344) - 488 > 0。
+ 		    //   ★ 与旧的 -8(水平 16 字符相位) 是叠加关系：488 = 480(12行) + 8(水平)。
+ 		    //   若需回退，把 11'd488 改回 5'd8 即可（水平相位 1'b0 末位严格不动）。
+-		    {5'b00001, vga_ddr_row_col + vga_lnbytecount - 5'd8, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
++		    {5'b00001, vga_ddr_row_col + vga_lnbytecount, 1'b0} :   // 末位 1'b0 严格不动(用户确认: 1'b0 才是消除水平偏移的那一位)。末位是 sdraddr 最低位(=32bit 取指内选哪个 16bit 字符), 该位错会导致字符对错位 -> 屏幕"每 2 字符重复"。
+ 		    {memmap_mux[8:0], cache_hi_addr[9:0], 5'b00000};
+ 		max_read <= &sdraddr[7:3] ? ~sdraddr[2:0] : 3'b111;	
+ 			
+@@ -1496,7 +1544,7 @@
+ 		else if(~s_prog_full) cntrl0_user_command_register <= 2'b10;
+ 		else cntrl0_user_command_register <= 2'b00;
+ 					
+-		if(!crw && sys_rd_data_valid) col_counter <= col_counter - 1'b1;
++		if(!crw && sys_rd_data_valid && !col_counter[4]) col_counter <= col_counter - 1'b1;
+ 		
+         if (sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00) begin
+             case(sys_cmd_ack)
+@@ -1519,7 +1567,15 @@
+ 			// 帧同步重同步：强行把取指行相位归零到帧首，与 FIFO 水位无关
+ 			vga_ddr_row_col  <= {{1'b0, scraddr[15:13]} + (vgatext[0] ? VGA_TEXT_ROWCOL[16:13] : VGA_GRAPH_ROWCOL[16:13]), scraddr[12:0]};
+ 			vga_lnbytecount  <= 8'd0;
+-			vga_repln_count  <= 4'd0;
++            vga_repln_count<=0;
++            vga_ddr_row_count<=0;
++            col_counter<=5'd16;
++            vga13[0]<=vga13req;
++            vgatext[0]<=vgatextreq;
++            v240[0]<=1'b1;
++            planar[0]<=planarreq;
++            half[0]<=halfreq;
++            repln_graph[0]<=replnreq;
+ 			s_vga_endscanline <= 1'b0;
+ 		end else if(s_vga_endscanline) begin
+ 			col_counter[3:1] <= col_counter[3:1] - vga_lnbytecount[2:0];
+@@ -1925,7 +1981,13 @@
+ 			half[1] <= half[0];
+ 		end
+ 		
+-		if(RTCDIVEND) RTCDIV25 <= 0;	
++        // Follow the fetch configuration while blanked, so the first active
++        // frame cannot use a display mode captured before the frame reset.
++        if(vblnk) begin
++            vga13[1]<=vga13[0]; vgatext[1]<=vgatext[0]; v240[1]<=v240[0];
++            planar[1]<=planar[0]; half[1]<=half[0];
++        end
++        if(RTCDIVEND) RTCDIV25 <= 0;
+ 		else RTCDIV25 <= RTCDIV25 + 1'b1;
+ 		
+ 		if(!BTN_NMI) rNMI <= 0;		
+@@ -1980,7 +2042,7 @@
+ 			else if (cq_sp != 2'd0)  cq_sp <= cq_sp - 2'd1;
+ 		end
+ 	end
+-    assign ram_cmd   = (cq_act && cq_on) ? (cq_sp != 2'd0 ? 2'b00 : cq_cmd) : cntrl0_user_command_register;
++    assign ram_cmd = vb_resync ? 2'b00 : (cq_act && cq_on) ? (cq_sp != 2'd0 ? 2'b00 : cq_cmd) : cntrl0_user_command_register;
+     assign ram_addr  = (cq_act && cq_on) ? cq_addr : sdraddr;
+     assign ram_wdata = cntrl0_user_input_data; 
+     assign sys_DOUT  = ram_rdata;             
+--- a/Next186_BlackBoxes.v
++++ b/Next186_BlackBoxes.v
+@@ -18,11 +18,13 @@
+     input  wire        rdreq,
+     output wire [31:0] q,
+     output wire [8:0]  wrusedw,
+-    input  wire        rst
++    input  wire        rst,
++    output wire        reset_busy
+ );
+     wire wr_busy;
+     wire rd_busy;
+     wire [10:0] full_wrusedw;
++    assign reset_busy=wr_busy;
+ 
+     xpm_fifo_async #(
+         .FIFO_MEMORY_TYPE("auto"),

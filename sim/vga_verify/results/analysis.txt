@@ -1,0 +1,79 @@
+baseline_text
+  FAIL
+  RESULT flags=0 seed=17 stall=3 mode=0 frames=7 FS_variants=2 maxlevel=366 overflow=0 underflow=12869 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=20159 pan=0
+  CHECK address_errors=76800 quota_errors=0 pixel_errors=1024000 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0
+baseline_blank
+  FAIL
+  RESULT flags=0 seed=17 stall=3 mode=0 frames=7 FS_variants=2 maxlevel=366 overflow=0 underflow=12869 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=20159 pan=0
+  CHECK address_errors=76800 quota_errors=0 pixel_errors=1024000 visible_pixels=1024000 nonblack_pixels=7680 blank=1 start=0
+baseline_drop
+  FAIL
+  RESULT flags=8 seed=17 stall=0 mode=0 frames=7 FS_variants=2 maxlevel=366 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=21492 pan=0
+  CHECK address_errors=75280 quota_errors=1921 pixel_errors=1003520 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0
+baseline_short_counter
+  FAIL
+  RESULT flags=7 seed=17 stall=0 mode=0 frames=7 FS_variants=1 maxlevel=364 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=0 pan=0
+  CHECK address_errors=68088 quota_errors=0 pixel_errors=884608 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=5
+frame_only_drop
+  FAIL
+  RESULT flags=15 seed=17 stall=0 mode=0 frames=7 FS_variants=1 maxlevel=366 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=24407 pan=0
+  CHECK address_errors=76576 quota_errors=1921 pixel_errors=1020928 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0
+candidate_text
+  PASS
+  RESULT flags=55 seed=17 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6420 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31640 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=0 start=0
+candidate_blank
+  PASS
+  RESULT flags=55 seed=123 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6486 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31639 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=1 start=0
+candidate_drop
+  PASS
+  RESULT flags=63 seed=17 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6420 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31640 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=0 start=0
+candidate_scroll
+  PASS
+  RESULT flags=55 seed=17 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6420 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31640 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=0 start=5
+candidate_page
+  PASS
+  RESULT flags=55 seed=17 stall=0 mode=0 frames=7 FS_variants=1 maxlevel=364 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=0 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=40
+candidate_pan7
+  PASS
+  RESULT flags=55 seed=17 stall=3 mode=0 frames=7 FS_variants=1 maxlevel=364 overflow=0 underflow=6413 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=23740 pan=7
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0
+candidate_graph
+  PASS
+  RESULT flags=55 seed=991 stall=3 mode=1 frames=9 FS_variants=1 maxlevel=362 overflow=0 underflow=6532 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=19812 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0
+candidate_graph_scroll
+  PASS
+  RESULT flags=55 seed=42 stall=3 mode=1 frames=7 FS_variants=1 maxlevel=362 overflow=0 underflow=6485 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=14867 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=5
+candidate_planar
+  PASS
+  RESULT flags=55 seed=42 stall=3 mode=2 frames=7 FS_variants=1 maxlevel=362 overflow=0 underflow=6485 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=14867 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0
+candidate_graph_seed2
+  PASS
+  RESULT flags=55 seed=12345 stall=3 mode=1 frames=7 FS_variants=1 maxlevel=362 overflow=0 underflow=6472 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=14867 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0
+bandwidth_limit
+  FAIL
+  RESULT flags=55 seed=991 stall=15 mode=1 frames=7 FS_variants=1 maxlevel=356 overflow=0 underflow=90657 steady_OVF=0 steady_UDF=34276 scoreboard_errors=0 textbits=0 cache_n=1234 pan=0
+  CHECK address_errors=122349 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0
+short_axi_experiment
+  PASS
+  RESULT flags=71 seed=991 stall=15 mode=1 frames=7 FS_variants=1 maxlevel=358 overflow=0 underflow=15127 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=9191 pan=0
+  CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=5
+FLUSH 3365789 resync/reset/wbusy/rbusy= (1, 0, 0, 0) ack= 0 bridge= 0
+FLUSH 3365797 resync/reset/wbusy/rbusy= (1, 1, 0, 0) ack= 0 bridge= 0
+FLUSH 3365798 resync/reset/wbusy/rbusy= (1, 1, 1, 0) ack= 0 bridge= 0
+FLUSH 3365803 resync/reset/wbusy/rbusy= (1, 1, 1, 1) ack= 0 bridge= 0
+FLUSH 3365861 resync/reset/wbusy/rbusy= (1, 0, 1, 1) ack= 0 bridge= 0
+FLUSH 3365869 resync/reset/wbusy/rbusy= (1, 0, 1, 0) ack= 0 bridge= 0
+FLUSH 3365879 resync/reset/wbusy/rbusy= (1, 0, 1, 1) ack= 0 bridge= 0
+FLUSH 3365889 resync/reset/wbusy/rbusy= (1, 0, 1, 0) ack= 0 bridge= 0
+FLUSH 3365895 resync/reset/wbusy/rbusy= (1, 0, 0, 0) ack= 0 bridge= 0
+FLUSH 3365896 resync/reset/wbusy/rbusy= (0, 0, 0, 0) ack= 0 bridge= 0
+FIRST_POST_FLUSH_WRITE 3365904 half_addr= 0x5c000

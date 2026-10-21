@@ -1,0 +1,376 @@
+[
+  {
+    "name": "baseline_text",
+    "args": [
+      0,
+      17,
+      3,
+      7,
+      0,
+      211,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 1,
+    "expected_pass": false,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=0 seed=17 stall=3 mode=0 frames=7 FS_variants=2 maxlevel=366 overflow=0 underflow=12869 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=20159 pan=0",
+      "CHECK address_errors=76800 quota_errors=0 pixel_errors=1024000 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "baseline_blank",
+    "args": [
+      0,
+      17,
+      3,
+      7,
+      0,
+      211,
+      0,
+      1,
+      0,
+      399
+    ],
+    "returncode": 1,
+    "expected_pass": false,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=0 seed=17 stall=3 mode=0 frames=7 FS_variants=2 maxlevel=366 overflow=0 underflow=12869 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=20159 pan=0",
+      "CHECK address_errors=76800 quota_errors=0 pixel_errors=1024000 visible_pixels=1024000 nonblack_pixels=7680 blank=1 start=0"
+    ]
+  },
+  {
+    "name": "baseline_drop",
+    "args": [
+      8,
+      17,
+      0,
+      7,
+      0,
+      211,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 1,
+    "expected_pass": false,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=8 seed=17 stall=0 mode=0 frames=7 FS_variants=2 maxlevel=366 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=21492 pan=0",
+      "CHECK address_errors=75280 quota_errors=1921 pixel_errors=1003520 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "baseline_short_counter",
+    "args": [
+      7,
+      17,
+      0,
+      7,
+      0,
+      0,
+      0,
+      0,
+      5,
+      399
+    ],
+    "returncode": 1,
+    "expected_pass": false,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=7 seed=17 stall=0 mode=0 frames=7 FS_variants=1 maxlevel=364 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=0 pan=0",
+      "CHECK address_errors=68088 quota_errors=0 pixel_errors=884608 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=5"
+    ]
+  },
+  {
+    "name": "frame_only_drop",
+    "args": [
+      15,
+      17,
+      0,
+      7,
+      0,
+      211,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 1,
+    "expected_pass": false,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=15 seed=17 stall=0 mode=0 frames=7 FS_variants=1 maxlevel=366 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=24407 pan=0",
+      "CHECK address_errors=76576 quota_errors=1921 pixel_errors=1020928 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "candidate_text",
+    "args": [
+      55,
+      17,
+      3,
+      9,
+      0,
+      211,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=17 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6420 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31640 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "candidate_blank",
+    "args": [
+      55,
+      123,
+      3,
+      9,
+      0,
+      211,
+      0,
+      1,
+      0,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=123 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6486 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31639 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=1 start=0"
+    ]
+  },
+  {
+    "name": "candidate_drop",
+    "args": [
+      63,
+      17,
+      3,
+      9,
+      0,
+      211,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=63 seed=17 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6420 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31640 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "candidate_scroll",
+    "args": [
+      55,
+      17,
+      3,
+      9,
+      0,
+      211,
+      0,
+      0,
+      5,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=17 stall=3 mode=0 frames=9 FS_variants=1 maxlevel=364 overflow=0 underflow=6420 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=31640 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1536000 nonblack_pixels=0 blank=0 start=5"
+    ]
+  },
+  {
+    "name": "candidate_page",
+    "args": [
+      55,
+      17,
+      0,
+      7,
+      0,
+      0,
+      0,
+      0,
+      40,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=17 stall=0 mode=0 frames=7 FS_variants=1 maxlevel=364 overflow=0 underflow=0 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=0 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=40"
+    ]
+  },
+  {
+    "name": "candidate_pan7",
+    "args": [
+      55,
+      17,
+      3,
+      7,
+      0,
+      211,
+      7,
+      0,
+      0,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=17 stall=3 mode=0 frames=7 FS_variants=1 maxlevel=364 overflow=0 underflow=6413 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=7 cache_n=23740 pan=7",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=1024000 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "candidate_graph",
+    "args": [
+      55,
+      991,
+      3,
+      9,
+      1,
+      337,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=991 stall=3 mode=1 frames=9 FS_variants=1 maxlevel=362 overflow=0 underflow=6532 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=19812 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "candidate_graph_scroll",
+    "args": [
+      55,
+      42,
+      3,
+      7,
+      1,
+      337,
+      0,
+      0,
+      5,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=42 stall=3 mode=1 frames=7 FS_variants=1 maxlevel=362 overflow=0 underflow=6485 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=14867 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=5"
+    ]
+  },
+  {
+    "name": "candidate_planar",
+    "args": [
+      55,
+      42,
+      3,
+      7,
+      2,
+      337,
+      0,
+      0,
+      0,
+      479
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=42 stall=3 mode=2 frames=7 FS_variants=1 maxlevel=362 overflow=0 underflow=6485 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=14867 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "candidate_graph_seed2",
+    "args": [
+      55,
+      12345,
+      3,
+      7,
+      1,
+      337,
+      0,
+      0,
+      0,
+      479
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=12345 stall=3 mode=1 frames=7 FS_variants=1 maxlevel=362 overflow=0 underflow=6472 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=14867 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "bandwidth_limit",
+    "args": [
+      55,
+      991,
+      15,
+      7,
+      1,
+      337,
+      0,
+      0,
+      0,
+      399
+    ],
+    "returncode": 1,
+    "expected_pass": false,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=55 seed=991 stall=15 mode=1 frames=7 FS_variants=1 maxlevel=356 overflow=0 underflow=90657 steady_OVF=0 steady_UDF=34276 scoreboard_errors=0 textbits=0 cache_n=1234 pan=0",
+      "CHECK address_errors=122349 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=0"
+    ]
+  },
+  {
+    "name": "short_axi_experiment",
+    "args": [
+      71,
+      991,
+      15,
+      7,
+      1,
+      337,
+      0,
+      0,
+      5,
+      399
+    ],
+    "returncode": 0,
+    "expected_pass": true,
+    "expectation_met": true,
+    "summary": [
+      "RESULT flags=71 seed=991 stall=15 mode=1 frames=7 FS_variants=1 maxlevel=358 overflow=0 underflow=15127 steady_OVF=0 steady_UDF=0 scoreboard_errors=0 textbits=0 cache_n=9191 pan=0",
+      "CHECK address_errors=0 quota_errors=0 pixel_errors=0 visible_pixels=0 nonblack_pixels=0 blank=0 start=5"
+    ]
+  }
+]

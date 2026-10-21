@@ -1,0 +1,6 @@
+/run/
+/candidate/
+/results/*.txt
+!/results/analysis.txt
+/results/flush_wave.csv
+__pycache__/

@@ -1,0 +1,14 @@
+[
+  {
+    "name": "baseline_negative_control",
+    "returncode": 1,
+    "expected": 1,
+    "expectation_met": true
+  },
+  {
+    "name": "production",
+    "returncode": 0,
+    "expected": 0,
+    "expectation_met": true
+  }
+]

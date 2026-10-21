@@ -1,0 +1,11 @@
+silence            att=0 expected=(     0,     0) I2S=(-32768,-32768) raw=(8000,8000) FAIL
+small              att=0 expected=(  1000, -1000) I2S=(-31768, 31768) raw=(83e8,7c18) FAIL
+small_gain_2       att=2 expected=(   250,  -250) I2S=(-32518, 32518) raw=(80fa,7f06) FAIL
+small_gain_3       att=3 expected=(   125,  -125) I2S=(-32643, 32643) raw=(807d,7f83) FAIL
+small_gain_8       att=8 expected=(     3,    -4) I2S=(-32765, 32764) raw=(8003,7ffc) FAIL
+large              att=0 expected=( 30000,-30000) I2S=( -2768,  2768) raw=(f530,0ad0) FAIL
+clip               att=0 expected=( 32767,-32768) I2S=(    -1,     0) raw=(ffff,0000) FAIL
+mix_gain_2         att=2 expected=( 15000,-15000) I2S=(-17768, 17768) raw=(ba98,4568) FAIL
+endpoints          att=0 expected=( 32767,-32768) I2S=(    -1,     0) raw=(ffff,0000) FAIL
+silence_gain_3     att=3 expected=(     0,     0) I2S=(-32768,-32768) raw=(8000,8000) FAIL
+RESULT mismatches=10/10 decoded_L=390 decoded_R=391

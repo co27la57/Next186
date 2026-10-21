@@ -90,7 +90,7 @@ module soundwave(
 	 // ★ 2026-10-19 修：原设计 lmix/rmix 只有 **17 位**，但四路 16bit 有符号相加
 	 //   最大可达 +-(32767*3 + 2048) = +-100349，17 位装不下 ⇒ **溢出回绕**，
 	 //   而且回绕后的值看起来"在范围内"，下面的钳位不会生效 ⇒ 输出突跳到反相的爆音。
-	 //   现在先用 19 位做完整求和，再做饱和，最后转偏移码。
+	 //   现在先用 19 位做完整求和，再做饱和；I2S 输出补码，PDM 输出偏移码。
 	 //   （原注释写 "add 32878" 是笔误，实际是偏移码，即加 32768）
 	 wire signed [18:0]lmix = {{3{sample1[15]}}, sample1[15:0]}
 	                        + {{3{r_opl3left[15]}}, r_opl3left}
@@ -101,10 +101,15 @@ module soundwave(
 	                        + {{3{r_midiright[15]}}, r_midiright}
 	                        + (speaker ? 19'sd2048 : 19'sd0);
 	 // 总音量：先右移留余量，再饱和。
-	 // ★ 这块板用的是 1-bit PDM 输出（AUDIO_L/R），满幅意味着占空比顶到 0%/100%，
-	 //   RC 滤波后贴电源轨，功放会进保护 => 听起来"大声时直接静音"。留几 dB 余量即可避免。
+	 // I2S 使用有符号 PCM；AUDIO_L/R 的 PDM 比较器另用偏移二进制码。
 	 wire signed [18:0]lmixv = lmix >>> master_att;
 	 wire signed [18:0]rmixv = rmix >>> master_att;
+	 // I2S: silence = 0x0000, positive full scale = 0x7fff, negative = 0x8000.
+	 wire [15:0]lpcm = (lmixv >  19'sd32767) ? 16'h7FFF :
+	                    (lmixv < -19'sd32768) ? 16'h8000 : lmixv[15:0];
+	 wire [15:0]rpcm = (rmixv >  19'sd32767) ? 16'h7FFF :
+	                    (rmixv < -19'sd32768) ? 16'h8000 : rmixv[15:0];
+	 // PDM: silence is midscale (0x8000).
 	 wire [15:0]lclamp = (lmixv >  19'sd32767) ? 16'hFFFF :
 	                     (lmixv < -19'sd32768) ? 16'h0000 :
 	                     {~lmixv[15], lmixv[14:0]};
@@ -174,7 +179,7 @@ module soundwave(
 	  .dac_LRCK  (I2S_LRCLK),
 	  .dac_SCLK  (I2S_SCLK),
 	  .dac_SDIN  (I2S_SDIN),
-	  .L_data    (lclamp),
-	  .R_data    (rclamp)
+	  .L_data    (lpcm),
+	  .R_data    (rpcm)
 	); 
 endmodule

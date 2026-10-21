@@ -1,0 +1,11 @@
+silence            att=0 expected=(     0,     0) I2S=(     0,     0) raw=(0000,0000) PASS
+small              att=0 expected=(  1000, -1000) I2S=(  1000, -1000) raw=(03e8,fc18) PASS
+small_gain_2       att=2 expected=(   250,  -250) I2S=(   250,  -250) raw=(00fa,ff06) PASS
+small_gain_3       att=3 expected=(   125,  -125) I2S=(   125,  -125) raw=(007d,ff83) PASS
+small_gain_8       att=8 expected=(     3,    -4) I2S=(     3,    -4) raw=(0003,fffc) PASS
+large              att=0 expected=( 30000,-30000) I2S=( 30000,-30000) raw=(7530,8ad0) PASS
+clip               att=0 expected=( 32767,-32768) I2S=( 32767,-32768) raw=(7fff,8000) PASS
+mix_gain_2         att=2 expected=( 15000,-15000) I2S=( 15000,-15000) raw=(3a98,c568) PASS
+endpoints          att=0 expected=( 32767,-32768) I2S=( 32767,-32768) raw=(7fff,8000) PASS
+silence_gain_3     att=3 expected=(     0,     0) I2S=(     0,     0) raw=(0000,0000) PASS
+RESULT mismatches=0/10 decoded_L=390 decoded_R=391

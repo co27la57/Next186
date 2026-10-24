@@ -255,7 +255,7 @@ VGMSLAP without a mode reset, or by capturing which CRTC registers VGMSLAP sets.
 
 ## 8. Windows 3.0 will not start (SETUP crashes on first Enter; `win` hangs at the splash)
 
-**Status:** open — EMU386 hypothesis ruled out as the cause; prime suspect is the cache↔DDR data corruption (2026-10-24).
+**Status:** open — **prime suspect identified 2026-10-24: the core reports a 286-class CPU, so `win` auto-selects 286 standard (protected) mode; the 80186 cannot enter protected mode. Zero-code fix to try first: `win /r`.**
 **Severity:** functional — Windows 3.0 cannot be installed or started.
 **Reproduction:** run `SETUP` from the Windows 3.0 install disks — the first screen returns straight to DOS on Enter. Running `win` from DOS shows the Windows 3.0 splash and then hangs.
 
@@ -266,6 +266,15 @@ VGMSLAP without a mode reset, or by capturing which CRTC registers VGMSLAP sets.
 - Windows 3.0 on Next186 runs in **real mode** — it does **not** need any extender.
 - **EMU386** is a DOS TSR (loaded from `config.sys`; shareware by Eko Priono) that traps 386-only opcodes via INT 6 and re-implements them with 186/286-compatible instruction sequences, so that *32-bit real-mode applications* can run. It is for DOS programs, not for Windows 3.0.
 - Interference is still possible: EMU386 hooks **INT 6 (invalid opcode)**, and CPU probing by DOS/Windows software classically works by *executing a 386-only instruction and catching the exception*. A resident EMU386 can corrupt that probe. So removing it is the first cheap experiment, not a conclusion.
+
+### 8.1a Windows 3.0 mode selection — the decisive fact (Microsoft KB WW0335)
+
+> "WIN.COM starts up automatically in the appropriate operating mode for your machine and the amount of memory installed … Windows may be forced into any of the modes through the following command-line switches (provided the mode is supported by your hardware):
+> **`win /r` = Real (Windows 3.0 only)** · `win /s` / `win /2` = Standard · `win /3` = 386 enhanced.
+> Real mode requirements: Windows 3.0, **8088 or above**, 384K free conventional memory.
+> Standard mode requirements: **80286 or above**, 192K free extended memory, **XMS driver loaded (HIMEM.SYS)**."
+
+So the auto-detected mode is decided by (a) what CPU class software probes report and (b) whether XMS is present. Both point at the RTL finding below.
 
 ### 8.2 The port did not break the CPU or the BIOS binary (verified 2026-10-24)
 
@@ -278,21 +287,69 @@ VGMSLAP without a mode reset, or by capturing which CRTC registers VGMSLAP sets.
 
 ⇒ The "EMU386 patch was applied wrongly" hypothesis does **not** explain the failure: there is no EMU386 code in this repository at all, and neither the CPU core nor the BIOS binary differs from upstream.
 
-### 8.3 Where the port *does* differ from the original (real suspects)
+### 8.3 The real root cause candidate — the core reports a 286-class CPU (RTL-verified)
 
-| Original (Dumitrache) | This port | Risk for Windows 3.0 |
-|---|---|---|
-| 4 KB cache (8 lines × 256 B) directly in front of SDRAM | 8 KB 4-way write-back cache + AXI bursts + DDR arbiter; **cache↔DDR data corruption still open** (see `AI交接说明-2-数据损坏排错.md` §0, `sim/FINDINGS-95th` §9) | **Prime suspect.** Every Windows file (`SETUP.EXE`, `WIN.COM`, `KRNL286.EXE`, `GDI.EXE`, `USER.EXE`, display drivers) is loaded from the SD image through this path; corrupted bytes explain both symptoms (installer crash on first Enter; splash then hang). A different port reported the same class of failure ("divide by zero" in the installer). |
-| Custom VGA, board-proven | Rewritten VGA scan-out; broken until `d237a4f` (tag `vga-stable-20261021`) | If the flashed bitstream predates `d237a4f`, Windows' display-driver init (mode sets + palette DAC + heavy VRAM writes) can hang at the splash. The VGMSLAP half-line symptom (#7) suggests the bitstream may not be the `d237a4f` baseline. |
-| BIOS provides XMM manager, 64 KB paging, HMA | Same features ported (`MEMORY_MAP` port `0x80`+page etc.), but the bootstrap in `Next186_BlackBoxes.v` is heavily patched | Subtle breakage in XMM/paging would show up under Windows' larger memory footprint. DOS + games work, so this is secondary. |
+**FastTracker's "requires 80386" message was the clue.** Every flags-based CPU
+probe classifies this machine as 286-class, because the core does not model the
+80186's reserved flags bits:
 
-### 8.4 Action list (no code changes)
+```verilog
+// Next186_Regs.v (original author's code — identical in the OpenCores SVN trunk,
+// in neptuno-fpga's import, and in this port; byte-verified 2026-10-24)
+reg [8:0]FLG;                                                    // only 9 flag bits are stored
+assign FOUT = {4'b0000, FLG[8:3], 1'b0, FLG[2], 1'b0, FLG[1], 1'b1, FLG[0]};
+//              ^^^^^^^ PUSHF bits 15:12 are HARDWIRED 0 (a real 80186 reads them as 1)
+```
 
-1. **Remove EMU386 (and any 386-only driver: `EMM386`, `QEMM`, `386MAX`) from `config.sys`** and retry `SETUP` from a clean boot. If behaviour is unchanged, EMU386 is exonerated; if it starts working, it was interfering via the INT 6 hook.
-2. **Verify file integrity in DOS**: compute a checksum/CRC of `SETUP.EXE`, `WIN.COM`, `KRNL286.EXE`, `GDI.EXE`, `USER.EXE` in memory and compare against the original disk images. A mismatch proves the cache↔DDR corruption hypothesis and points the fix at that bug instead of Windows.
-3. **Confirm the flashed bitstream is `≥ d237a4f`** (`git log --oneline -1` in the inner Vivado repo); ideally rebuild from `b89ee21` before spending time on Windows.
-4. If the CRCs match: check what CPU family the machine reports (a `PUSHF` bits 12–15 probe from DOS), and capture the state at the crash (the BIOS INT 0/INT 6 handlers, CS:IP at the fault) with the existing ILA probe set.
-5. If the CRCs mismatch: the root cause is the still-open second corruption mechanism (`sim/FINDINGS-95th` §9.2) — fix that first, Windows 3.0 included.
+Consequences:
+
+- **FastTracker** (386-only, protected-mode program) sees "286" → refuses ✓
+  (observed). This is *correct* behaviour for a pre-286 machine, and EMU386
+  cannot fix it — see 8.3a.
+- **Windows 3.0 auto-detection**: "286-class + XMS loaded" ⇒ WIN.COM selects
+  **286 standard mode (protected)**. The 80186 has **no protected mode**, so
+  the mode switch fails right after the real-mode splash is drawn — exactly the
+  reported "shows the splash, then hangs". This also explains why the original
+  author's documented configuration is *real* mode: it is the only mode this
+  CPU can actually run.
+- The same applies to SETUP's own hardware probing if it uses 286/386-specific
+  instructions (SMSW etc.): they raise INT 6 here.
+
+### 8.3a Why EMU386 can never fix FastTracker (boundary, for the record)
+
+EMU386's own requirements (author's documentation): programs must **run in
+real mode only** and must **not check (or ignore) the CPU type**. FastTracker II
+violates both — it is a *protected-mode* DOS program and it checks the CPU. No
+386-opcode emulator can supply protected mode. Realistic options on this
+hardware: 286-era real-mode trackers (e.g. Scream Tracker 2.x) or the project's
+own real-mode MP3 player (DSP32).
+
+### 8.4 Secondary suspects (keep in view, test after `win /r`)
+
+| Suspect | Status |
+|---|---|
+| **cache↔DDR data corruption** (still open, see `AI交接说明-2-数据损坏排错.md` §0 / `sim/FINDINGS-95th` §9.2) | Explains a *corrupted-file* crash of SETUP (and the "divide by zero" another port reported). Test by CRC-ing `SETUP.EXE` / `WIN.COM` / `KRNL286.EXE` / `GDI.EXE` / `USER.EXE` in DOS against the original disk images. |
+| **Bitstream predates `d237a4f`** | An unfixed VGA can hang Windows' display-driver init. Confirm the flashed bitstream is `≥ d237a4f` (ideally `b89ee21`). |
+| **EMU386 resident** | Hooks INT 6, can corrupt CPU probes. Remove from `config.sys` (together with `EMM386`/`QEMM`/`386MAX`, none of which can work on this CPU anyway). |
+
+### 8.5 Action list (cheapest first)
+
+1. **Run `win /r`** — forces real mode (KB WW0335). If Windows starts, the
+   root cause is confirmed as mode auto-selection and no code change is needed.
+   Same for retrying SETUP afterwards.
+2. **Confirm the 286-class reporting on hardware (optional, zero code)**: if
+   `HIMEM.SYS` currently loads in `config.sys`, that *already proves* it —
+   HIMEM requires a 286+ and refuses on 8086-class machines. A 10-line
+   `PUSHF`/`POPF` probe program prints the same answer directly.
+3. If `win /r` still hangs → CRC the Windows files (corruption check above),
+   then verify the bitstream commit.
+4. **RTL option (only if you want 80186-accurate reporting)**: change
+   `Next186_Regs.v:104` from `{4'b0000, …}` to `{4'b1111, …}` so PUSHF reports
+   8086-class like a real 80186 — auto-detection then picks real mode.
+   **Trade-off:** HIMEM.SYS (and any other 286+-requiring software) will refuse
+   to load, i.e. no HMA/XMS unless the DOS configuration moves to the BIOS's
+   own XMM manager. `win /r` achieves the Windows goal without this cost, so
+   treat the RTL change as optional.
 
 ---
 

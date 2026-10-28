@@ -418,6 +418,47 @@ re-synthesising:
 | 286 (today) | `4'b0000` | 286-class — HIMEM loads, BattleChess refuses |
 | 386 (patch) | `{1'b0, NT, IOPL1, IOPL0}` | 386SX-class — EMU386 targets, BattleChess passes |
 
+### 8.7 Running BattleChess 4000 — two layers, and why "286" is not a version problem
+
+**Two independent layers, both required:**
+
+1. **The CPU must *report* 386-class** — the flags patch in 8.6. The
+   "currently 80286" message is a pure `PUSHF`/`POPF` probe; nothing else can
+   change it.
+2. **The CPU must *execute* 386 instructions** — that is EMU386 (INT 6 hook).
+   EMU386 cannot change what the flags report, and the flags patch cannot
+   execute a single 32-bit instruction. Neither one alone is enough.
+
+**The release (CD vs disk) is not the variable.** `SETUP.EXE` and the game EXE
+carry the same class of probe; another release still refuses on a 286-reporting
+CPU. The CD release additionally needs `MSCDEX`/a CD-ROM driver that this
+platform does not have, so the floppy/disk release is the better base anyway.
+
+**Five-minute pre-check before spending a synthesis cycle** — look for a DOS
+extender signature in the EXE. If one is present the program runs in protected
+mode and *neither* the patch nor EMU386 can help:
+
+```python
+d = open('SETUP.EXE', 'rb').read()
+for s in (b'DOS/4GW', b'DOS4GW', b'DPMI', b'CWSDPMI', b'PMODE',
+          b'CAUSEWAY', b'WATCOM', b'PharLap'):
+    print(s, d.find(s))
+```
+
+All `-1` ⇒ real-mode 32-bit code is plausible ⇒ the patch is worth trying.
+Any hit ⇒ protected mode ⇒ stop; document it as unsupported.
+
+**Pitfall — EMU386 may refuse on a "386".** After the patch the machine
+reports 386, and the driver may decide it is not needed and skip the INT 6
+hook. If that happens, use the runtime personality switch (8.6): boot with the
+286 personality so EMU386 installs, flip to the 386 personality from DOS, then
+run the game.
+
+**SETUP may be skippable.** Many 1993 installers only write a config file. Run
+SETUP in DOSBox on a PC, copy the configured game directory to the SD card and
+run the game EXE directly on the Next186 — the game's own probe still needs the
+patch, but the installer's own quirks are bypassed.
+
 ---
 
 ## Historical issues (kept for context)

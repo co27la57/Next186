@@ -459,6 +459,36 @@ SETUP in DOSBox on a PC, copy the configured game directory to the SD card and
 run the game EXE directly on the Next186 — the game's own probe still needs the
 patch, but the installer's own quirks are bypassed.
 
+### 8.8 BattleChess 4000 — file analysis (2026-10-28): it needs EMS + VESA, **not** a 386
+
+Binary analysis of the Interplay CD tree (`BC4000/BC4`):
+
+| File | Finding |
+|---|---|
+| `INSTALL.EXE` (78,360 B) | PKWARE-DCL script installer. Strings: `MINCPUTYPE`, `CpuPrompt`, **"The program requires a processor no less than-"**. `INSTALL.CFG` only copies `*.*` + `Bookdata` + `Vesa`, deletes itself, then `RUNATEXIT: setup.exe`. **No `COMPRESSION` key ⇒ it does not decompress anything.** |
+| `BC4000.EXE` (253,209 B) | Plain MZ, **no DOS extender** (DOS/4GW, DOS4GW, DPMI, CWSDPMI, PMODE, CAUSEWAY, WATCOM, PharLap → all absent), **no CPU-check strings at all**. Its only gates: `"No expanded memory manager found."`, `"Battle Chess requires 1024K (64 pages) of free EMS (Expanded) memory."`, `"No VESA compatibility driver found"`, `"... VESA driver ... not the correct driver ..."` |
+| `SETUP.EXE` (38,655 B) | Sound/video config tool (1992). No CPU-check strings; writes `intrplay.cfg` (the game reads `intrplay.cfg`, `io=%d`, `irq=%d`). |
+| `DATA640.DAT` (12.3 MB) | The game's own resource archive — `DATA640.OFF` / `DATA640.SIZ` are its external offset/size indices. Read directly by the game; **nothing to unpack**. |
+
+**Conclusions**
+
+- The *"requires 80386SX or higher, currently 80286"* message does **not** exist anywhere in the game tree — a whole-tree binary search for `80386` / `80286` / `386SX` returns nothing. It comes from **INSTALL.EXE** ("The program requires a processor no less than-"), i.e. the installer's scripted CPU gate. Confirm by reading `INSTALL.BAT` — it simply runs `install.exe`.
+- Therefore **the 386-personality patch (8.6) is not needed for BattleChess 4000**. The installer can be skipped entirely: the file set is already complete (and `INTRPLAY/BC4000` even holds an installed copy).
+- What the game actually needs: **≥1024 KB free EMS** and a **VESA VBE mode 101h (640×480×256)** provider.
+
+**How to run it**
+
+1. Skip `INSTALL.EXE` / `INSTALL.BAT`.
+2. Load the EMS driver **with at least 1024 KB** — `EMM286 2048` (needs XMS from `FDXMS286`, 31 MB present). Verify `MEM` shows an EMS line; without one the game stops at "No expanded memory manager found."
+3. **Do not run the bundled `VESA.COM`** (it is a copy of `VESA/ATI.COM`, an ATI-specific driver). The Next186 BIOS already provides VBE 101h; a foreign driver triggers *"not the correct driver for your video card"*.
+4. Run `SETUP.EXE` if sound needs configuring (Adlib/SB/PC speaker → `intrplay.cfg`), then `BC4000.EXE`.
+
+**Remaining risks on this platform**
+
+- `"Not enough free base memory"`: the `MEM` capture shows 533 KB largest executable — trimming TSRs / `DEVICEHIGH` may be required.
+- EMS must have 64 **free** pages; 2 MB (128 pages) is enough.
+- If the game reports *"No VESA compatibility driver found"*, the BIOS VBE is not being seen — that is a separate VGA/BIOS investigation (check INT 10h AX=4F00h), not a CPU issue.
+
 ---
 
 ## Historical issues (kept for context)

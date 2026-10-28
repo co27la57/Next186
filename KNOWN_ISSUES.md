@@ -1,9 +1,9 @@
 # Known issues
 
 Open bugs in this port, with reproduction notes and current status.
-Last updated: 2026-10-24.
+Last updated: 2026-10-29.
 
-## Current state (2026-10-24)
+## Current state (2026-10-29)
 
 | Item | Value |
 |---|---|
@@ -12,7 +12,7 @@ Last updated: 2026-10-24.
 | OPL3 core | nukeykt YMF262 (`opl3_ym.v` + `ymf262.sv` + `ym_lib.sv`), MCLK = 50 MHz, 8 µs/byte replay |
 | Audio mixer | `soundwave.v` — 19-bit signed mix; I2S = signed PCM (`b89ee21`), AUDIO_L/R = PDM offset code |
 | Volume ports | `0x38C` = attenuation (right-shift 0..8), `0x38D` = version id (`0x40|(ovf<<1)|vol_hit`), `0x38E` = master |
-| Open issues | **#6 PCM (DSS/Covox) no audio output**, **#7 VGMSLAP text lines truncated** |
+| Open issues | **#6 PCM (DSS/Covox) no audio output**, **#7 VGMSLAP text lines truncated**, **#9 Lotus III runs at 2x (8253 mode 3 divide-by-2 error)** |
 
 Issues #1 and #5 are **fixed** by the `d237a4f` VGA baseline (kept as history).
 Issue #2 is **fixed in-tree** (`f96476d` digit-scancode correction + lossless
@@ -516,6 +516,118 @@ files it loads. Split them before touching RTL.
 `SMARTDrive` and any permanent swap file off. If the VGA driver fails on the
 custom VGA, drop to the EGA driver to prove the desktop can come up at all
 before chasing video.
+
+---
+
+## 9. Lotus: The Ultimate Challenge runs at exactly 2x speed — 8253 mode 3 loads N/2
+
+**Status:** root cause identified in RTL (2026-10-29); one-line fix, patch in
+`timer8253-mode3-2x.patch`.
+**Severity:** timing — hits any software that programs PIT channel 0 in **mode 3
+with a non-zero divisor**. Everything else is unaffected (see 9.2).
+**Reproduction:** run the Lotus III demo (`LOTUS.EXE`): cars, music and the
+in-game clock all advance at exactly twice the normal rate. No tearing, no
+garbage — just 2x.
+
+### 9.1 What makes Lotus different: it re-times the machine to the video frame
+
+Almost all DOS software leaves the timer alone and inherits the BIOS tick
+(PIT ch0, **mode 3**, divisor `0` = 65536 → 18.2065 Hz). Lotus III (Magnetic
+Fields, 1993) instead measures the machine at startup and then **slaves its
+logic tick to the PIT**, so it is the one program in the collection whose speed
+*is* the timer frequency, 1:1.
+
+Startup sequence recovered from `LOTUS.DAT` (`LOTUS.EXE` is only a 5 KB loader
+that also rejects <286 and then runs the payload from the data file):
+
+```
+A7A3  mov al,0B0h / out 43h,al / out 42h,2x00   ; ch2 = mode 0, count 65536
+A7AD  in al,61h / or al,1 / out 61h,al          ; speaker gate on (ch2 gate)
+A7B3  mov dx,03DAh
+A7B6  ...  test al,8 / jne   (wait for retrace end)
+A7BB  ...  test al,8 / je    (wait for retrace start)
+A7C0  mov al,80h / out 43h,al / in al,42h x2    ; latch + read ch2  -> BX
+A7D1  same after retrace end                    ; -> CX
+A7E2  same at the NEXT retrace start            ; -> DX
+A7EE  mov ax,bx / sub ax,dx / mov [41DEh],dx    ; *** ticks per video frame ***
+A9F1  mov ax,[41DEh] / sub ax,5Ah / mov [4276h],ax  ; divisor = ticks/frame - 90
+AA05  mov al,36h / out 43h,al                   ; *** ch0, LSB/MSB, MODE 3 ***
+AA14  mov [0020h],offset isr / mov [0022h],cs   ; hook INT 8
+AAB0  mov al,36h / out 43h,al / wait 03DAh      ; re-sync to vsync every 4 frames
+```
+
+So: measure how many 1.193182 MHz PIT ticks fit in one video frame (≈17045 at
+70 Hz), then program PIT ch0 in **mode 3** with that number and run the game
+logic from the INT 8 handler. **The game's clock speed is the PIT output
+frequency** — any error in the timer's divide ratio becomes a game-speed error
+of exactly the same factor.
+
+### 9.2 The RTL bug: mode 3 loads N/2 and then decrements by 2
+
+`timer8253.v`, module `counter`, modes 3/7:
+
+```verilog
+3'b011, 3'b111: begin
+    if(c1 | c2 | newcmd) begin
+        mode[7:6] <= {~mode[7] | newcmd, 1'b0};
+        count <= {init[15:1], (~mode[7] | newcmd) & init[0]};  // <-- loads N/2
+    end else count <= count - 2;                                //    and steps by 2
+end
+```
+
+A real 8253 in mode 3 loads **N** and decrements by 2, so a half period is N/2
+clocks and the full period is **N**. This code loads **N/2** and still steps by
+2, so the half period is N/4 and the full period is **N/2** — the output runs at
+**exactly twice** the programmed frequency.
+
+Modelling the exact branch in Python (one `CE` per 1.193182 MHz tick):
+
+| `init` | who programs it | old period | old freq | fixed period | fixed freq |
+|---|---|---|---|---|---|
+| 16953 | Lotus frame tick | 8476 | **140.8 Hz** | 16954 | 70.4 Hz ✔ |
+| 0 (=65536) | BIOS 18.2 Hz tick | 65536 | 18.2 Hz ✔ | 65536 | 18.2 Hz ✔ |
+| 1331 | PC speaker, 896 Hz | 666 | 1791.6 Hz | 1332 | 895.8 Hz ✔ |
+
+**Why this went unnoticed for so long:** the BIOS programs divisor **0**, i.e.
+65536. The buggy reload computes `{init[15:1],…}` = 0, but decrementing 0 by 2
+wraps to `FFFEh`, so the counter still burns 65534 clocks per period — correct
+by accident. The halving only shows up for a **non-zero** divisor, and nearly no
+DOS program reprograms the timer. Lotus is the exception, and it is therefore
+the only title that runs at 2x.
+
+Corollary: this is **not** a CPU speed problem (the 80186 is not "too fast"),
+and **not** a clock-frequency problem — both MMCMs are correct and the
+PIT/VGA ratio is right. It is one wrong constant in the counter reload.
+
+### 9.3 Fix
+
+```diff
+-						count <= {init[15:1], (~mode[7] | newcmd) & init[0]};
++						count <= init;
+```
+
+Patch: `timer8253-mode3-2x.patch` (byte-level edit, mixed CRLF/LF preserved).
+
+Side effects — all of them corrections:
+
+- **BIOS tick unchanged** (divisor 0 path is identical) ⇒ DOS date/time,
+  `BEEP`-free operation and every game that just uses the 18.2 Hz tick behave
+  exactly as before. This is why the fix is low risk.
+- **PC speaker pitch drops one octave back to correct** (896 Hz instead of
+  1792 Hz) — a free confirmation that the fix took effect, if `speaker_on` is
+  enabled.
+- Any other title that reprograms ch0 **in mode 3** also drops to its correct
+  speed. Mode 2 reprogramming (`count <= init; count - 1`) was always correct,
+  so timer-driven music players/screen blankers are unaffected.
+
+### 9.4 Verification
+
+1. Rebuild with the patch, run `LOTUS`: speed and music tempo should match a
+   reference recording / DOSBox.
+2. Regression sweep on the usual titles (Monkey Island, Indiana Jones, BC4000):
+   no change expected — they never reprogram the timer.
+3. Optional: run any PC-speaker beep before/after — one octave lower after the
+   fix.
 
 ---
 

@@ -251,12 +251,13 @@ sources work across memory sizes.
 ## Known issues
 
 See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for the full list with reproduction
-notes. Summary as of 2026-10-24:
+notes. Summary as of 2026-10-29:
 
 | # | Issue | Status |
 |---|---|---|
 | 6 | PCM (DSS/Covox, port `0x378`) produces no audio — only Adlib is audible | **open** — `sndfifo` 16/32-bit width mismatch + Covox byte packing DC offset + unreachable `full` threshold; fix drafted in KNOWN_ISSUES #6.5 |
 | 7 | VGMSLAP text lines show only about half of their characters | **open** — check for the reverted step-doubling change first (`dcdfb1a`), then the high-load VGA underrun; see #7 |
+| 9 | Lotus: The Ultimate Challenge runs at exactly 2x speed | **root cause found** — `timer8253.v` mode 3 reloads N/2 but steps by 2, so the PIT output is 2x; BIOS divisor `0` hides it, Lotus's per-frame divisor exposes it. One-line fix + patch in #9 |
 | 1, 5 | VGA vertical half-swap / 7-row rotation | **fixed** by `d237a4f` (tag `vga-stable-20261021`) |
 | 2 | Keyboard injection `j`→`4`, Enter/Backspace hang | **fixed in tree**, board re-verification pending |
 | 3, 4 | XDC `foreach`; `imports/imports/` layout | fixed / workaround documented |

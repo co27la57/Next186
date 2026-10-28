@@ -1,0 +1,13 @@
+diff --git a/timer8253.v b/timer8253.v
+index 0406bf2..e6b179d 100644
+--- a/timer8253.v
++++ b/timer8253.v
+@@ -177,7 +177,7 @@ module counter(
+ 				3'b011, 3'b111: begin
+ 					if(c1 | c2 | newcmd) begin
+ 						mode[7:6] <= {~mode[7] | newcmd, 1'b0};
+-						count <= {init[15:1], (~mode[7] | newcmd) & init[0]};
++						count <= init;   // FIX(mode 3): load N, decrement by 2 => half period N/2. Old code loaded N/2 => exactly 2x too fast.
+ 					end else count <= count - 2;
+ 				end
+ 				3'b100, 3'b101:

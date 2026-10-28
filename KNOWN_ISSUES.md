@@ -489,6 +489,34 @@ Binary analysis of the Interplay CD tree (`BC4000/BC4`):
 - EMS must have 64 **free** pages; 2 MB (128 pages) is enough.
 - If the game reports *"No VESA compatibility driver found"*, the BIOS VBE is not being seen — that is a separate VGA/BIOS investigation (check INT 10h AX=4F00h), not a CPU issue.
 
+### 8.9 Windows 3.0 — the cheapest bisection
+
+Two independent variables can kill `SETUP`: the DOS underneath it, and the
+files it loads. Split them before touching RTL.
+
+1. **Try MS-DOS 6.22 instead of FreeDOS first.** Windows 3.0 predates FreeDOS
+   by a decade; `SETUP` does direct `INT 21h`/`INT 13h` work and the original
+   author validated on DOS 6.22. A DOS 6.22 boot floppy is a ten-minute swap
+   and removes a whole class of failures (`HIMEM` is happy — the core reports
+   286-class, 8.6).
+2. **Install on the PC, copy the tree, run `win /r` on the board.** Bypasses
+   `SETUP` entirely and bisects cleanly:
+   - install to `C:\WINDOWS` in DOSBox (keep the path identical — the .INI
+     files use absolute paths);
+   - confirm `KRNL286.EXE` is present (the real-mode kernel);
+   - copy the whole `C:\WINDOWS` to the SD card;
+   - on the board: `cd \WINDOWS` → **`win /r`**;
+   - Program Manager appears ⇒ only the installer was broken, the runtime is
+     fine;
+   - still dies ⇒ the fault is in the file path (cache↔DDR corruption, 8.4) or
+     in the runtime/driver.
+
+**Caveats:** DOSBox is a 386, so the install is configured for enhanced mode —
+`win /r` is mandatory (deleting `KRNL386.EXE` removes the ambiguity). Keep
+`SMARTDrive` and any permanent swap file off. If the VGA driver fails on the
+custom VGA, drop to the EGA driver to prove the desktop can come up at all
+before chasing video.
+
 ---
 
 ## Historical issues (kept for context)

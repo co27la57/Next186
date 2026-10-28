@@ -351,6 +351,73 @@ own real-mode MP3 player (DSP32).
    own XMM manager. `win /r` achieves the Windows goal without this cost, so
    treat the RTL change as optional.
 
+### 8.6 Making the machine report 386-class (BattleChess 4000 / FastTracker)
+
+**Observation (2026-10-28):** `BattleChess4000` prints *"requires 80386SX or
+higher, currently 80286"*. The `MEM` output shows FreeDOS in HMA, 31,168 KB XMS
+via `FDXMS286.SYS INT15=128`; after un-REMing `EMU386S.EXE` it reports
+"installed successfully" — yet BattleChess still sees a 286. That is expected:
+**EMU386 only hooks INT 6 (invalid opcode) and re-emulates 386 instructions; it
+cannot change the flags register**, and CPU detection is a pure flags test.
+
+**Why it reports 286 — the three lines behind it:**
+
+```verilog
+// Next186_Regs.v:87    only 9 flag bits are physically stored
+reg [8:0]FLG;
+// Next186_Regs.v:104  PUSHF bits 15:12 are HARDWIRED 0 (a real 80186 reads them as 1,
+//                     a 386 reads NT/IOPL there — that is exactly what the probe tests)
+assign FOUT = {4'b0000, FLG[8:3], 1'b0, FLG[2], 1'b0, FLG[1], 1'b1, FLG[0]};
+// Next186_Regs.v:174  POPF/IRET stores only the 9 old bits, so bits 12-15 are dropped
+if(WE[4]) FLG <= {FIN[11:6], FIN[4], FIN[2], FIN[0]};
+// Next186_ALU.v:140   every ALU op writes 4'bxxxx into the high nibble (0 after synthesis)
+FOUT[15:8] = {4'bxxxx, WORD ? overflow : overflow8, FIN[10:8]};
+```
+
+So a program doing the classic sequence *"clear 12-15 → set NT/IOPL → read
+back"* always reads 0 ⇒ "80286". No DOS-level TSR can fix this; only the RTL
+can.
+
+**Patch — make NT/IOPL real bits (4 changes, 386SX-like personality):**
+
+```verilog
+// 1) Next186_ALU.v:140 — preserve the high nibble on every ALU op instead of x/0
+FOUT[15:8] = {FIN[15:12], WORD ? overflow : overflow8, FIN[10:8]};
+
+// 2) Next186_Regs.v:87 — 9 → 12 flag bits (add NT + IOPL1/IOPL0)
+reg [11:0]FLG;
+
+// 3) Next186_Regs.v:104 — bit15 = 0 (386 reserved), bits14:12 = NT, IOPL1, IOPL0
+assign FOUT = {1'b0, FLG[11:9], FLG[8:3], 1'b0, FLG[2], 1'b0, FLG[1], 1'b1, FLG[0]};
+
+// 4) Next186_Regs.v:174 — store the new bits from POPF/IRET
+if(WE[4]) FLG <= {FIN[14:12], FIN[11:6], FIN[4], FIN[2], FIN[0]};
+```
+
+After this, the "is it a 386?" probe reads back non-zero (bits 13/14 stick) ⇒
+BattleChess/FastTracker-class checks pass; the "is it an 8086?" toggle test still
+reads "not 8086" (correct). The CPU then presents itself as a **386 in real
+mode**, which is exactly the personality EMU386 was written for.
+
+**Caveats (this is a deliberate lie to the software):**
+
+- Anything that now believes "386" and tries **protected mode** will crash —
+  the 80186 has none. Windows 3.0 must still be started with `win /r` (8.1a).
+- `EMM386`/`QEMM`/`386MAX` will now *try* to load and fail. Keep `EMM286` (or
+  the BIOS XMM) for EMS.
+- Verify in simulation first: a tiny tb running the two detection sequences
+  (`PUSHF/POPF` toggle test + NT test) and printing the concluded class.
+
+**Optional (nice for a public build): runtime switch.** Gate `FLG[11:9]` with a
+spare I/O port bit so users can pick the personality from DOS without
+re-synthesising:
+
+| Mode | PUSHF[15:12] | Software sees |
+|---|---|---|
+| 80186 (true) | `4'b1111` | 8086-class — real-mode Windows, DOS 6.22 era |
+| 286 (today) | `4'b0000` | 286-class — HIMEM loads, BattleChess refuses |
+| 386 (patch) | `{1'b0, NT, IOPL1, IOPL0}` | 386SX-class — EMU386 targets, BattleChess passes |
+
 ---
 
 ## Historical issues (kept for context)

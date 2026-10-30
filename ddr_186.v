@@ -219,10 +219,21 @@ module system
 	//   的 col_counter 只收 16 个半字(=8 字=32 字节)，后一半被丢掉 ⇒ 每扫描线要发 21 个
 	//   burst。VESA 每线只有 1600 clk_sdr，需求 >100% ⇒ FIFO 每帧几行就抽干。
 	//   VESA 下让一个 burst 吃满 32 个半字 ⇒ 每线 11 个 burst。
-	//   文本/13h/planar: vga_wide=0，三条 wire 各退回原表达式，行为逐拍不变。
+	//   文本/13h/planar: vga_wide=0，三条 wire 各退回原表达式 —— 但注意 128th4 的教训：
+	//   「表达式看着一样」不等于「位宽一样」，见 col_step 处的注释。
 	wire vga_wide = !(vgatext[0] | half[0] | vga13[0] | planar[0]);
 	wire [5:0] col_init = vga_wide ? 6'd31 : {1'b0, max_read, 1'b1};
 	wire       col_ok   = vga_wide ? !col_counter[5] : !col_counter[4];
+	// ★★★ 128th4 (2026-10-30) 修 128th3 引入的**位宽截断**：文本模式步进被算成 0。
+	//   128th3 把步进写成 `vga_wide ? 6'd16 : {1'b0, (max_read + 1'b1)}`。
+	//   `(max_read + 1'b1)` 在**拼接符里是自决定宽度**（不向上下文传播）⇒ 按 3 位算：
+	//   max_read=7 时 7+1=8 被截成 3 位 = 0 ⇒ 拼接成 {1'b0,3'b000} = 0。
+	//   xsim 实测（Vivado 2025.2）：max_read=7 时 旧写法 +8 / 128th3 +0 / 本修法 +8；
+	//   max_read=3 时三者都是 +4（边界钳位时恰好没错，所以这个 bug 只在正常对齐时暴露）。
+	//   后果：vga_lnbytecount 永不推进 ⇒ `[7:3]==vga_lnend` 永不成立 ⇒ 整帧重复取同一行
+	//   ⇒ 屏幕出现**静态固定**的字符重复。
+	//   修法：先把 max_read 扩到 6 位再 +1，宽度在拼接前就定死。
+	wire [5:0] col_step = vga_wide ? 6'd16 : ({3'b000, max_read} + 6'd1);
 	// ★★ 146th 三处配套修复**实测仍未解决**（水平偏移 + 首行顶部被截）⇒ 已回退，回到"上下颠倒"基线。
 	//    根因未定，改用 Verilator 台架离线复现定位（见 sim/tb），不再上板盲试。
 	wire vga_end_frame = vga_ddr_row_count == (v240[0] ? 479 : 399);
@@ -1566,7 +1577,7 @@ dbg_ad_d1 <= sdraddr[14:5];
                     //   [7:3] 跳着走（偶数）⇒ 行结束判据提前一半触发
                     //   ⇒ 行/帧指针跑得比实际扫描快 ⇒ **画面全黑**。
                     //   正确方向：保持本行语义不变，改为限制 FIFO 每事务接受量 = max_read+1 个半字（待验证）。
-                    vga_lnbytecount <= vga_lnbytecount + (vga_wide ? 6'd16 : {1'b0, (max_read + 1'b1)});
+                    vga_lnbytecount <= vga_lnbytecount + col_step;  // ★128th4: 见 col_step 注释(128th3 的写法在文本模式下算成 0)
                 end					
                 2'b01, 2'b11: crw <= 1'b1;		
             endcase

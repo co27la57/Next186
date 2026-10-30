@@ -213,14 +213,23 @@ module system
 
 	reg [8:0]vga_ddr_row_count = 0;
 	reg [2:0]max_read;
-	reg [4:0]col_counter;
+	reg [5:0]col_counter;      // ★128th3: 5→6 位(仅为了让 VESA 能数到 32)，窄模式语义不变
+	// ★★★ 128th3 (2026-10-30) VESA 专用取指带宽修复 —— 严格只影响 else(VESA) 分支
+	//   一个 16 拍 AXI burst 实发 16×32bit = 64 字节 = 32 个半字，但移植自 16-bit SDRAM
+	//   的 col_counter 只收 16 个半字(=8 字=32 字节)，后一半被丢掉 ⇒ 每扫描线要发 21 个
+	//   burst。VESA 每线只有 1600 clk_sdr，需求 >100% ⇒ FIFO 每帧几行就抽干。
+	//   VESA 下让一个 burst 吃满 32 个半字 ⇒ 每线 11 个 burst。
+	//   文本/13h/planar: vga_wide=0，三条 wire 各退回原表达式，行为逐拍不变。
+	wire vga_wide = !(vgatext[0] | half[0] | vga13[0] | planar[0]);
+	wire [5:0] col_init = vga_wide ? 6'd31 : {1'b0, max_read, 1'b1};
+	wire       col_ok   = vga_wide ? !col_counter[5] : !col_counter[4];
 	// ★★ 146th 三处配套修复**实测仍未解决**（水平偏移 + 首行顶部被截）⇒ 已回退，回到"上下颠倒"基线。
 	//    根因未定，改用 Verilator 台架离线复现定位（见 sim/tb），不再上板盲试。
 	wire vga_end_frame = vga_ddr_row_count == (v240[0] ? 479 : 399);
 	reg [3:0]vga_repln_count = 0; 
 	wire [3:0]vga_repln = vgatext[0] ? (half[0] ? 7 : 15) : {3'b000, repln_graph[0]};
 	reg [7:0]vga_lnbytecount = 0; 
-	wire [4:0]vga_lnend = (vgatext[0] | half[0]) ? 6 : (vga13[0] | planar[0]) ? 11 : 21; 
+	wire [4:0]vga_lnend = (vgatext[0] | half[0]) ? 6 : (vga13[0] | planar[0]) ? 11 : 22; // ★128th3: VESA 11 burst x 16 字 = 176 字/行
 	reg [11:0]vga_font_counter = 0;
 	reg [7:0]vga_attr;
 	reg [4:0]RTCDIV25 = 0;
@@ -268,7 +277,7 @@ module system
     reg [7:0] vga_line_reads=0;
     reg vga_line_active=0;
     wire [7:0] vga_line_quota=(vgatext[1] || half[1]) ? 8'd48 :
-                              (vga13[1] || planar[1]) ? 8'd88 : 8'd168;
+                              (vga13[1] || planar[1]) ? 8'd88 : 8'd176; // ★128th3: VESA 与取指侧 11x16 配平
     wire vga_read_cadence=(vgatext[1] || half[1]) ? &hcount_pan[3:0] :
                           (vga13[1] || planar[1]) ? &hcount_pan[2:0] : &hcount_pan[1:0];
     wire vrden=(vrdon || vga_line_active) &&
@@ -646,7 +655,7 @@ module system
 	  .rdclk(clk_25), 
 	  .data(sys_DOUT), 
 	  //.wrreq(!crw && sys_rd_data_valid), 
-	  .wrreq(!crw && sys_rd_data_valid && !col_counter[4] && !vb_resync),
+	  .wrreq(!crw && sys_rd_data_valid && col_ok && !vb_resync),
 	  .rdreq(vrden), 
 	  .q(fifo_dout32), 
 	  .wrusedw(fifo_wr_used_words),
@@ -1188,7 +1197,7 @@ module system
 			         ((sys_cmd_ack == 2'b01) || (sys_cmd_ack == 2'b11))) begin
 			dbg_vga_cache_seen_live <= 1'b1;
 		end else if ((sys_cmd_ack == 2'b10) && sys_rd_data_valid &&
-			         !crw && !col_counter[4]) begin
+			         !crw && col_ok) begin
 			if (dbg_vga_accept_live != 6'h3f)
 				dbg_vga_accept_live <= dbg_vga_accept_live + 1'b1;
 		end
@@ -1544,20 +1553,20 @@ dbg_ad_d1 <= sdraddr[14:5];
 		else if(~s_prog_full) cntrl0_user_command_register <= 2'b10;
 		else cntrl0_user_command_register <= 2'b00;
 					
-		if(!crw && sys_rd_data_valid && !col_counter[4]) col_counter <= col_counter - 1'b1;
+		if(!crw && sys_rd_data_valid && col_ok) col_counter <= col_counter - 1'b1;
 		
         if (sys_cmd_ack != 2'b00 && sys_cmd_ack_d1 == 2'b00) begin
             case(sys_cmd_ack)
                 2'b10: begin
                     crw <= 1'b0;	
-                    col_counter <= {1'b0, max_read, 1'b1};
+                    col_counter <= col_init;
                     // ★ 已回退（2026-09-27）：曾把步进改成 2*(max_read+1)，但 `vga_lnbytecount`
                     //   同时是「扫描行长度判据」的计数器（见 :1064 `s_vga_endscanline <=
                     //   (vga_lnbytecount[7:3] == vga_lnend)`，文本模式 vga_lnend=6）。步进翻倍后
                     //   [7:3] 跳着走（偶数）⇒ 行结束判据提前一半触发
                     //   ⇒ 行/帧指针跑得比实际扫描快 ⇒ **画面全黑**。
                     //   正确方向：保持本行语义不变，改为限制 FIFO 每事务接受量 = max_read+1 个半字（待验证）。
-                    vga_lnbytecount <= vga_lnbytecount + max_read + 1'b1;
+                    vga_lnbytecount <= vga_lnbytecount + (vga_wide ? 6'd16 : {1'b0, (max_read + 1'b1)});
                 end					
                 2'b01, 2'b11: crw <= 1'b1;		
             endcase
@@ -1569,7 +1578,7 @@ dbg_ad_d1 <= sdraddr[14:5];
 			vga_lnbytecount  <= 8'd0;
             vga_repln_count<=0;
             vga_ddr_row_count<=0;
-            col_counter<=5'd16;
+            col_counter<=6'd48;   // ★128th3: bit4=bit5=1 ⇒ 窄/宽两种模式下写门都是"关"(原 5'd16 就是靠 bit4=1 关门)
             vga13[0]<=vga13req;
             vgatext[0]<=vgatextreq;
             v240[0]<=1'b1;

@@ -48,6 +48,7 @@
 #include <ctype.h>
 #include <signal.h>
 #include <poll.h>
+#include <time.h>
 #include <sys/mman.h>
 
 #define SYSFS_GPIO "/sys/class/gpio"
@@ -66,6 +67,8 @@
  * ctrl/shift 列 -> 满屏乱码、回车/退格失效、映射全部错乱。
  * 2026-10-10 实测到过该字 = 0x8005 (RShfDown|CtrlDown 同时锁死)。 */
 #define BDA_KBD_FLAGS 0x08000417UL
+
+static int dry_run = 0;   /* -n: 只跑状态机, 不碰 GPIO(配合 -X 自检) */
 
 static void clear_kbd_state(void) {
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
@@ -138,6 +141,7 @@ static void wr(const char *path, const char *val) {
 static void set_pin(int pin, int val) {
     /* val_fd[] 按 索引0..7=数据位, 8=选通 顺序打开; 用 pwrite 避免 lseek */
     char c = val ? '1' : '0';
+    if (dry_run) return;
     if (pwrite(val_fd[pin], &c, 1, 0) != 1) {
         fprintf(stderr, "pwrite gpio value: %s\n", strerror(errno));
     }
@@ -192,13 +196,17 @@ static void export_pin(int gpio_num, int idx) {
 
 static int verbose = 0;
 static int slow = 0;      /* -s: 字节间加长延时, 用于排查丢字节 */
-static int gap_us = 50000; /* -g <us>: 字节之间 / make 与 break 之间的间隔
+static int gap_us = 20000; /* -g <us>: 字节之间 / make 与 break 之间的间隔
  * ★ 2026-10-10 由 3000 提到 50000: 实测 -R 模式(硬编码 200ms 间隔)连发 5 个
  *   'a' 全部正确, 而 -K 模式(原来 3ms 间隔)只有前 16 个字符正确、之后全乱。
  *   16 正好等于 8086 键盘类型缓冲的容量(16 项, BDA 0040:001A Head / 001C Tail)。
  *   => 3ms 太快, 缓冲区被灌满, 之后 int16h 取不动 -> 8042 的 OBF 停在 1
- *      -> 整条注入链路背压。50ms 已是 -R 模式的 1/4, 留足余量。
- *   可用 -g 现场调: -g 20000 更激进, -g 100000 更保守。 */
+ *      -> 整条注入链路背压。
+ * ★ 2026-10-29: 默认改回 20000(20ms)。原因: 交互路径已改成"按住语义", 终端
+ *   的自动重复字节被合并成一次 make(见 hold_press), 注入速率不再跟终端重复率
+ *   赛跑, 20ms 足够安全; 而 50ms 会让一次按键(make+break)要 100ms, 按住时
+ *   tty 队列会越积越长, 表现为"松手后还在吐字符"。
+ *   可用 -g 现场调: -g 12000 更激进, -g 50000 更保守。 */
 
 /* GPIO 使用: base+0..7 = 数据位 data[0..7], base+8 = 选通 strob */
 #define NDATA 8
@@ -288,6 +296,149 @@ static void send_key(uint8_t sc) {
 static void send_shift_release(void) {
     send_byte(0xAA);
     send_byte(0xAA);
+}
+
+/* ===========================================================================
+ * 按住(hold)语义 + 方向键路由  —— 2026-10-29
+ * ---------------------------------------------------------------------------
+ * A) 方向键曾被无条件映射成鼠标移动, 于是所有用方向键的 DOS 游戏
+ *    (Lotus / 赛车 / 平台) 都没方向键可用。现在:
+ *      · 默认 **方向键 = 光标键** (make 0x48/0x50/0x4B/0x4D)
+ *      · 鼠标改由 **Ctrl+方向键** (ESC[1;5A..D) 或 **Ctrl+T 切换的鼠标层** 驱动
+ *      · -a 启动即处于鼠标层; -k 纯键盘(方向键永远是光标键, 不响应 Ctrl+T)
+ *
+ * B) 终端只有"按下"事件, 没有"抬起"。老代码 send_key() 是 make → gap → break,
+ *    8086 侧看到的是一次几毫秒的点击 —— "踩油门/打方向"这类**需要按住**的操作
+ *    根本做不到: BIOS 的键盘标志字 0040:0017/0018 立刻被 break 清掉。
+ *    现在改成"按住到超时": 收到字节发 make, 只要 rep_ms 内还有同一按键的字节
+ *    到达就刷新(SSH 终端按住键会按系统重复率不断发同一个字节), 超时才发 break。
+ *    ⇒ 按住方向键 = 真的按住; 松手 = 自动 break。
+ * ===========================================================================*/
+#define MAX_HELD 16
+static uint8_t held_sc[MAX_HELD];
+static long    held_at[MAX_HELD];      /* 最后一次看到该键的时刻 */
+static uint8_t held_rep[MAX_HELD];     /* 连续"自动重复"的次数 */
+static uint8_t held_latch[MAX_HELD];   /* 1 = 已锁存: 不再因超时松手 */
+static int     held_n  = 0;
+static int     rep_ms  = 45;    /* -H <ms>: 同一按键间隔小于它 => 视为"按住中的重复",
+                                 *   只刷新时间戳, 不再发 make(否则终端重复率 30Hz
+                                 *   会把 16 项的 BIOS 键盘缓冲灌爆, 也会在松手后
+                                 *   积压一大串待注入的字节) */
+static int     rel_ms  = 85;    /* 多久没再收到同一按键 => 认为松手 (启动时 = rep_ms+40) */
+static int     arrow_mouse = 0; /* 0=方向键走键盘(默认) 1=方向键走鼠标 */
+static int     rel_hold_ms = 260; /* -T <ms>: 方向键/Shift 的松开超时(比打字长, 更像真键盘) */
+static int     latch_mode  = 1;   /* -L 0|ud|all|hex,hex: 0=关, 1=只"纵向"↑↓(默认),
+                                   *   2=所有键, 3=用 latch_keys[] 里的自定义扫描码 */
+static uint8_t latch_keys[16];
+static int     latch_nkeys = 0;
+static int     latch_after = 3;   /* -C <n>: 连续自动重复 n 次 => 判定"真的按住", 锁存 */
+static void    hold_release_all(void);
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static void hold_release_idx(int i);   /* 前向声明: hold_press 里要用 */
+
+static int held_find(uint8_t sc) {
+    for (int i = 0; i < held_n; i++) if (held_sc[i] == sc) return i;
+    return -1;
+}
+
+static int is_arrow_sc(uint8_t sc) {
+    return sc == 0x48 || sc == 0x50 || sc == 0x4B || sc == 0x4D;   /* 上/下/左/右 */
+}
+/* 方向键和 Shift 用更长的"松开超时": 手感像真键盘, 也给终端的首次重复延迟留余量 */
+static int is_hold_key(uint8_t sc) {
+    return is_arrow_sc(sc) || sc == 0x2a || sc == 0x36;
+}
+static int key_timeout(uint8_t sc) {
+    return is_hold_key(sc) ? rel_hold_ms : rel_ms;
+}
+/* 哪些键允许"锁存"(按住不放)?
+ * 默认只有 ↑/↓(扫描码 48/50): 赛车里的加速/刹车是"一直踩着"的, 而 ←/→ 是
+ * "松手就要回正"的 —— 左右若也锁存, 打完方向车会一直转, 所以左右永远靠超时松手。 */
+static int key_can_latch(uint8_t sc) {
+    if (latch_mode == 0) return 0;
+    if (sc == 0x2a || sc == 0x36) return 0;          /* Shift 永不锁存 */
+    if (latch_mode == 2) return 1;
+    if (latch_mode == 3) {
+        for (int i = 0; i < latch_nkeys; i++) if (latch_keys[i] == sc) return 1;
+        return 0;
+    }
+    return sc == 0x48 || sc == 0x50;                 /* 默认: 只锁存 ↑/↓ */
+}
+
+/* 按下(或刷新)一个键: 只在第一次真的发 make。
+ * ★ 同键在 rep_ms 内再来 => 就是终端在发"自动重复", 只刷新时间戳, **一个字节都不发**。
+ *   这条是"按住 k 不再吐一大串 k / 松手后还在吐"的关键: 旧代码每个重复字节都
+ *   走一次 send_key()(make + gap + break), 而 gap 默认 50ms, 于是注入速度只有
+ *   20 字节/秒, 终端却按 30 字节/秒灌进来 => tty 队列越积越长, 松手后继续吐。 */
+static void hold_press(uint8_t sc) {
+    long t = now_ms();
+    int i = held_find(sc);
+    if (i >= 0) {
+        long dt = t - held_at[i];
+        if (dt <= rep_ms) {                        /* 同一键的自动重复 */
+            held_at[i] = t;
+            if (held_rep[i] < 200) held_rep[i]++;
+            /* ★ 连续重复 latch_after 次 => 这是"真的按住", 锁存, 之后不再超时松手 */
+            if (!held_latch[i] && latch_after > 0 && key_can_latch(sc) &&
+                held_rep[i] >= latch_after) {
+                held_latch[i] = 1;
+                if (verbose) fprintf(stderr, "[hold] 锁存 0x%02x (按住, 不再自动松手)\n", sc);
+            }
+            return;
+        }
+        if (held_latch[i]) {                       /* 锁存键: 再按一次 = 松开 */
+            if (verbose) fprintf(stderr, "[hold] 解锁 0x%02x\n", sc);
+            hold_release_idx(i);
+            return;
+        }
+        hold_release_idx(i);                       /* 隔太久: 这是又一次按键 */
+    }
+    if (held_n >= MAX_HELD) {                 /* 极端情况: 先放掉一个没锁存的 */
+        int v = 0;
+        for (int k = 0; k < held_n; k++) if (!held_latch[k]) { v = k; break; }
+        send_byte(held_sc[v] | 0x80);
+        held_sc[v] = held_sc[held_n-1]; held_at[v] = held_at[held_n-1];
+        held_rep[v] = held_rep[held_n-1]; held_latch[v] = held_latch[held_n-1];
+        held_n--;
+    }
+    send_byte(sc);
+    held_sc[held_n]    = sc;
+    held_at[held_n]    = t;
+    held_rep[held_n]   = 0;
+    held_latch[held_n] = 0;
+    held_n++;
+    if (verbose) fprintf(stderr, "[hold] down 0x%02x\n", sc);
+}
+
+static void hold_release_idx(int i) {
+    uint8_t sc = held_sc[i];
+    if (sc == 0x2a) send_shift_release();     /* Shift 的 break 发两次, 防丢 */
+    else            send_byte(sc | 0x80);
+    if (verbose) fprintf(stderr, "[hold] up   0x%02x\n", sc);
+    held_sc[i]    = held_sc[held_n-1];
+    held_at[i]    = held_at[held_n-1];
+    held_rep[i]   = held_rep[held_n-1];
+    held_latch[i] = held_latch[held_n-1];
+    held_n--;
+}
+
+/* 把超时未刷新的键全部放掉 */
+static void hold_expire(void) {
+    long t = now_ms();
+    for (int i = held_n - 1; i >= 0; i--) {
+        if (held_latch[i]) continue;                       /* 锁存的键不超时 */
+        if (t - held_at[i] >= key_timeout(held_sc[i])) hold_release_idx(i);
+    }
+}
+
+static void hold_release_all(void) {
+    while (held_n > 0) hold_release_idx(held_n - 1);
 }
 
 /* ---- 按键解码: 终端字节 -> PS/2 set-1 scancode ---- */
@@ -477,6 +628,85 @@ static int esc_seq_to_sc(const char *s, int n) {
     return 0;
 }
 
+
+/* ===========================================================================
+ * -X 自检: 用"真实终端时序"喂按键, 再读 DOS 的 0040:0017 键盘标志字验证。
+ *
+ * 为什么要这个: 终端的自动重复**只给最后按下的那个键**。按住↑再按←, ↑的重复流
+ * 断了 —— 旧的"超时即松手"会把↑当成松开(油门掉)。这个自检直接看 8086 侧认为
+ * 哪些键是按下的, 一眼就能看出"上+左"能不能同时成立。
+ * ========================================================================*/
+static unsigned bda_kbd_flags(void) {
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) return 0xFFFF0000u;
+    unsigned long pg  = BDA_KBD_FLAGS & ~0xFFFUL;
+    unsigned long off = BDA_KBD_FLAGS & 0xFFFUL;
+    void *p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, (off_t)pg);
+    unsigned v = 0xFFFF0000u;
+    if (p != MAP_FAILED) {
+        v = *(volatile unsigned char *)((char *)p + off)
+          | (*(volatile unsigned char *)((char *)p + off + 1) << 8);
+        munmap(p, 4096);
+    }
+    close(fd);
+    return v;
+}
+
+static void show_flags(long t, const char *tag) {
+    if (dry_run) {                     /* 干跑: 打印注入程序内部的"按住的键"表 */
+        fprintf(stderr, "[X] %5ldms  %-20s 按住:", t, tag);
+        if (!held_n) fprintf(stderr, " (无)");
+        for (int i = 0; i < held_n; i++)
+            fprintf(stderr, " %02x%s", held_sc[i], held_latch[i] ? "(锁存)" : "");
+        fprintf(stderr, "\n");
+        return;
+    }
+    unsigned f = bda_kbd_flags();
+    if (f & 0xFFFF0000u) { fprintf(stderr, "[X] /dev/mem 读不到\n"); return; }
+    fprintf(stderr, "[X] %5ldms  %-20s 0017=%04X  上%d 下%d 左%d 右%d\n",
+            t, tag, f, !!(f & 0x10), !!(f & 0x20), !!(f & 0x40), !!(f & 0x80));
+}
+
+static void run_selftest(void) {
+    fprintf(stderr,
+        "[X] 自检: 按住[上]1.5s, 期间在 1.5s 时按下[左], 2.6s 松开[左]。\n"
+        "[X] 期望: 1.65s 起 上=1 且 左=1 (同时按住); 3.0s 时 左=0 但 上仍=1 (锁存)。\n"
+        "[X] 需要 DOS 在跑, 否则标志字恒为 0。\n");
+    long t0 = now_ms();
+    long up_next = 0, left_next = -1;
+    int up_first = 1, left_first = 1;
+    const long UP_STOP = 1500, LEFT_START = 1500, LEFT_STOP = 2600, END = 3600;
+    int did_unlatch = 0;
+
+    struct { long t; const char *tag; } smp[] = {
+        { 120, "按住上(首次重复前)"}, { 700, "按住上(应已锁存)"},
+        {1400, "按住上"},             {1650, "刚按下左"},
+        {2100, "上+左"},              {2550, "上+左(重复中)"},
+        {2950, "已松开左(上应仍在)"}, {3250, "再按一次↑=解锁"},
+        {3450, "结束"},
+    };
+    int si = 0, n = (int)(sizeof(smp) / sizeof(smp[0]));
+    for (;;) {
+        long t = now_ms() - t0;
+        if (up_next >= 0 && t >= up_next && up_next <= UP_STOP) {
+            hold_press(0x48);                       /* 上 */
+            up_next = up_first ? (up_first = 0, up_next + 500) : up_next + 33;
+        }
+        if (t >= LEFT_START && left_next < 0) left_next = LEFT_START;
+        if (left_next >= 0 && t >= left_next && left_next <= LEFT_STOP) {
+            hold_press(0x4B);                       /* 左 */
+            left_next = left_first ? (left_first = 0, left_next + 500) : left_next + 33;
+        }
+        if (t >= 3250 && !did_unlatch) { did_unlatch = 1; hold_press(0x48); }  /* 再按一次↑ */
+        hold_expire();
+        if (si < n && t >= smp[si].t) { show_flags(t, smp[si].tag); si++; }
+        if (t > END) break;
+        usleep(5000);
+    }
+    hold_release_all();
+    fprintf(stderr, "[X] 完成, 已放掉所有键\n");
+}
+
 int main(int argc, char **argv) {
     int pin0 = DEFAULT_BASE;   /* EMIO 内的引脚序号(0..117), 默认 54 */
     int i, test_mode = 0, keymap_check = 0, sweep_mode = 0, sweep_from = 0, verify_mode = 0;
@@ -486,6 +716,7 @@ int main(int argc, char **argv) {
     int step = 4;                 /* 方向键每次移动的像素数 */
     const char *mice_dev = NULL;  /* -f /dev/input/mice: 直通真实鼠标 */
     int kbd_only = 0;             /* -k: 纯键盘模式(等价于老的 kbd_gpio_inject) */
+    int selftest = 0;             /* -X: 自检(时间序注入 + 读 0040:0017) */
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-b") && i + 1 < argc) pin0 = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))     verbose = 1;
@@ -508,10 +739,47 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-S") && i + 1 < argc) step = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) mice_dev = argv[++i];
         else if (!strcmp(argv[i], "-k"))     kbd_only = 1;
+        else if (!strcmp(argv[i], "-X"))     selftest = 1;
+        else if (!strcmp(argv[i], "-n"))     dry_run  = 1;   /* 干跑: 不碰 GPIO */
+        else if (!strcmp(argv[i], "-a"))     arrow_mouse = 1;   /* 启动即"方向键=鼠标" */
+        else if (!strcmp(argv[i], "-H") && i + 1 < argc) {   /* 重复窗口 ms */
+            rep_ms = atoi(argv[++i]);
+            if (rep_ms < 15)  rep_ms = 15;
+            if (rep_ms > 200) rep_ms = 200;
+            rel_ms = rep_ms + 40;
+        }
+        /* ---- 按住/锁存 ---- */
+        else if (!strcmp(argv[i], "-T") && i + 1 < argc) {   /* 方向键松开超时 ms */
+            rel_hold_ms = atoi(argv[++i]);
+            if (rel_hold_ms < 60)  rel_hold_ms = 60;
+            if (rel_hold_ms > 900) rel_hold_ms = 900;
+        }
+        else if (!strcmp(argv[i], "-C") && i + 1 < argc) {   /* 连续重复几次触发锁存 */
+            latch_after = atoi(argv[++i]);
+            if (latch_after < 0)   latch_after = 0;
+            if (latch_after > 100) latch_after = 100;
+        }
+        else if (!strcmp(argv[i], "-L")) {   /* 锁存范围: 缺省↑↓ / all / 0 / 16进制扫描码表 */
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                const char *v = argv[++i];
+                if (!strcmp(v,"0") || !strcmp(v,"off"))      latch_mode = 0;
+                else if (!strcmp(v,"all"))                   latch_mode = 2;
+                else if (!strcmp(v,"ud"))                    latch_mode = 1;
+                else {                                        /* 例: -L 48,50,1e */
+                    char buf[64]; int n = 0;
+                    snprintf(buf, sizeof buf, "%s", v);
+                    for (char *t = strtok(buf, ",;"); t && n < 16; t = strtok(NULL, ",;"))
+                        latch_keys[n++] = (uint8_t)strtol(t, NULL, 16);
+                    latch_nkeys = n; latch_mode = 3;
+                }
+            } else latch_mode = 1;
+        }
         /* -r <hex> 只发 make; -R <hex> 发 make+break —— 用于探测 80186 的真实解释 */
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) { raw = (int)strtol(argv[++i], NULL, 16); raw_mode = 1; }
         else if (!strcmp(argv[i], "-R") && i + 1 < argc) { raw = (int)strtol(argv[++i], NULL, 16); raw_mode = 2; }
     }
+
+    if (dry_run) { run_selftest(); return 0; }   /* -n: 纯状态机自检, 不需要 GPIO */
 
     /* sysfs 的 GPIO 编号 = gpiochip base + 引脚序号(板子上 base=512) */
     int base = detect_gpiochip_base(pin0 + NDATA);
@@ -537,6 +805,8 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "[kbd_gpio] 并行模式: data[7:0]=GPIO %d..%d, strob=GPIO %d (base=%d)\n",
             base + pin0, base + pin0 + NDATA - 1, base + pin0 + NDATA, base);
+
+    if (selftest) { run_selftest(); for (int k = 0; k <= NDATA; k++) set_pin(k, 0); return 0; }
     fprintf(stderr, "[kbd_gpio] 在本终端敲字 -> 转发给 80186 的 DOS。Ctrl+] 退出\n");
 
     /* ---- 原始扫描码探针模式: 直接发任意扫描码, 绕过按键映射 ----
@@ -742,44 +1012,94 @@ int main(int argc, char **argv) {
     tio.c_cc[VMIN] = 1; tio.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &tio);
 
-    fprintf(stderr, "[mouse] 交互模式: 打字照常; 方向键=移动鼠标(步长 %d, -S 改)\n", step);
+    fprintf(stderr, "[mouse] 交互模式: 打字照常; 方向键=光标键 重复窗口=%dms 打字松开=%dms 方向键松开=%dms\n",
+            rep_ms, rel_ms, rel_hold_ms);
+    {
+        const char *ls = latch_mode == 0 ? "关" : latch_mode == 2 ? "所有键" :
+                         latch_mode == 3 ? "自定义" : "仅 ↑/↓";
+        fprintf(stderr, "[mouse]           按住: 连续重复 %d 次即锁存[%s] —— 可与其它键同时按, 再按一次同键=松开\n",
+                latch_after, ls);
+    }
+    fprintf(stderr, "[mouse]           Ctrl+G = 放掉所有锁存的键\n");
+    fprintf(stderr, "[mouse]           鼠标: Ctrl+方向键 移动;  Ctrl+T 切换【方向键=鼠标】层 (当前:%s)\n",
+            arrow_mouse ? "鼠标" : "键盘");
     fprintf(stderr, "[mouse]           Ctrl+L=左键单击  Ctrl+R=右键单击  Ctrl+B=中键单击\n");
     fprintf(stderr, "[mouse]           Ctrl+] 退出\n");
 
     char c;
-    while (read(STDIN_FILENO, &c, 1) == 1) {
+    /* ★ 改成 poll + 超时: 只有这样才能在"没有新字节进来"时把按住的键放掉,
+     *   实现"按住=真按住, 松手=自动 break"(见文件上方 hold 语义说明)。 */
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
+    for (;;) {
+        int pr = poll(&pfd, 1, 10);
+        if (pr == 0) { hold_expire(); continue; }        /* 10ms 一次的"松手"检查 */
+        if (pr < 0) { if (errno == EINTR) continue; break; }
+        hold_expire();                                   /* 输入很密时也要按时放键 */
+        if (read(STDIN_FILENO, &c, 1) != 1) break;
         if ((unsigned char)c == 0x1d) break;      /* Ctrl+] */
 
-        /* ---- 终端转义序列: 功能键/导航键 -> PS/2 扫描码; 方向键 -> 鼠标(-k 模式=光标键) ---- */
+        /* ---- Ctrl+G: 放掉所有锁存的键(万一卡住踩油门) ---- */
+        if ((unsigned char)c == 0x07) {
+            int n = 0;
+            for (int k = held_n - 1; k >= 0; k--)
+                if (held_latch[k]) { hold_release_idx(k); n++; }
+            fprintf(stderr, "\n[mouse] Ctrl+G: 放掉 %d 个锁存键\n", n);
+            continue;
+        }
+
+        /* ---- Ctrl+T: 切换"方向键路由"层 ---- */
+        if ((unsigned char)c == 0x14 && !kbd_only) {
+            hold_release_all();                   /* 切层前先放掉按住的键, 免得粘住 */
+            arrow_mouse = !arrow_mouse;
+            fprintf(stderr, "\n[mouse] 方向键 -> %s\n", arrow_mouse ? "鼠标" : "光标键(键盘)");
+            continue;
+        }
+
+        /* ---- 终端转义序列: 功能键/导航键 -> PS/2 扫描码; 方向键按路由层处理 ---- */
         if ((unsigned char)c == 0x1b) {
             char seq[8];
             int n = read_esc_seq(seq, sizeof(seq));
             if (n == 0) {                                    /* 50ms 内无后续 = 真的是 ESC 键 */
                 uint8_t e; int sh;
-                if (ascii_to_sc(0x1b, &e, &sh)) send_key(e);
+                if (ascii_to_sc(0x1b, &e, &sh)) hold_press(e);
                 continue;
             }
-            if (n == 2 && seq[0] == '[' &&
-                (seq[1]=='A' || seq[1]=='B' || seq[1]=='C' || seq[1]=='D')) {
-                if (kbd_only) {                              /* -k 纯键盘: 方向键=光标键 */
-                    static const uint8_t cur[4] = {0x48, 0x50, 0x4B, 0x4D}; /* 上/下/左/右 */
-                    send_key(cur[seq[1] - 'A']);
-                } else {                                     /* 默认: 方向键=鼠标 */
-                    if      (seq[1]=='A') send_mouse_packet(0,  step, 0);
-                    else if (seq[1]=='B') send_mouse_packet(0, -step, 0);
-                    else if (seq[1]=='C') send_mouse_packet( step, 0, 0);
-                    else                 send_mouse_packet(-step, 0, 0);
+            /* 方向键: ESC[A..D = 纯方向键; ESC[1;mA = 带修饰键(Ctrl/Shift) */
+            {
+                int arrow = -1, ctrl = 0, shifted = 0;
+                if (n == 2 && seq[0] == '[' &&
+                    (seq[1]=='A' || seq[1]=='B' || seq[1]=='C' || seq[1]=='D')) {
+                    arrow = seq[1] - 'A';
+                } else if (n == 5 && seq[0]=='[' && seq[1]=='1' && seq[2]==';' &&
+                           (seq[4]=='A' || seq[4]=='B' || seq[4]=='C' || seq[4]=='D')) {
+                    /* xterm 修饰键: 2=Shift 3=Alt 5=Ctrl 6=Shift+Ctrl ... */
+                    int m = seq[3] - '0';
+                    ctrl    = (m == 5 || m == 6 || m == 7 || m == 8);
+                    shifted = (m == 2 || m == 4 || m == 6 || m == 8);
+                    arrow = seq[4] - 'A';
                 }
-                continue;
+                if (arrow >= 0) {
+                    static const uint8_t cur[4] = {0x48, 0x50, 0x4D, 0x4B}; /* 上/下/右/左  ← 索引是 ESC[A..D = 上/下/右/左, C=右 必须给 0x4D */
+                    if (!kbd_only && (ctrl || (arrow_mouse && !shifted))) {
+                        if      (arrow==0) send_mouse_packet(0,  step, 0);   /* 上 */
+                        else if (arrow==1) send_mouse_packet(0, -step, 0);   /* 下 */
+                        else if (arrow==2) send_mouse_packet( step, 0, 0);   /* 右 */
+                        else               send_mouse_packet(-step, 0, 0);   /* 左 */
+                    } else {
+                        if (shifted) hold_press(0x2a);      /* Shift+方向 = 选择 */
+                        hold_press(cur[arrow]);
+                    }
+                    continue;
+                }
             }
             if (n == 3 && seq[0]=='[' && seq[1]=='[' && seq[2]=='Z') {   /* Shift+Tab */
-                send_byte(0x2a); send_key(0x0f); send_shift_release();
+                hold_press(0x2a); hold_press(0x0f);
                 continue;
             }
             {
                 int sc = esc_seq_to_sc(seq, n);
                 if (sc) {
-                    send_key((uint8_t)sc);
+                    hold_press((uint8_t)sc);
                     if (verbose) fprintf(stderr, "[fkey] %d 字节序列 -> sc=0x%02x\n", n, sc);
                 } else if (verbose) {
                     fprintf(stderr, "[fkey] 未识别序列(%d 字节):", n);
@@ -814,10 +1134,11 @@ int main(int argc, char **argv) {
                     isprint((unsigned char)c) ? c : '?', (unsigned char)c, sc,
                     shift ? " +Shift" : "");
         }
-        if (shift) send_byte(0x2a);               /* Shift 按下 */
-        send_key(sc);                             /* make -> 间隔 -> break */
-        if (shift) send_shift_release();       /* Shift 松开(发两次) */
+        if (shift) hold_press(0x2a);              /* Shift 按下(同样靠超时松开) */
+        hold_press(sc);                           /* make 由 hold_expire 负责 break */
     }
+    hold_release_all();                           /* 退出前把按住的键全部放掉 */
+    tcflush(STDIN_FILENO, TCIFLUSH);              /* 丢掉队列里残留的字节 */
     tcsetattr(STDIN_FILENO, TCSANOW, &old);
     for (int k = 0; k <= NDATA; k++) set_pin(k, 0);
     fprintf(stderr, "\n[kbd_gpio] 退出, 终端已还原\n");

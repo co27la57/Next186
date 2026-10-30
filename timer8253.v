@@ -137,7 +137,11 @@ module counter(
 
 		if(CS) begin
 			if(WR) begin
-				mode[6] <= 1;
+				// FIX 2026-10-29: mode[6] 是"计数已写入, 下个 CE 装载"标志, 只能由
+				//   写计数数据置位。原来放在 if(WR) 最外层, 于是写控制字(含锁存命令
+				//   80h/c0h/e0h)也算一次装载 => mode0/4/5 里的 if(mode[6]) count<=init
+				//   会把正在跑的计数重置回初值, "锁存读回"退化成"锁存并重新起跑"。
+				//   真 8253 的锁存命令对计数没有任何影响。
 				rd <= 0;
 				latch <= 0;
 				if(cmd) begin	// command
@@ -147,6 +151,7 @@ module counter(
 						state <= {1'b0, din[5] & ~din[4]};
 					end else latch <= &mode[5:4];
 				end else begin	// data
+					mode[6] <= 1;	// 只有写计数才装载(真 8253 语义)
 					state <= state[0] + ^mode[5:4] + 1;
 					if(state[0]) init[15:8] <= din;
 					else init[7:0] <= din;

@@ -211,16 +211,16 @@ module KB_Mouse_8042(
 	         (0=s_data正常数据, 1=cmd状态口, 2=ctl_outb 命令字节)
 	   —— 之前怀疑过 dout 的三选一 mux 会把数据口读走, 这个信号能一次性证实或排除。
 	*/
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_vk_data = 8'h00;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_s_data  = 8'h00;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_dout    = 8'h00;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [1:0] dbg_sel_dout = 2'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg       dbg_vk_valid = 1'b0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg       dbg_OBF      = 1'b0;
+	reg [7:0] dbg_vk_data = 8'h00;
+	reg [7:0] dbg_s_data  = 8'h00;
+	reg [7:0] dbg_dout    = 8'h00;
+	reg [1:0] dbg_sel_dout = 2'd0;
+	reg       dbg_vk_valid = 1'b0;
+	reg       dbg_OBF      = 1'b0;
 	// 该字节是由哪条通路装进缓冲的: 0=vk_valid(键盘注入) 1=vk_out_v(键盘自检应答)
 	//                              2=kb_data(物理键盘)    3=mouse_data(物理鼠标)
 	//                              4=vm_out_v(鼠标命令应答) 5=vm_valid(鼠标移动包)
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [2:0] dbg_src     = 3'd0;
+	reg [2:0] dbg_src     = 3'd0;
 
 	// ========================================================================
 	// ★ 事件日志(2026-10-10): 16 条循环记录, 取代"靠触发条件碰运气"
@@ -239,11 +239,11 @@ module KB_Mouse_8042(
 	//         就能看到最近 16 次入队的 {字节, 来源} —— 完全不需要对准时机。
 	// ========================================================================
 	localparam DBGLOG_N = 16;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbglog_data [0:DBGLOG_N-1];
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [5:0]  dbglog_src  [0:DBGLOG_N-1];
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [5:0]  dbglog_seq  [0:DBGLOG_N-1];
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]  dbglog_wp   = 4'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_evt_cnt  = 16'd0;
+	reg [15:0] dbglog_data [0:DBGLOG_N-1];
+	reg [5:0]  dbglog_src  [0:DBGLOG_N-1];
+	reg [5:0]  dbglog_seq  [0:DBGLOG_N-1];
+	reg [3:0]  dbglog_wp   = 4'd0;
+	reg [15:0] dbg_evt_cnt  = 16'd0;
 
 	// ========================================================================
 	// ★★ 第 113 次：进 BIOS 那一刻的字节身份锁存（本次调查的核心探针）
@@ -264,13 +264,13 @@ module KB_Mouse_8042(
 	//    dbg_take_pulse: 80186 从端口 0x60 取走缓冲那一拍的脉冲
 	//    dbg_take_byte : 被取走的字节（dout）——与 dbg_last_byte 必须相等
 	// ========================================================================
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_last_byte  = 8'h00;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [2:0]  dbg_last_src   = 3'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_take_pulse = 1'b0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_take_byte  = 8'h00;
+	reg [7:0]  dbg_last_byte  = 8'h00;
+	reg [2:0]  dbg_last_src   = 3'd0;
+	reg        dbg_take_pulse = 1'b0;
+	reg [7:0]  dbg_take_byte  = 8'h00;
 	// 字节指纹: 连续 3 次装缓冲若都拿到同一个"意外值"，就锁住它供 ILA 直接触发
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_bad_byte   = 8'h00;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_bad_cnt    = 8'd0;
+	reg [7:0]  dbg_bad_byte   = 8'h00;
+	reg [7:0]  dbg_bad_cnt    = 8'd0;
 
 	// 日志写入点: 每次真正把字节装进输出缓冲时调用(宏而非 task, Verilog-2001
 	// 不允许在 always 块里调用 task)。

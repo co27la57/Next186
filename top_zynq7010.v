@@ -100,6 +100,7 @@ module top_zynq7010 (
     wire [23:0] ram_addr;
     wire [31:0] ram_wdata;     // ★ 方案A：写回整 32-bit 字（= cache 侧 ddr_dout 经 SoC 直通）
     wire [15:0] ram_rdata;
+    (* mark_debug = "true", keep = "true" *) // perf probe
     wire        ram_rd_valid;
     wire        ram_wr_valid;  // ★ 实验探针：cache 读窗口（方案A 已回退为原始窗口）
     wire        SDLED;
@@ -143,7 +144,9 @@ module top_zynq7010 (
     reg        main_bready;
     reg [31:0] main_araddr;
     reg [7:0]  main_arlen;
+    (* mark_debug = "true", keep = "true" *) // perf probe
     reg        main_arvalid;
+    (* mark_debug = "true", keep = "true" *) // perf probe
     reg        main_rready;
 
     // ==========================================
@@ -269,9 +272,11 @@ module top_zynq7010 (
     localparam B_RESP    = 4'd9;
 
 // (2026-10-10: 摘掉 mark_debug; 这是写 FSM 的真实状态寄存器, 必须保留)
+    (* mark_debug = "true", keep = "true" *) // perf probe
     reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
+    (* mark_debug = "true", keep = "true" *) // perf probe
     reg        rlast_latched;
     reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
     reg [31:0] timeout_cnt = 32'd0;

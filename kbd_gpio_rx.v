@@ -176,11 +176,11 @@ module kbd_gpio_rx #(
     //   排查顺序建议: dbg_emio_data(第 0 级 PS 引脚) -> dbg_rx_data(进 8042 的键盘字节)
     //                -> dbg_m_data(进 8042 的鼠标字节) -> KB_8042 内的 dbglog_*。
     // ========================================================================
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_emio_data = 8'h00;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_rx_data   = 8'h00;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0] dbg_m_data    = 8'h00;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg       dbg_push_m    = 1'b0;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [23:0]dbg_wcnt      = 24'd0;
+    reg [7:0] dbg_emio_data = 8'h00;
+    reg [7:0] dbg_rx_data   = 8'h00;
+    reg [7:0] dbg_m_data    = 8'h00;
+    reg       dbg_push_m    = 1'b0;
+    reg [23:0]dbg_wcnt      = 24'd0;
 
     always @(posedge clk) begin
         if (gpio_stb) dbg_emio_data <= gpio_data;

@@ -1836,28 +1836,28 @@ endfunction
 //        全部摘掉 mark_debug 属性(声明保留, 避免 Synth 8-36)。
 //        需要时把对应行的 mark_debug 加回即可。
 // 流水线状态
-/*(* mark_debug = "true", keep = "true" *)*/ wire [6:0]  dbg_STAGE     = STAGE;
-/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_IFETCH    = IFETCH;
+wire [6:0]  dbg_STAGE     = STAGE;
+wire        dbg_IFETCH    = IFETCH;
 reg        dbg_HALT;
 //
 //// 当前执行的指令
-/*(* mark_debug = "true", keep = "true" *)*/ wire [7:0]  dbg_FETCH0    = FETCH[0];
-/*(* mark_debug = "true", keep = "true" *)*/ wire [5:0]  dbg_ICODE1    = ICODE1;
+wire [7:0]  dbg_FETCH0    = FETCH[0];
+wire [5:0]  dbg_ICODE1    = ICODE1;
 //
 //// 指令指针
 reg [15:0] dbg_CS;
 reg [15:0] dbg_IP;
 reg [20:0] dbg_IADDR;
 
-/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_CS_probe;
-/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_IP_probe;
-/*(* mark_debug = "true", keep = "true" *)*/ reg [20:0] dbg_IADDR_probe;
+reg [15:0] dbg_CS_probe;
+reg [15:0] dbg_IP_probe;
+reg [20:0] dbg_IADDR_probe;
 //
 //// 复位/中断状态
-/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_SRST      = SRST;
-/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_SINTR     = SINTR;
-/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_IACK      = IACK;
-/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_IRQ       = IRQ;
+wire        dbg_SRST      = SRST;
+wire        dbg_SINTR     = SINTR;
+wire        dbg_IACK      = IACK;
+wire        dbg_IRQ       = IRQ;
 
 //
 //// 内存/端口请求
@@ -1878,18 +1878,18 @@ reg        dbg_IORQ;
     //     （CS=0xF000 且 IP<0xFC00）= 崩点本身；并附"最后一次在代码窗内的 IP + 当时译码的 opcode"
     //     = 肇事指令。开头用 okcnt>=32 做门限，避免上电瞬间的瞬态误触发。
     reg        dbg_boot_seen = 1'b0;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_esc_seen  = 1'b0;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_esc_ip    = 16'd0;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_esc_cs    = 16'd0;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
+    reg        dbg_esc_seen  = 1'b0;
+    reg [15:0] dbg_esc_ip    = 16'd0;
+    reg [15:0] dbg_esc_cs    = 16'd0;
+    reg        dbg_wild_seen = 1'b0; // 第一次离开代码窗
+    reg [15:0] dbg_wild_ip   = 16'd0; // 崩点 IP（<0xFC00）
+    reg [15:0] dbg_wild_pre  = 16'd0; // 崩点前最后一次代码窗内 IP
+    reg [7:0]  dbg_wild_op   = 8'd0;  // 崩点前最后一次代码窗内 opcode
+    reg [15:0] dbg_wild_sp   = 16'd0; // 崩点时的 SP
     // ★ 崩点时的 BX —— 键盘查表正是靠 BX 定位 KeyCode 行, 抓这个最直接
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_bx   = 16'd0;
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
-    /*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
+    reg [15:0] dbg_wild_bx   = 16'd0;
+    reg [15:0] dbg_wild_d1   = 16'd0; // 崩点前最后一拍 DIN
+    reg [15:0] dbg_wild_d2   = 16'd0; // 崩点前倒数第二拍 DIN
     reg [7:0]  dbg_bfe_cnt   = 8'd0;  // 对 0xFFBFE 的数据读次数（预期 3）
     reg        dbg_stale_popret = 1'b0; // pop(0xFFBFC)→ret(0xFFBFE) 读到同一数据
     reg [15:0] dbg_din_h1 = 16'd0;
@@ -1948,7 +1948,7 @@ reg        dbg_IORQ;
         dbg_IP_probe   <= IP;
         dbg_IADDR_probe<= IADDR;
     end
-/*(* mark_debug = "true", keep = "true" *)*/ wire        dbg_WR        = WR;
+wire        dbg_WR        = WR;
 
 // ========================================================================
 // ★★ 2026-10-10（第 112 次）：抓 KeyCode 读指令的现场 —— 定位"j→4"的根因
@@ -1972,11 +1972,11 @@ reg        dbg_IORQ;
 //   dbg_kc_ip   : 读指令的 IP（期望 0xE536 = 映像偏移 0x0536）
 //   dbg_kc_arm  : 置位脉冲，标记"这一拍就是那条读"，用于精确对齐
 // ========================================================================
-/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_kc_bx   = 16'd0;
-/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_kc_din  = 16'd0;
-/*(* mark_debug = "true", keep = "true" *)*/ reg [20:0] dbg_kc_addr = 21'd0;
-/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0] dbg_kc_ip   = 16'd0;
-/*(* mark_debug = "true", keep = "true" *)*/ reg        dbg_kc_arm  = 1'b0;
+reg [15:0] dbg_kc_bx   = 16'd0;
+reg [15:0] dbg_kc_din  = 16'd0;
+reg [20:0] dbg_kc_addr = 21'd0;
+reg [15:0] dbg_kc_ip   = 16'd0;
+reg        dbg_kc_arm  = 1'b0;
 
 // 用总线地址锁定那一拍的数据读。
 // 注意 ADDR 是 **maddr**（21 位，不含 0x08000000 基址）：

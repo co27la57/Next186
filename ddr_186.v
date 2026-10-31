@@ -88,6 +88,7 @@ module system
 	reg FifoStart = 1'b0;	
 	wire displ_on = !(hblnk | vblnk | !FifoStart);
 	wire [17:0]DAC_COLOR;
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	wire [8:0]fifo_wr_used_words;
 	wire AlmostFull;
 	wire AlmostEmpty;
@@ -179,7 +180,9 @@ module system
 //     宽度安全：9'd448 为 9bit，A(17b)+B(8b)-9'd448 → 17bit；A>=0xE000 故 0xDE40>0 无下溢。）
 	localparam [16:0] VGA_GRAPH_ROWCOL = 17'h08000; // ★128th 恢复(B)：作者原值，同上
 	reg [16:0]vga_ddr_row_col = VGA_TEXT_ROWCOL; 
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg s_prog_full;
+	 (* mark_debug = "true", keep = "true" *) // perf probe
 	 reg s_prog_empty;
 	reg s_ddr_rd = 1'b0;
 	reg s_ddr_wr = 1'b0;
@@ -190,6 +193,7 @@ module system
 	//   详见下方 cntrl0_user_command_register 处的 95th 修复注释。
 	reg cache_cmd_done = 1'b0;
 	wire cache_owns = (ddr_wr || ddr_rd) && !cache_cmd_done;   // 96th: real-time request, so cmd/type/address are same-cycle
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg crw = 0;	
 	 reg cache_line_start = 1'b0;   // ★ Task #8：cache 行事务开始脉冲（cache_controller 用它复位 lowaddr）
 	reg s_RS232_DCE_RXD;
@@ -211,8 +215,11 @@ module system
 	wire [31:0]fifo_dout32;
 	wire [15:0]fifo_dout = (vgatext[1] ? hcount_pan[3] : vga13[1] ? hcount_pan[2] : hcount_pan[1]) ? fifo_dout32[31:16] : fifo_dout32[15:0];
 
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg [8:0]vga_ddr_row_count = 0;
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg [2:0]max_read;
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg [5:0]col_counter;      // ★128th3: 5→6 位(仅为了让 VESA 能数到 32)，窄模式语义不变
 	// ★★★ 128th3 (2026-10-30) VESA 专用取指带宽修复 —— 严格只影响 else(VESA) 分支
 	//   一个 16 拍 AXI burst 实发 16×32bit = 64 字节 = 32 个半字，但移植自 16-bit SDRAM
@@ -221,8 +228,10 @@ module system
 	//   VESA 下让一个 burst 吃满 32 个半字 ⇒ 每线 11 个 burst。
 	//   文本/13h/planar: vga_wide=0，三条 wire 各退回原表达式 —— 但注意 128th4 的教训：
 	//   「表达式看着一样」不等于「位宽一样」，见 col_step 处的注释。
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	wire vga_wide = !(vgatext[0] | half[0] | vga13[0] | planar[0]);
 	wire [5:0] col_init = vga_wide ? 6'd31 : {1'b0, max_read, 1'b1};
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	wire       col_ok   = vga_wide ? !col_counter[5] : !col_counter[4];
 	// ★★★ 128th4 (2026-10-30) 修 128th3 引入的**位宽截断**：文本模式步进被算成 0。
 	//   128th3 把步进写成 `vga_wide ? 6'd16 : {1'b0, (max_read + 1'b1)}`。
@@ -239,6 +248,7 @@ module system
 	wire vga_end_frame = vga_ddr_row_count == (v240[0] ? 479 : 399);
 	reg [3:0]vga_repln_count = 0; 
 	wire [3:0]vga_repln = vgatext[0] ? (half[0] ? 7 : 15) : {3'b000, repln_graph[0]};
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg [7:0]vga_lnbytecount = 0; 
 	wire [4:0]vga_lnend = (vgatext[0] | half[0]) ? 6 : (vga13[0] | planar[0]) ? 11 : 22; // ★128th3: VESA 11 burst x 16 字 = 176 字/行
 	reg [11:0]vga_font_counter = 0;
@@ -285,6 +295,7 @@ module system
 	wire [7:0]VGA_INDEX;						  
 	reg [3:0]exline = 4'b0000; 
 	wire vrdon = s_displ_on[~vga_hrzpan];
+    (* mark_debug = "true", keep = "true" *) // perf probe
     reg [7:0] vga_line_reads=0;
     reg vga_line_active=0;
     wire [7:0] vga_line_quota=(vgatext[1] || half[1]) ? 8'd48 :
@@ -303,6 +314,7 @@ module system
         end
     end
 	reg s_vga_endline;
+	(* mark_debug = "true", keep = "true" *) // perf probe
 	reg s_vga_endscanline = 1'b0;
 	reg s_vga_endframe;
 	reg [23:0]sdraddr;
@@ -571,6 +583,7 @@ module system
 	reg [15:0]NMIonIORQ_LO = 16'h0001;
 	reg [15:0]NMIonIORQ_HI = 16'h0000;
 	
+    (* mark_debug = "true", keep = "true" *) // perf probe
     wire [1:0] sys_cmd_ack = ram_cmd_ack;
     wire sys_rd_data_valid = ram_rd_valid;
     wire sys_wr_data_valid = ram_wr_valid;
@@ -633,6 +646,7 @@ module system
     reg [6:0] vga_flush_count=0;
     wire vga_fifo_reset_busy;
 	wire      vb_rise = vb_sync[1] & ~vb_d;
+    (* mark_debug = "true", keep = "true" *) // perf probe
     wire vb_resync=(vga_frame_state!=VGA_FS_RUN) || vb_rise;
     wire vga_fifo_reset_phase=(vga_frame_state==VGA_FS_RESET);
 
@@ -908,13 +922,13 @@ module system
 	 //   laddr=死在哪(物理地址, 可配 devmem 反查) / lport=卡在哪个端口 /
 	 //   halt+ce=真死还是仍在跑 / ios=在空转等 I/O 还是真死。
 	 //   纯探针改动, 不影响功能(按约定不提交)。
-	 (* mark_debug = "true", keep = "true" *) reg [20:0] dbg_cpu_laddr = 21'h0;
-	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_lwr   = 1'b0;
-	 (* mark_debug = "true", keep = "true" *) reg [15:0] dbg_cpu_lport = 16'h0;
-	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_pwr   = 1'b0;
-	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_halt  = 1'b0;
-	 (* mark_debug = "true", keep = "true" *) reg        dbg_cpu_ce    = 1'b0;
-	 (* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_cpu_ios   = 8'h00;
+	 reg [20:0] dbg_cpu_laddr = 21'h0;
+	 reg        dbg_cpu_lwr   = 1'b0;
+	 reg [15:0] dbg_cpu_lport = 16'h0;
+	 reg        dbg_cpu_pwr   = 1'b0;
+	 reg        dbg_cpu_halt  = 1'b0;
+	 reg        dbg_cpu_ce    = 1'b0;
+	 reg [7:0]  dbg_cpu_ios   = 8'h00;
 	reg iorq_d98 = 1'b0;
 
 	// ★★★ 98th-FONT probes（2026-09-27）：回答"字模 RAM 是否被重写、写成了什么"。
@@ -973,7 +987,7 @@ module system
 	//   dbg_vga_rowcnt = 扫描行计数器（L198, 9bit）——与 rowcol 配对，
 	//                    即可还原"第 k 条扫描行读到哪一行"，一眼看出行序是否被重排。
 	reg [9:0]  dbg_vga_lcr     = 10'h0;
-	(* mark_debug = "true", keep = "true" *) reg [16:0] dbg_vga_rowcol  = 17'h0;
+	reg [16:0] dbg_vga_rowcol  = 17'h0;
 	// ★2026-10-10: 摘掉 mark_debug(让 ILA 只留键盘四层探针)。★ 寄存器本身是功能代码,
 	//   在下方 always 块里被赋值, 不能删。
 	reg [8:0]  dbg_vga_rowcnt  = 9'h0;
@@ -982,9 +996,9 @@ module system
 	//   dbg_vga_charrow = 显示侧正在扫的字符行（L192 char_row, 6bit）
 	//   取指侧字符行 = dbg_vga_rowcnt/16。两者之差 = 屏幕相位错位量（"上下对调"的根因候选）。
 	// ★2026-10-10: 摘掉 mark_debug; 寄存器本身是功能代码, 不能删。
-	(* mark_debug = "true", keep = "true" *) reg [9:0]  dbg_vga_vcount  = 10'h0;
+	reg [9:0]  dbg_vga_vcount  = 10'h0;
 	// ★2026-10-10: 摘掉 mark_debug; 寄存器本身是功能代码, 不能删。
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_vga_charrow = 6'h0;
+	reg [5:0]  dbg_vga_charrow = 6'h0;
 
 	// ★★ 第 118 次（2026-10-11）：补齐地址公式的两个缺失量
 	//   上一包已确认：vde=399(25字符行可见) 而 rowcnt=479(480扫描行=30字符行推进)
@@ -1024,32 +1038,32 @@ module system
 	// At dbg_vga_fs / dbg_vga_rowreset_evt this exposes the fetch-side line,
 	// repeat phase, and fine byte phase that the old rowcol-at-charrow probe
 	// could not distinguish. It is observation-only and does not feed VGA.
-	(* mark_debug = "true", keep = "true" *) reg [16:0] dbg_vga_rc_at_cr0 = 17'h0;
+	reg [16:0] dbg_vga_rc_at_cr0 = 17'h0;
 	// ★ 2026-10-12: minimal frame-start phase capture for the FIFO hypothesis.
 	//   These are sampled in clk_sdr when the display-side vcount first reaches 0.
 	//   They answer the board question directly: what FIFO level and fetch-side
 	//   line phase did the display frame actually start with?
-	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_vga_fifo_at_fs = 9'h000;
-	(* mark_debug = "true", keep = "true" *) reg [3:0]  dbg_vga_repln_at_fs = 4'h0;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_vga_lnb_at_fs = 8'h00;
+	reg [8:0]  dbg_vga_fifo_at_fs = 9'h000;
+	reg [3:0]  dbg_vga_repln_at_fs = 4'h0;
+	reg [7:0]  dbg_vga_lnb_at_fs = 8'h00;
 	// CDC return-data probe, sampled in clk_sdr at the same edge that can
 	// accept a VGA halfword into the FIFO.  Encoding is
 	// {ram_rdata[3:0], sys_cmd_ack[1:0], sys_rd_data_valid, crw}.
 	// It distinguishes a valid VGA return from a cache/invalid return while
 	// retaining four data bits to expose duplicate or shifted halfwords.
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_vga_cdc_at_wr = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_vga_fs = 1'b0;
+	reg [7:0]  dbg_vga_cdc_at_wr = 8'h00;
+	reg        dbg_vga_fs = 1'b0;
 	// Frame-start mode/config snapshot.  The paired [1]/[0] bits distinguish
 	// display-side state from fetch-side state at the same clk_sdr sample.
 	// This is observation-only; it does not participate in VGA control.
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_vga_mode_at_fs = 8'h00;
-	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_vga_cfg_at_fs  = 24'h000000;
+	reg [7:0]  dbg_vga_mode_at_fs = 8'h00;
+	reg [23:0] dbg_vga_cfg_at_fs  = 24'h000000;
 	// Same mode packing sampled at the VGA DDR ACK.  The old row-reset mode slot
 	// is reused below for an 8-bit cache/DDR arbitration snapshot.
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_vga_mode_at_ack = 8'h00;
+	reg [7:0] dbg_vga_mode_at_ack = 8'h00;
 	// {s_prog_empty,s_prog_full,crw,cache_cmd_done,ddr_wr,ddr_rd,
 	//  cache_line_start,sys_cmd_ack[0]} at the most recent row-reset event.
-	(* mark_debug = "true", keep = "true" *) reg [7:0] dbg_vga_cache_at_reset = 8'h00;
+	reg [7:0] dbg_vga_cache_at_reset = 8'h00;
 	reg dbg_vga_fs_seen = 1'b0;
 	// ★ 2026-10-12: VGA DDR transaction audit (observation only).
 	//   The frame-start probes above tell us whether the FIFO phase moves.  These
@@ -1058,32 +1072,32 @@ module system
 	//   passed the `!col_counter[4]` write gate in the preceding transaction.
 	//   They are deliberately registered in clk_sdr and do not feed any control
 	//   signal, so the functional VGA path is unchanged.
-	(* mark_debug = "true", keep = "true" *) reg        dbg_vga_ack_pulse = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_vga_addr_at_ack = 24'h0;
-	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_vga_ramaddr_at_ack = 24'h0;
-	(* mark_debug = "true", keep = "true" *) reg [5:0]  dbg_vga_accept_last = 6'h00;
+	reg        dbg_vga_ack_pulse = 1'b0;
+	reg [23:0] dbg_vga_addr_at_ack = 24'h0;
+	reg [23:0] dbg_vga_ramaddr_at_ack = 24'h0;
+	reg [5:0]  dbg_vga_accept_last = 6'h00;
 	// Internal transaction counter; accept_last is the only copy needed in ILA.
 	// Keep this register out of mark_debug so the existing VGA probe set stays
 	// below the documented 200-bit budget.
 	reg [5:0]  dbg_vga_accept_live = 6'h00;
-	(* mark_debug = "true", keep = "true" *) reg [8:0]  dbg_vga_fifo_at_ack = 9'h000;
+	reg [8:0]  dbg_vga_fifo_at_ack = 9'h000;
 	// {s_prog_empty,s_prog_full,crw,cache_cmd_done,ddr_wr,ddr_rd,
 	//  cache_line_start,sys_cmd_ack[0]} at the VGA ACK edge.
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_vga_arb_at_ack = 8'h00;
+	reg [7:0]  dbg_vga_arb_at_ack = 8'h00;
 	// Latched at frame start: a cache fill/write-back ACK occurred during the
 	// preceding display frame.  This reuses the old rd_valid probe bit.
-	(* mark_debug = "true", keep = "true" *) reg        dbg_vga_cache_seen_at_fs = 1'b0;
+	reg        dbg_vga_cache_seen_at_fs = 1'b0;
 	// A level-sensitive `vcount == 0` reset is only safe if the fetch side
 	// reaches s_vga_endscanline once in that display line.  Count the actual
 	// reset-branch hits so the ILA can distinguish one hit from repeated pulls
 	// back to VGA_TEXT_ROWCOL under a different DDR/FIFO phase.
-	(* mark_debug = "true", keep = "true" *) reg        dbg_vga_rowreset_evt = 1'b0;
-	(* mark_debug = "true", keep = "true" *) reg [4:0]  dbg_vga_rowreset_n = 5'h00;
+	reg        dbg_vga_rowreset_evt = 1'b0;
+	reg [4:0]  dbg_vga_rowreset_n = 5'h00;
 	// OPL3 chain probe slots reuse the retired VGA RAM-address/CDC/duplicate
 	// ACK slots. Total static ILA width remains 200 bits.
-	(* mark_debug = "true", keep = "true" *) reg [23:0] dbg_opl3_probe24 = 24'h0;
-	(* mark_debug = "true", keep = "true" *) reg [7:0]  dbg_opl3_probe8  = 8'h0;
-	(* mark_debug = "true", keep = "true" *) reg        dbg_opl3_hit      = 1'b0;
+	reg [23:0] dbg_opl3_probe24 = 24'h0;
+	reg [7:0]  dbg_opl3_probe8  = 8'h0;
+	reg        dbg_opl3_hit      = 1'b0;
 	reg        dbg_vga_cache_seen_live = 1'b0;
 	// Retained for source-level diagnostics; rowcol itself is already exposed
 	// and is the authoritative value at the reset event.

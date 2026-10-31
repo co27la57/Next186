@@ -1271,27 +1271,27 @@ module cache_controller(
 	//                                                 (⇒ 查 cache_addr[]/cache_mem 多路冲突)
 	//    maddr≠0x0FFC1A                             ⇒ 地址生成/流水线滞后，不是 cache 命中问题
 	// ========================================================================
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [`ADDR-1:0] dbg_x_maddr    = 21'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [`SETS-1:0] dbg_x_index   = 5'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [9:0]     dbg_x_tag     = 10'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]     dbg_x_fit     = 4'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]     dbg_x_hit     = 4'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [1:0]     dbg_x_fblk    = 2'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [31:0]    dbg_x_dout    = 32'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [3:0]     dbg_x_dirty   = 4'd0;
-	/*(* mark_debug = "true", keep = "true" *)*/ wire         dbg_x_biosfill = dbg_x_biosfill_c;
-	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_arm     = 1'b0;
+	reg [`ADDR-1:0] dbg_x_maddr    = 21'd0;
+	reg [`SETS-1:0] dbg_x_index   = 5'd0;
+	reg [9:0]     dbg_x_tag     = 10'd0;
+	reg [3:0]     dbg_x_fit     = 4'd0;
+	reg [3:0]     dbg_x_hit     = 4'd0;
+	reg [1:0]     dbg_x_fblk    = 2'd0;
+	reg [31:0]    dbg_x_dout    = 32'd0;
+	reg [3:0]     dbg_x_dirty   = 4'd0;
+	wire         dbg_x_biosfill = dbg_x_biosfill_c;
+	reg          dbg_x_arm     = 1'b0;
 	// ★ 对照基准：同一个字里同时锁住 row16(h, 好键, index15 被 stk_pin 保护)。
 	//   坏键(row20/index16)与好键(row16/index15) 唯一的差别就是 stk_pin 保护与否,
 	//   把两者放在同一次抓包里对照, 就能直接看出 cache 行为的分界。
 	//   row16 = 0x080FFB7A + 16*8 = 0x080FFBFA (maddr 0x0FFBFA)。
-	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_arm_ok  = 1'b0;
+	reg          dbg_x_arm_ok  = 1'b0;
 	// 两行同时被读的间隔计数（用于确认一次按键里是否先后读了 row16 与 row20）
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [15:0]   dbg_x_gap     = 16'd0;
+	reg [15:0]   dbg_x_gap     = 16'd0;
 	// 第 116 次修复验证探针
-	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_s2ok    = 1'b0; // 二段特征已检出(=stage2_ok)
-	/*(* mark_debug = "true", keep = "true" *)*/ reg          dbg_x_romused = 1'b0; // 本拍实际在用 ROM 回填
-	/*(* mark_debug = "true", keep = "true" *)*/ reg [7:0]    dbg_x_stamp   = 8'h00; // 0x0FE000 读回的原始字节
+	reg          dbg_x_s2ok    = 1'b0; // 二段特征已检出(=stage2_ok)
+	reg          dbg_x_romused = 1'b0; // 本拍实际在用 ROM 回填
+	reg [7:0]    dbg_x_stamp   = 8'h00; // 0x0FE000 读回的原始字节
 	// 修复效果判定：dbg_x_arm 那一拍若 dbg_x_dout==0x246A 即为修复成功
 
 	always @(posedge clk) begin

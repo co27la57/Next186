@@ -276,6 +276,9 @@ module top_zynq7010 (
     reg [3:0]  state;             // ★ 实验探针：写 FSM 状态
     reg [3:0]  idle_cnt;
     reg [31:0] latched_rdata;
+    // perf/read-2t: 第二级缓冲, 让 PUSH 期间也能收下一 beat
+    reg [31:0] rd_next;
+    reg        rd_next_valid, rd_next_last;
     (* mark_debug = "true", keep = "true" *) // perf probe
     reg        rlast_latched;
     reg [4:0]  w_burst_cnt;       // ★ 实验探针：第几个 32-bit 字（0..15）
@@ -291,6 +294,9 @@ module top_zynq7010 (
             main_awvalid  <= 1'b0;
             main_wvalid   <= 1'b0;
             main_rready   <= 1'b0;
+            rd_next       <= 32'd0;
+            rd_next_valid <= 1'b0;
+            rd_next_last  <= 1'b0;
             main_bready   <= 1'b0;
             ram_cmd_ack   <= 2'b00;
             timeout_cnt   <= 32'd0;
@@ -351,19 +357,46 @@ module top_zynq7010 (
                             state        <= R_WAIT;
                         end
                     end
+                    // ★ perf/read-2t (2026-10-31): 读数据通路 4 拍/beat -> 2 拍/beat
+                    //   原实现: R_WAIT 置 rready -> 下一拍才握手 -> PUSH_0/PUSH_1 推两个半字
+                    //           => 每 beat 4 拍 (ILA 实测 2xR_WAIT + PUSH_0 + PUSH_1)。
+                    //   本版: PUSH_0 期间保持 rready 把下一 beat 收进 rd_next, PUSH_1 换缓冲
+                    //         => 2 拍/beat (每拍仍推一个半字, 节拍不变)。
+                    //   消费侧完全不变: ram_rdata/ram_rd_valid 仍是每拍一个 16 位半字、低半在前。
+                    //   存储器跟不上(rvalid 迟到)时自动退回 R_WAIT 等数据, 不会比原版差。
+                    //   rd_next 只在 PUSH_0 写、PUSH_1 读, 无同拍读写冲突; 收到才置 valid, 不会溢出。
                     R_WAIT: begin
-                        main_rready <= 1'b1;
+                        main_rready   <= 1'b1;
+                        rd_next_valid <= 1'b0;
                         if (m_axi_rvalid && main_rready) begin
                             latched_rdata <= m_axi_rdata;
                             rlast_latched <= m_axi_rlast;
-                            main_rready   <= 1'b0;
                             state         <= R_PUSH_0;
                         end
                     end
-                    R_PUSH_0: state <= R_PUSH_1;
+                    R_PUSH_0: begin
+                        main_rready <= 1'b0;                    // 下一拍(PUSH_1)不接收
+                        if (m_axi_rvalid && main_rready && !rlast_latched) begin
+                            rd_next       <= m_axi_rdata;       // 收下一 beat 到第二缓冲
+                            rd_next_last  <= m_axi_rlast;
+                            rd_next_valid <= 1'b1;
+                        end
+                        state <= R_PUSH_1;
+                    end
                     R_PUSH_1: begin
-                        if (rlast_latched) state <= IDLE;
-                        else               state <= R_WAIT;
+                        if (rd_next_valid) begin
+                            latched_rdata <= rd_next;           // 换缓冲
+                            rlast_latched <= rd_next_last;
+                            rd_next_valid <= 1'b0;
+                            main_rready   <= ~rd_next_last;     // 最后一 beat 就别再要了
+                            state         <= R_PUSH_0;
+                        end else if (rlast_latched) begin
+                            main_rready <= 1'b0;
+                            state       <= IDLE;
+                        end else begin
+                            main_rready <= 1'b1;                // 存储器没跟上, 回去等
+                            state       <= R_WAIT;
+                        end
                     end
 
                     W_ISSUE: begin
